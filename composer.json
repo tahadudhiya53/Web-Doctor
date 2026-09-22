@@ -1,0 +1,72 @@
+{
+    "name": "tahadudhiya53/craft-web-doctor",
+    "description": "A diagnostic and maintenance platform for Craft CMS.",
+    "type": "craft-plugin",
+    "version": "1.0.0",
+    "license": "proprietary",
+    "keywords": [
+        "craft",
+        "craftcms",
+        "craft-plugin",
+        "diagnostics",
+        "maintenance",
+        "health",
+        "web-doctor"
+    ],
+    "authors": [
+        {
+            "name": "Taha Dudhiya"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/tahadudhiya53/Web-Doctor/issues",
+        "source": "https://github.com/tahadudhiya53/Web-Doctor",
+        "docs": "https://github.com/tahadudhiya53/Web-Doctor#readme",
+        "rss": "https://github.com/tahadudhiya53/Web-Doctor/releases.atom"
+    },
+    "require": {
+        "php": ">=8.2.0",
+        "craftcms/cms": "^5.0.0"
+    },
+    "require-dev": {
+        "craftcms/ecs": "dev-main",
+        "craftcms/phpstan": "dev-main",
+        "phpstan/phpstan": "^2.2",
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Tahadudhiya\\WebDoctor\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tahadudhiya\\WebDoctor\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "class": "Tahadudhiya\\WebDoctor\\WebDoctor",
+        "handle": "web-doctor",
+        "name": "Web Doctor",
+        "developer": "Taha Dudhiya",
+        "documentationUrl": "https://github.com/tahadudhiya53/Web-Doctor#readme",
+        "changelogUrl": "https://raw.githubusercontent.com/tahadudhiya53/Web-Doctor/main/CHANGELOG.md"
+    },
+    "scripts": {
+        "check-cs": "@php -d error_reporting=6143 vendor/bin/ecs check --ansi",
+        "fix-cs": "@php -d error_reporting=6143 vendor/bin/ecs check --ansi --fix",
+        "phpstan": "@php vendor/bin/phpstan analyse --no-progress --memory-limit=1G",
+        "test": "phpunit",
+        "test-integration": "@php ../../vendor/bin/phpunit -c phpunit.integration.xml.dist"
+    },
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.2.0"
+        },
+        "allow-plugins": {
+            "yiisoft/yii2-composer": true,
+            "craftcms/plugin-installer": true
+        }
+    }
+}

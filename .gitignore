@@ -1,0 +1,10 @@
+/vendor/
+composer.phar
+.phpunit.result.cache
+/.phpunit.cache/
+.DS_Store
+
+# Environment-specific files never belong in a plugin repository.
+.env
+.env.*
+!.env.example
