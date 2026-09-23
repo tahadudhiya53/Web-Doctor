@@ -57,7 +57,7 @@
         "fix-cs": "@php -d error_reporting=6143 vendor/bin/ecs check --ansi --fix",
         "phpstan": "@php vendor/bin/phpstan analyse --no-progress --memory-limit=1G",
         "test": "phpunit",
-        "test-integration": "@php ../../vendor/bin/phpunit -c phpunit.integration.xml.dist"
+        "test-integration": "@php vendor/bin/phpunit -c phpunit.integration.xml.dist"
     },
     "config": {
         "sort-packages": true,
