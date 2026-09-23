@@ -18,6 +18,13 @@ class Permissions extends Component
     /** @var string Reaching Web Doctor at all. Everything Web Doctor gains nests under it. */
     public const VIEW = 'webDoctor:view';
 
+    /**
+     * @var string Setting diagnostics running. Separate from {@see self::VIEW} because reading
+     * what a previous run concluded costs nothing, while starting a run spends the site's time
+     * on demand — so being allowed to look is not the same as being allowed to act.
+     */
+    public const RUN = 'webDoctor:runDiagnostics';
+
     public function register(): void
     {
         Event::on(UserPermissions::class, UserPermissions::EVENT_REGISTER_PERMISSIONS, function(RegisterUserPermissionsEvent $event) {
@@ -36,6 +43,11 @@ class Permissions extends Component
         return [
             self::VIEW => [
                 'label' => Craft::t('web-doctor', 'View Web Doctor'),
+                'nested' => [
+                    self::RUN => [
+                        'label' => Craft::t('web-doctor', 'Run diagnostics'),
+                    ],
+                ],
             ],
         ];
     }
@@ -43,6 +55,11 @@ class Permissions extends Component
     public function canView(): bool
     {
         return $this->can(self::VIEW);
+    }
+
+    public function canRun(): bool
+    {
+        return $this->can(self::RUN);
     }
 
     /**

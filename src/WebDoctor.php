@@ -10,13 +10,19 @@ use craft\events\RegisterUrlRulesEvent;
 use craft\web\UrlManager;
 use Tahadudhiya\WebDoctor\console\controllers\WebDoctorController;
 use Tahadudhiya\WebDoctor\models\Settings;
+use Tahadudhiya\WebDoctor\services\DiagnosticEngine;
+use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\services\Permissions;
+use Tahadudhiya\WebDoctor\services\Runs;
 use yii\base\Event;
 
 /**
  * Web Doctor — diagnostics and maintenance for Craft CMS.
  *
+ * @property-read DiagnosticEngine $diagnosticEngine
+ * @property-read Diagnostics $diagnostics
  * @property-read Permissions $permissions
+ * @property-read Runs $runs
  * @property-read Settings $settings
  */
 class WebDoctor extends Plugin
@@ -38,7 +44,16 @@ class WebDoctor extends Plugin
     {
         return [
             'components' => [
+                'diagnostics' => [
+                    'class' => Diagnostics::class,
+                    // The registry the plugin hands out is the one that holds Web Doctor's own
+                    // checks. A registry built directly stays empty, so a caller running a set
+                    // of its own gets exactly that set.
+                    'includeCoreDiagnostics' => true,
+                ],
+                'diagnosticEngine' => ['class' => DiagnosticEngine::class],
                 'permissions' => ['class' => Permissions::class],
+                'runs' => ['class' => Runs::class],
             ],
         ];
     }
@@ -69,9 +84,42 @@ class WebDoctor extends Plugin
         return $item;
     }
 
+    /**
+     * Every diagnostic Web Doctor knows about, its own and any a plugin has contributed.
+     */
+    public function getDiagnostics(): Diagnostics
+    {
+        return $this->get('diagnostics');
+    }
+
+    /**
+     * Runs diagnostics. Kept apart from the registry so that holding the list of checks and
+     * executing them stay separate concerns.
+     */
+    public function getDiagnosticEngine(): DiagnosticEngine
+    {
+        /** @var DiagnosticEngine $engine */
+        $engine = $this->get('diagnosticEngine');
+
+        // Tied to this plugin instance's registry rather than to whichever instance happens to
+        // be the installed one.
+        $engine->registry ??= $this->getDiagnostics();
+
+        return $engine;
+    }
+
     public function getPermissions(): Permissions
     {
         return $this->get('permissions');
+    }
+
+    /**
+     * Where a finished run is kept, so the control panel can show what was concluded without
+     * concluding it again.
+     */
+    public function getRuns(): Runs
+    {
+        return $this->get('runs');
     }
 
     /**

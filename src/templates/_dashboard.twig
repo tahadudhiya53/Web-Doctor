@@ -1,0 +1,284 @@
+{# The dashboard itself, kept apart from the control panel shell it is shown in so that what
+   Web Doctor renders can be rendered — and asserted against — on its own. #}
+{% import "_includes/forms" as forms %}
+
+{% set run = dashboard.run %}
+
+{% set depthOptions = [] %}
+{% for depth in depths %}
+    {% set depthOptions = depthOptions|merge([{ label: depth.label(), value: depth.value }]) %}
+{% endfor %}
+
+{# `canRun` doubles as "may this row be selected": only somebody who can run needs a checkbox. #}
+{% macro resultRows(rows, canRun, hasRun) %}
+    <table class="data fullwidth wd-results">
+        <thead>
+            <tr>
+                {% if canRun %}
+                    <th scope="col" class="wd-col-select"><span class="wd-visually-hidden">{{ "Include in the next run"|t('web-doctor') }}</span></th>
+                {% endif %}
+                <th scope="col">{{ "Check"|t('web-doctor') }}</th>
+                <th scope="col" class="wd-col-narrow">{{ "Status"|t('web-doctor') }}</th>
+                <th scope="col" class="wd-col-narrow">{{ "Severity"|t('web-doctor') }}</th>
+                <th scope="col" class="wd-col-narrow">{{ "Last checked"|t('web-doctor') }}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+                {% set result = row.result %}
+                {% set checkboxId = 'wd-check-' ~ row.id|replace({ '.': '-' }) %}
+                <tr>
+                    {% if canRun %}
+                        <td class="wd-col-select">
+                            <input type="checkbox" id="{{ checkboxId }}" name="diagnostics[]" value="{{ row.id }}">
+                            <label class="wd-visually-hidden" for="{{ checkboxId }}">
+                                {{ "Include {name} in the next run"|t('web-doctor', { name: row.name }) }}
+                            </label>
+                        </td>
+                    {% endif %}
+                    <td class="wd-col-detail">
+                        <div class="wd-result__name">{{ row.name }}</div>
+                        <div class="wd-result__id"><code>{{ row.id }}</code></div>
+                        {% if result %}
+                            <p class="wd-result__summary">{{ result.summary }}</p>
+                            {% if result.description %}
+                                <p class="wd-result__note light">{{ result.description }}</p>
+                            {% endif %}
+                            {% if result.recommendation %}
+                                <p class="wd-result__note"><strong>{{ "Recommended"|t('web-doctor') }}:</strong> {{ result.recommendation }}</p>
+                            {% endif %}
+                            {% if result.hasEvidence() %}
+                                <div class="wd-result__evidence">
+                                    <strong>{{ "Evidence"|t('web-doctor') }}:</strong>
+                                    {%- for item in result.evidence %}
+                                        {{ item.type.label() }} — {{ item.label }}{{ not loop.last ? ';' }}
+                                    {%- endfor %}
+                                </div>
+                            {% endif %}
+                        {% else %}
+                            <p class="wd-result__summary light">
+                                {{- hasRun
+                                    ? "Not included in the last run."|t('web-doctor')
+                                    : "Not yet run."|t('web-doctor') -}}
+                            </p>
+                        {% endif %}
+                    </td>
+                    <td class="wd-col-narrow">
+                        {% if result %}
+                            <span class="wd-pill wd-pill--{{ result.status.value }}">{{ result.status.label() }}</span>
+                        {% else %}
+                            <span class="wd-pill wd-pill--none">{{ "None"|t('web-doctor') }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="wd-col-narrow">
+                        {% if result %}
+                            <span class="wd-pill wd-pill--severity wd-pill--severity-{{ result.severity().value }}">{{ result.severity().label() }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="wd-col-narrow">
+                        {% if result and result.finishedAt %}
+                            <div class="wd-result__timing">{{ result.finishedAt|datetime('short') }}</div>
+                            <div class="wd-result__timing">{{ result.durationMs|number_format(1) }}&thinsp;ms</div>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endmacro %}
+
+{% import _self as wd %}
+
+{% if failure %}
+    <div class="pane wd-failure" role="alert">
+        <p><strong>{{ failure }}</strong></p>
+    </div>
+{% endif %}
+
+<form method="post" accept-charset="UTF-8" data-wd-run-form>
+    {{ csrfInput() }}
+    {{ actionInput('web-doctor/overview/run') }}
+    {{ redirectInput('web-doctor') }}
+
+    {% if not dashboard.hasDiagnostics() %}
+        <div class="pane wd-empty">
+            <p>{{ "No checks are registered, so there is nothing to run."|t('web-doctor') }}</p>
+            <p class="light">{{ "Checks come from Web Doctor itself and from any plugin that contributes them."|t('web-doctor') }}</p>
+        </div>
+    {% else %}
+        {% if canRun %}
+            <div class="pane">
+                <div class="wd-toolbar">
+                    {{ forms.selectField({
+                        label: "Depth"|t('web-doctor'),
+                        instructions: "How far each check should go."|t('web-doctor'),
+                        id: 'wd-depth',
+                        name: 'depth',
+                        options: depthOptions,
+                        value: 'normal',
+                    }) }}
+                    <button type="submit" class="btn submit" name="all" value="1">{{ "Run all checks"|t('web-doctor') }}</button>
+                    <button type="submit" class="btn" name="selected" value="1">{{ "Run selected checks"|t('web-doctor') }}</button>
+                </div>
+                <p class="wd-run-status" role="status" aria-live="polite" data-wd-run-status hidden>
+                    {{ "Running diagnostics… this page will reload when they finish."|t('web-doctor') }}
+                </p>
+                <p class="light wd-toolbar__note">
+                    {{ "Checks run only when asked for, in this request. Opening this page reports what the last run found and runs nothing."|t('web-doctor') }}
+                </p>
+            </div>
+        {% endif %}
+
+        {% if not dashboard.hasRun() %}
+            <div class="pane wd-empty">
+                <p>{{ "No checks have been run on this site yet."|t('web-doctor') }}</p>
+                <p class="light">
+                    {% if canRun %}
+                        {{ "Run them to find out how this installation is doing."|t('web-doctor') }}
+                    {% else %}
+                        {{ "Results will appear here once somebody with permission to run them has done so."|t('web-doctor') }}
+                    {% endif %}
+                </p>
+            </div>
+        {% else %}
+            <div class="pane">
+                <div class="wd-summary">
+                    {% if dashboard.describesHealth() %}
+                        <div class="wd-score">
+                            <div class="wd-score__value">{{ health.score }}</div>
+                            <div class="wd-score__max">{{ "out of {max}"|t('web-doctor', { max: maxScore }) }}</div>
+                            <div class="wd-score__caption">{{ "Health score"|t('web-doctor') }}</div>
+                        </div>
+                    {% else %}
+                        <div class="wd-score">
+                            <div class="wd-score__value" aria-hidden="true">&mdash;</div>
+                            <div class="wd-score__caption">
+                                {{ "No score: this run covered {covered} of {total} registered checks."|t('web-doctor', {
+                                    covered: dashboard.coveredCount,
+                                    total: dashboard.registeredCount(),
+                                }) }}
+                            </div>
+                        </div>
+                    {% endif %}
+
+                    <ul class="wd-counts">
+                        <li class="wd-count wd-count--critical">
+                            <span class="wd-count__value">{{ health.severityCounts.critical ?? 0 }}</span>
+                            <span class="wd-count__label">{{ "Critical"|t('web-doctor') }}</span>
+                        </li>
+                        <li class="wd-count wd-count--high">
+                            <span class="wd-count__value">{{ health.severityCounts.high ?? 0 }}</span>
+                            <span class="wd-count__label">{{ "High"|t('web-doctor') }}</span>
+                        </li>
+                        <li class="wd-count wd-count--warning">
+                            <span class="wd-count__value">{{ health.counts.warning ?? 0 }}</span>
+                            <span class="wd-count__label">{{ "Warnings"|t('web-doctor') }}</span>
+                        </li>
+                        <li class="wd-count">
+                            <span class="wd-count__value">{{ health.counts.fail ?? 0 }}</span>
+                            <span class="wd-count__label">{{ "Failed"|t('web-doctor') }}</span>
+                        </li>
+                        <li class="wd-count wd-count--pass">
+                            <span class="wd-count__value">{{ health.counts.pass ?? 0 }}</span>
+                            <span class="wd-count__label">{{ "Passed"|t('web-doctor') }}</span>
+                        </li>
+                        <li class="wd-count">
+                            <span class="wd-count__value">{{ health.counts.error ?? 0 }}</span>
+                            <span class="wd-count__label">{{ "Errors"|t('web-doctor') }}</span>
+                        </li>
+                        <li class="wd-count">
+                            <span class="wd-count__value">{{ health.counts.unknown ?? 0 }}</span>
+                            <span class="wd-count__label">{{ "Unknown"|t('web-doctor') }}</span>
+                        </li>
+                        <li class="wd-count">
+                            <span class="wd-count__value">{{ health.counts.skipped ?? 0 }}</span>
+                            <span class="wd-count__label">{{ "Skipped"|t('web-doctor') }}</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <hr>
+
+                <dl class="wd-meta">
+                    <div><dt>{{ "Last run"|t('web-doctor') }}</dt><dd>{{ run.startedAt|datetime('short') }}</dd></div>
+                    <div><dt>{{ "Duration"|t('web-doctor') }}</dt><dd>{{ (run.durationMs / 1000)|number_format(2) }}s</dd></div>
+                    <div><dt>{{ "Checks in run"|t('web-doctor') }}</dt><dd>{{ run.count() }}</dd></div>
+                    <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ run.context.environment }}</dd></div>
+                    <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ siteLabel }}</dd></div>
+                    <div><dt>{{ "Execution mode"|t('web-doctor') }}</dt><dd>{{ run.context.mode.label() }}</dd></div>
+                    <div><dt>{{ "Depth"|t('web-doctor') }}</dt><dd>{{ run.context.depth.label() }}</dd></div>
+                    <div><dt>{{ "Run ID"|t('web-doctor') }}</dt><dd><code>{{ run.id() }}</code></dd></div>
+                </dl>
+            </div>
+
+            {% if dashboard.describesHealth() %}
+                <details class="pane wd-explainer">
+                    <summary>{{ "How this score was calculated"|t('web-doctor') }}</summary>
+                    <p class="light">
+                        {{ "This is Web Doctor’s own deterministic diagnostic score, not a measurement or a probability. Every run starts at {max}. Each result that leaves a question open — a warning, a failure, a check that errored, a check that could not tell — subtracts the weight of its severity. Skipped checks and passes subtract nothing, and the score never falls below zero."|t('web-doctor', { max: maxScore }) }}
+                    </p>
+                    <table class="data wd-weights">
+                        <caption class="wd-visually-hidden">{{ "What each severity subtracts"|t('web-doctor') }}</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">{{ "Severity"|t('web-doctor') }}</th>
+                                <th scope="col">{{ "Penalty"|t('web-doctor') }}</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for severity, penalty in weights %}
+                                <tr>
+                                    <td>{{ severity }}</td>
+                                    <td>{{ penalty }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+
+                    {% if health.contributions|length %}
+                        <table class="data wd-weights wd-weights--contributions">
+                            <caption class="wd-visually-hidden">{{ "What each check subtracted"|t('web-doctor') }}</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">{{ "Check"|t('web-doctor') }}</th>
+                                    <th scope="col">{{ "Status"|t('web-doctor') }}</th>
+                                    <th scope="col">{{ "Severity"|t('web-doctor') }}</th>
+                                    <th scope="col">{{ "Penalty"|t('web-doctor') }}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for contribution in health.contributions %}
+                                    <tr>
+                                        <td><code>{{ contribution.diagnosticId }}</code></td>
+                                        <td>{{ contribution.status }}</td>
+                                        <td>{{ contribution.severity }}</td>
+                                        <td>&minus;{{ contribution.penalty }}</td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    {% else %}
+                        <p class="light">{{ "Nothing in this run reduced the score."|t('web-doctor') }}</p>
+                    {% endif %}
+                </details>
+            {% endif %}
+        {% endif %}
+
+        {% for group in dashboard.byCategory() %}
+            <div class="pane">
+                <h2>{{ group.category.label() }}</h2>
+                {{ wd.resultRows(group.rows, canRun, dashboard.hasRun()) }}
+            </div>
+        {% endfor %}
+    {% endif %}
+</form>
+
+{% if dashboard.hasStaleResults() %}
+    <div class="pane wd-stale">
+        <h2>{{ "No longer registered"|t('web-doctor') }}</h2>
+        <p class="light">
+            {{ "{count, plural, =1{One check} other{# checks}} in the last run no longer exist — usually because the plugin that contributed {count, plural, =1{it} other{them}} has been removed. {count, plural, =1{Its result is} other{Their results are}} kept here for reference and {count, plural, =1{does} other{do}} not count toward this installation’s health score or its counts."|t('web-doctor', { count: dashboard.staleCount() }) }}
+        </p>
+        {{ wd.resultRows(dashboard.staleRows, false, dashboard.hasRun()) }}
+    </div>
+{% endif %}

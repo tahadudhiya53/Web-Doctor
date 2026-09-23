@@ -1,11 +1,5 @@
 {% extends "_layouts/cp" %}
 
 {% block content %}
-    <p>{{ "Web Doctor is installed and running."|t('web-doctor') }}</p>
-    <p class="light">
-        {{ "Version {version}, schema version {schemaVersion}."|t('web-doctor', {
-            version: version,
-            schemaVersion: schemaVersion,
-        }) }}
-    </p>
+    {% include "web-doctor/_dashboard" %}
 {% endblock %}
