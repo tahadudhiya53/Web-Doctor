@@ -4,17 +4,23 @@ namespace Tahadudhiya\WebDoctor\Tests\integration;
 
 use Craft;
 use craft\console\Application as ConsoleApplication;
+use craft\elements\User;
 use craft\web\View;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\WebDoctor\console\controllers\WebDoctorController;
 use Tahadudhiya\WebDoctor\models\Settings;
 use Tahadudhiya\WebDoctor\services\Permissions;
+use Tahadudhiya\WebDoctor\Tests\_support\TestUser;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use yii\console\ExitCode;
 
 /**
  * Boots Web Doctor inside a real Craft application, which is the only place the plugin's
- * bootstrap, components and settings can be shown to actually hold together.
+ * bootstrap, components, settings and access model can be shown to actually hold together.
+ *
+ * Who the controller lets in is asserted where the controller is driven, in the dashboard tests.
+ * What is here is the answer the permission service gives about a real identity, and what the
+ * control panel navigation does with it.
  */
 class InstallationTest extends TestCase
 {
@@ -31,6 +37,31 @@ class InstallationTest extends TestCase
             'version' => '1.0.0',
             'developer' => 'Taha Dudhiya',
         ]);
+    }
+
+    protected function tearDown(): void
+    {
+        Craft::$app->getUser()->setIdentity(null);
+
+        parent::tearDown();
+    }
+
+    /**
+     * Craft answers `can()` from the database, which needs a saved user, and this installation
+     * is a Solo licence that refuses to create a second one — so the permissions are stated and
+     * everything under test runs exactly as it does in production.
+     *
+     * @param string[] $permissions
+     */
+    private function signIn(bool $admin, array $permissions = []): User
+    {
+        $user = new TestUser();
+        $user->admin = $admin;
+        $user->grantedPermissions = $permissions;
+
+        Craft::$app->getUser()->setIdentity($user);
+
+        return $user;
     }
 
     public function testCraftIsRunning(): void
@@ -103,6 +134,7 @@ class InstallationTest extends TestCase
         // Loading compiles the template and everything it extends, so a broken tag or an
         // unknown filter fails here rather than in front of a user.
         self::assertSame('web-doctor/_index', $view->getTwig()->load('web-doctor/_index')->getTemplateName());
+        self::assertSame('web-doctor/_dashboard', $view->getTwig()->load('web-doctor/_dashboard')->getTemplateName());
         self::assertSame('web-doctor/_settings', $view->getTwig()->load('web-doctor/_settings')->getTemplateName());
     }
 
@@ -129,9 +161,35 @@ class InstallationTest extends TestCase
         self::assertSame(ExitCode::OK, $controller->actionStatus());
     }
 
-    public function testTheControlPanelSectionIsHiddenFromUsersWhoMayNotSeeIt(): void
+    public function testOnlyAnAdminOrSomebodyHoldingThePermissionMayView(): void
     {
-        // No user is signed in during a console run, so this is the unauthorised case.
+        $this->signIn(admin: true);
+        self::assertTrue($this->plugin->getPermissions()->canView());
+
+        $this->signIn(admin: false, permissions: [Permissions::VIEW]);
+        self::assertTrue($this->plugin->getPermissions()->canView());
+
+        $this->signIn(admin: false, permissions: ['someOtherPlugin:doThing']);
+        self::assertFalse($this->plugin->getPermissions()->canView());
+
+        // A request with no identity — a console command, a logged-out visitor — never passes.
+        Craft::$app->getUser()->setIdentity(null);
+        self::assertFalse($this->plugin->getPermissions()->canView());
+    }
+
+    public function testTheControlPanelSectionFollowsTheViewPermissionAndTheConfiguredName(): void
+    {
+        $this->signIn(admin: false, permissions: [Permissions::VIEW]);
+        $item = $this->plugin->getCpNavItem();
+
+        self::assertIsArray($item);
+        self::assertSame('Web Doctor', $item['label']);
+        self::assertSame('web-doctor', $item['url']);
+
+        $this->plugin->getSettings()->pluginName = 'Site Health';
+        self::assertSame('Site Health', $this->plugin->getCpNavItem()['label'] ?? null);
+
+        $this->signIn(admin: false);
         self::assertNull($this->plugin->getCpNavItem());
     }
 
