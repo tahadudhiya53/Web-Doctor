@@ -1,5 +1,6 @@
 {# The dashboard itself, kept apart from the control panel shell it is shown in so that what
    Web Doctor renders can be rendered — and asserted against — on its own. #}
+
 {% import "_includes/forms" as forms %}
 
 {% set run = dashboard.run %}
@@ -11,6 +12,8 @@
 
 {# `canRun` doubles as "may this row be selected": only somebody who can run needs a checkbox. #}
 {% macro resultRows(rows, canRun, hasRun) %}
+    {% import "web-doctor/_macros" as shared %}
+    <div class="wd-table-scroll">
     <table class="data fullwidth wd-results">
         <thead>
             <tr>
@@ -40,18 +43,18 @@
                         <div class="wd-result__name">{{ row.name }}</div>
                         <div class="wd-result__id"><code>{{ row.id }}</code></div>
                         {% if result %}
-                            <p class="wd-result__summary">{{ result.summary }}</p>
+                            <p class="wd-result__summary">{{ shared.text(result.summary) }}</p>
                             {% if result.description %}
-                                <p class="wd-result__note light">{{ result.description }}</p>
+                                <p class="wd-result__note light">{{ shared.text(result.description) }}</p>
                             {% endif %}
                             {% if result.recommendation %}
-                                <p class="wd-result__note"><strong>{{ "Recommended"|t('web-doctor') }}:</strong> {{ result.recommendation }}</p>
+                                <p class="wd-result__note"><strong>{{ "Recommended"|t('web-doctor') }}:</strong> {{ shared.text(result.recommendation) }}</p>
                             {% endif %}
                             {% if result.hasEvidence() %}
                                 <div class="wd-result__evidence">
                                     <strong>{{ "Evidence"|t('web-doctor') }}:</strong>
                                     {%- for item in result.evidence %}
-                                        {{ item.type.label() }} — {{ item.label }}{{ not loop.last ? ';' }}
+                                        {{ item.type.label() }} — {{ shared.text(item.label) }}{{ not loop.last ? ';' }}
                                     {%- endfor %}
                                 </div>
                             {% endif %}
@@ -85,6 +88,7 @@
             {% endfor %}
         </tbody>
     </table>
+    </div>
 {% endmacro %}
 
 {% import _self as wd %}

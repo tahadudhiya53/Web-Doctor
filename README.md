@@ -2,7 +2,9 @@
 
 A diagnostic plugin for Craft CMS. It runs a set of read-only checks over an installation — Craft,
 PHP, the database, plugins, the queue, storage, mail and configuration — and reports what each one
-found, with the evidence behind it, on a dashboard in the control panel.
+found, with the evidence behind it, on a dashboard in the control panel. Problems that persist are
+tracked as issues, so the same failure found on Monday and again on Friday is one thing with a
+history rather than two reports.
 
 > **Early development.** This README documents only what the plugin does today.
 
@@ -11,10 +13,19 @@ found, with the evidence behind it, on a dashboard in the control panel.
 - **Health dashboard** in the control panel, grouped by category, showing each check's status,
   severity, summary, evidence summary, timestamp and duration.
 - **A health score** with the weights and per-check penalties that produced it shown beside it.
+- **An Issue Center** that turns warnings and failures into issues which persist across runs,
+  deduplicated by a stable fingerprint, with first seen, last seen, how many times, and a history
+  of what has happened to each one.
+- **Issues that resolve themselves from evidence** — an issue closes when the check that raised it
+  runs again and no longer reports the problem, never because somebody pressed a button.
+- **Evidence kept behind every issue** — the facts each check recorded, attributed to the run,
+  environment and site they were gathered in, stored once per distinct fact however many runs see
+  it, and inspectable on the issue's page with every withheld value clearly marked.
 - **Manual runs** — every check or a selection of them, at a chosen depth. Opening the dashboard
   runs nothing.
 - **Diagnostic depth** (shallow / normal / deep) so a run can be bounded.
-- **Two permissions**, so being allowed to read results is separate from being allowed to run.
+- **Five permissions**, so reading results, running checks, reading issues, changing them and
+  reading what their evidence contains are each granted separately.
 - **Environment- and site-scoped results**, so one environment's answers are never shown as
   another's.
 - **`php craft webdoctor/status`** for confirming an installation from a script.
@@ -59,6 +70,9 @@ composer require tahadudhiya53/craft-web-doctor
 php craft plugin/install web-doctor
 ```
 
+Installing creates the three tables the Issue Center uses. Uninstalling drops them and leaves
+nothing else behind.
+
 ## Usage
 
 1. Open **Web Doctor** in the control panel. It shows what the last run concluded — opening it
@@ -68,7 +82,8 @@ php craft plugin/install web-doctor
 4. Read the results. The health score sits at the top, with **How this score was calculated**
    beneath it listing the weights and what each check subtracted.
 
-Checks run in the request the form submits, so a run takes as long as the checks take.
+Checks run in the request the form submits, so a run takes as long as the checks take. Every
+warning and failure the run reports is recorded in the Issue Center at the same time.
 
 Settings live at **Settings → Plugins → Web Doctor** — one setting, the name the control panel
 calls Web Doctor — and can be overridden from a `config/web-doctor.php` file:
@@ -89,10 +104,22 @@ Under a **Web Doctor** heading in a user group's permissions:
 |---|---|---|
 | View Web Doctor | `webDoctor:view` | Reaching Web Doctor in the control panel |
 | Run diagnostics | `webDoctor:runDiagnostics` | Setting checks running from the dashboard |
+| View issues | `webDoctor:viewIssues` | Reading the Issue Center |
+| Manage issues | `webDoctor:manageIssues` | Changing where an issue stands |
+| View evidence | `webDoctor:viewEvidence` | Reading what an issue's evidence contains |
 
-Running is nested under viewing and checked separately, because reading what a previous run
-concluded costs nothing while starting a run spends the site's time on demand. Admins pass, as
-they do elsewhere in Craft.
+A non-admin also needs Craft's own **Access Web Doctor** permission (under "Access the control
+panel") to reach the section at all.
+
+Each is nested under the one it depends on and checked separately — "Manage issues" and "View
+evidence" both sit under "View issues". Reading what a previous run concluded costs nothing while
+starting a run spends the site's time on demand; an issue carries decisions — that something is
+being investigated, that something will not be acted on — which is not everybody's to record
+against a team's installation; and evidence carries the internals a problem was found in — file
+paths, stack traces, database and queue errors — which somebody following an issue does not
+necessarily need to see. Without "View evidence", a reader still sees what kind of evidence an
+issue rests on. Admins pass, as they do
+elsewhere in Craft.
 
 ## Running checks from code
 
@@ -170,6 +197,102 @@ Notes worth knowing:
   `critical`). They are independent — `fail` + `low` is an ordinary result, and `critical` is
   never a status.
 
+## The Issue Center
+
+**Web Doctor → Issues** lists the problems that have been found, filtered by status, severity,
+check, site, environment and when they were last seen, and sorted by any of those. Each issue has
+a page of its own showing what the check reported, what evidence it rests on, where it came from,
+and everything that has happened to it.
+
+### What becomes an issue
+
+A `warning` or a `fail` — the two results that say something about the site is wrong. A check that
+`error`ed or returned `unknown` does not become an issue. Both count against the health score,
+because an unanswered question is not a clean bill of health, but neither asserts that a problem
+exists, and a list of problems that may not be there is a list nobody can act on.
+
+### How the same problem is recognised
+
+Each issue has a fingerprint built from the check, the environment, the site, and the affected
+component and plugin. The same problem found again updates the issue that already describes it:
+the count goes up, the last-seen date moves, and the wording, severity and result are refreshed to
+the current reading.
+
+Only what identifies a problem goes into the fingerprint. The wording, the severity and whether
+the check warned or failed all describe how the problem looks right now, so none of them is part
+of its identity — a check reporting "3 jobs have failed" and then "17 jobs have failed", or
+warning and then failing, is reporting one problem twice. Raising a fresh issue each time would
+split one problem's history in two.
+
+### Status, and what "resolved" means
+
+| Status | Set by | Meaning |
+|---|---|---|
+| New | Web Doctor | Found, and nobody has looked at it |
+| Confirmed | A person | Looked at and accepted as real |
+| Investigating | A person | Somebody is working out what is going on |
+| Ignored | A person, with a reason | Seen, and deliberately not acted on for now |
+| Won't fix | A person, with a reason | Seen, and deliberately never going to be acted on |
+| Resolved | Web Doctor only | The check that raised it ran again and no longer reports it |
+| Repairing | Nothing yet | Reserved for repairs, which do not exist |
+
+**Nobody can mark an issue resolved.** The control panel offers no such control and the service
+refuses the request if one is made. An issue resolves when a later run of the same check reaches a
+conclusion that is not the problem, and the run that established that is recorded against it. The
+detail page says in as many words that this is an observation and not a verification: nothing has
+confirmed that the underlying cause was addressed.
+
+Resolution also takes an *answer*, never the absence of one. A check that errored, was skipped, or
+could not tell resolves nothing — it established neither that the problem is there nor that it has
+gone. And a clean run never overturns a decision somebody made: an issue that was ignored stays
+ignored, though it still counts the times it is seen.
+
+An issue that is found again after resolving comes back as new, keeping its count and its history.
+
+### Evidence
+
+Every fact a check records is evidence: what kind of fact it is, what observed it, the value
+itself, when it was true, where it can be found again (a table, a queue job, the file and line an
+exception came from), and notes on how it was gathered. The engine attributes each piece to the
+check, run, environment and site it was gathered in — a check cannot claim those itself.
+
+The evidence behind a warning or a failure is kept against the issue it raised. Evidence from a
+passing check, or from one that errored or could not tell, is not stored: it stays with the latest
+run on the dashboard.
+
+What is kept is bounded:
+
+- **Once per distinct fact.** The same evidence found by the next run is counted, not stored again —
+  even if the moment it describes has moved on; that moment is updated rather than stored twice.
+  A new reading — 17 failed jobs where there were 3 — is a new fact, and the old one moves to the
+  issue's earlier evidence rather than being overwritten.
+- **A size limit per fact.** The value may occupy at most 16 KiB once encoded and its notes 4 KiB;
+  a string is cut at 2,000 characters, a structure at 100 entries and six levels deep. Evidence
+  that had to be cut short says so.
+- **A limit per issue.** An issue holds at most 100 facts, and the ones seen least recently go
+  first, so the evidence behind the latest finding is never what is removed. The limit is the
+  `maxPerIssue` property of the `evidence` component.
+
+The issue page shows the evidence behind the latest finding, then everything earlier, a page at a
+time. Values Web Doctor withheld are marked **Redacted** — in evidence and in anything else a check
+wrote, such as an issue's title. They were removed before anything was stored and cannot be
+recovered. A value cut short is marked as such, and each piece of evidence
+says how many values in it were withheld.
+
+### What is stored
+
+Issues, their history and their evidence live in three tables: `webdoctor_issues`,
+`webdoctor_issue_events` and `webdoctor_evidence`. Evidence is deleted with the issue it supports.
+
+Deleting a site does not delete the issues found while looking at it, or their evidence. Most
+findings are about the installation and merely stamped with whichever site was in view, so the
+link to the site is dropped and the site's name is kept, leaving the finding readable rather than
+erasing it.
+
+History records the moments worth keeping: the issue appearing, changing, coming back, being moved
+through its lifecycle, being observed clear. A run that finds an issue again unchanged is counted,
+not listed, so the history stays readable however long the issue has been open.
+
 ## How the score works
 
 A run starts at 100. Every result that leaves a question open — a warning, a failure, a check
@@ -185,13 +308,21 @@ subtract nothing, and the floor is 0.
   environment and site. Clearing the cache means the dashboard reports that nothing has been run.
 - **Runs are synchronous.** There is no scheduling and no queued execution yet, so a deep run on
   a large site holds the request open.
+- **Only a control panel run records issues.** `webdoctor/status` reports the installation; it
+  does not run checks, so nothing on the command line updates the Issue Center yet.
+- **An issue's resolution is an observation, not a verification.** Web Doctor can say the check
+  stopped reporting the problem. It cannot yet say the cause was addressed.
+- **A check that finds several problems at once and does not distinguish them** — through the
+  affected component or plugin — gets one issue covering all of them, with the current detail in
+  its latest result.
+- **Issue history is kept, but not pruned.** There is no retention policy yet, so an installation
+  diagnosed on a schedule for a long time will accumulate rows.
 - **Checks establish what they say and no more.** `filesystem.volumes` proves a volume can be
   read, not written. `email.configuration` proves the settings are complete, not that mail is
   delivered. `database.charset` samples one table. `queue.failedJobs` reads the most recent
   failures only — none at shallow depth, ten at normal, fifty at deep — and says so when the
   sample is not the whole set.
 - **If a check cannot read what it came to read, it reports `unknown`, never `pass`.**
-- **Web Doctor owns no database tables.**
 
 ## Development
 

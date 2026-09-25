@@ -1,0 +1,154 @@
+{# One issue, kept apart from the control panel shell for the same reason the list is. #}
+
+{% import "web-doctor/_macros" as shared %}
+
+<p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/issues') }}">&larr; {{ "All issues"|t('web-doctor') }}</a></p>
+
+<div class="pane wd-issue">
+    <h2 class="wd-issue__title">{{ shared.text(issue.title) }}</h2>
+
+    <div class="wd-issue__pills">
+        <span class="wd-pill wd-pill--severity wd-pill--severity-{{ issue.severity.value }}">{{ issue.severity.label() }}</span>
+        <span class="wd-pill wd-pill--issue-{{ issue.status.value }}">{{ issue.status.label() }}</span>
+        <span class="wd-pill wd-pill--{{ issue.resultStatus.value }}">{{ issue.resultStatus.label() }}</span>
+    </div>
+
+    {% if issue.description %}
+        <p class="wd-issue__description">{{ shared.text(issue.description) }}</p>
+    {% endif %}
+
+    {% if issue.recommendation %}
+        <p class="wd-issue__recommendation"><strong>{{ "Recommended"|t('web-doctor') }}:</strong> {{ shared.text(issue.recommendation) }}</p>
+    {% endif %}
+
+    {% if issue.status.value == 'resolved' %}
+        <div class="wd-issue__resolution">
+            <p><strong>{{ issue.resolution.label() }}</strong></p>
+            <p class="light">{{ issue.resolution.explanation() }}</p>
+            {% if issue.resolvedByRunId %}
+                <p class="light">{{ "Established by run {run} on {date}."|t('web-doctor', {
+                    run: issue.resolvedByRunId,
+                    date: issue.resolvedAt ? issue.resolvedAt|datetime('short') : '—',
+                }) }}</p>
+            {% endif %}
+        </div>
+    {% endif %}
+
+    {% if issue.statusNote %}
+        <p class="wd-issue__note"><strong>{{ "Reason given"|t('web-doctor') }}:</strong> {{ shared.text(issue.statusNote) }}</p>
+    {% endif %}
+</div>
+
+<div class="pane">
+    <h2>{{ "Where this came from"|t('web-doctor') }}</h2>
+    <dl class="wd-meta">
+        <div><dt>{{ "Check"|t('web-doctor') }}</dt><dd>{{ issue.diagnosticName }}</dd></div>
+        <div><dt>{{ "Check ID"|t('web-doctor') }}</dt><dd><code>{{ issue.diagnosticId }}</code></dd></div>
+        <div><dt>{{ "Category"|t('web-doctor') }}</dt><dd>{{ issue.category.label() }}</dd></div>
+        <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ issue.environment }}</dd></div>
+        <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ siteLabel }}</dd></div>
+        <div><dt>{{ "Result"|t('web-doctor') }}</dt><dd>{{ issue.resultStatus.label() }}</dd></div>
+        {% if issue.affectedComponent %}
+            <div><dt>{{ "Affected component"|t('web-doctor') }}</dt><dd>{{ issue.affectedComponent }}</dd></div>
+        {% endif %}
+        {% if issue.affectedPlugin %}
+            <div><dt>{{ "Affected plugin"|t('web-doctor') }}</dt><dd>{{ issue.affectedPlugin }}</dd></div>
+        {% endif %}
+        <div><dt>{{ "First seen"|t('web-doctor') }}</dt><dd>{{ issue.firstDetected|datetime('short') }}</dd></div>
+        <div><dt>{{ "Last seen"|t('web-doctor') }}</dt><dd>{{ issue.lastDetected|datetime('short') }}</dd></div>
+        <div><dt>{{ "Times seen"|t('web-doctor') }}</dt><dd>{{ issue.occurrences }}</dd></div>
+        {% if issue.latestRunId %}
+            <div><dt>{{ "Latest run"|t('web-doctor') }}</dt><dd><code>{{ issue.latestRunId }}</code></dd></div>
+        {% endif %}
+        <div><dt>{{ "Fingerprint"|t('web-doctor') }}</dt><dd><code class="wd-fingerprint">{{ issue.fingerprint }}</code></dd></div>
+    </dl>
+</div>
+
+{% include "web-doctor/_issues/_evidence" %}
+
+{% if canManage %}
+    <form method="post" accept-charset="UTF-8" class="pane wd-issue__form">
+        {{ csrfInput() }}
+        {{ actionInput('web-doctor/issues/update-status') }}
+        {{ redirectInput('web-doctor/issues/' ~ issue.id) }}
+        <input type="hidden" name="issueId" value="{{ issue.id }}">
+
+        <h2>{{ "Change where this stands"|t('web-doctor') }}</h2>
+        <p class="light">
+            {{ "“Resolved” is not on this list. An issue is resolved when the check that raised it runs again and no longer reports the problem, which is something Web Doctor observes rather than something anybody sets. If you have decided this needs no action, say so with “Ignored” or “Won’t fix” and give the reason."|t('web-doctor') }}
+        </p>
+
+        <div class="field">
+            <label for="wd-issue-status">{{ "Status"|t('web-doctor') }}</label>
+            <div class="select">
+                <select id="wd-issue-status" name="status">
+                    {% for status in settableStatuses %}
+                        <option value="{{ status.value }}"{{ issue.status.value == status.value ? ' selected' : '' }}>{{ status.label() }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <div class="field">
+            <label for="wd-issue-note">{{ "Reason"|t('web-doctor') }}</label>
+            <div class="instructions"><p>{{ "Required when ignoring an issue or ruling it out."|t('web-doctor') }}</p></div>
+            {# A reason with something withheld from it is not offered back for editing: a text field
+               cannot show the mark, and saving it would write the marker in as the reason. It is
+               still shown, marked, above. #}
+            {% set redactedNote = constant('Tahadudhiya\\WebDoctor\\helpers\\Redaction::REDACTED') in (issue.statusNote ?? '') %}
+            <textarea id="wd-issue-note" name="note" class="text fullwidth" rows="3">{{ redactedNote ? '' : issue.statusNote }}</textarea>
+        </div>
+
+        <button type="submit" class="btn submit">{{ "Save"|t('web-doctor') }}</button>
+    </form>
+{% endif %}
+
+<div class="pane">
+    <h2>{{ "History"|t('web-doctor') }}</h2>
+    <p class="light">
+        {{ "What happened to this issue, most recent first. A run that found it again unchanged is counted rather than listed, so the history stays readable however long the issue has been open."|t('web-doctor') }}
+    </p>
+
+    {% if events|length %}
+        <div class="wd-table-scroll">
+        <table class="data fullwidth wd-history">
+            <thead>
+                <tr>
+                    <th scope="col">{{ "When"|t('web-doctor') }}</th>
+                    <th scope="col">{{ "What"|t('web-doctor') }}</th>
+                    <th scope="col">{{ "Detail"|t('web-doctor') }}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for event in events %}
+                    <tr>
+                        <td class="wd-col-narrow">{{ event.occurredAt|datetime('short') }}</td>
+                        <td class="wd-col-narrow">{{ event.type.label() }}</td>
+                        <td>
+                            {% if event.fromStatus and event.toStatus %}
+                                <div>{{ "{from} → {to}"|t('web-doctor', { from: event.fromStatus.label(), to: event.toStatus.label() }) }}</div>
+                            {% elseif event.toStatus %}
+                                <div>{{ event.toStatus.label() }}</div>
+                            {% endif %}
+                            {% if event.severity %}
+                                <div class="light">{{ event.severity.label() }}</div>
+                            {% endif %}
+                            {% if event.note %}
+                                <div>{{ shared.text(event.note) }}</div>
+                            {% endif %}
+                            {% if event.runId %}
+                                <div class="light"><code>{{ event.runId }}</code></div>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+        {% if events|length >= eventLimit %}
+            <p class="light">{{ "Showing the most recent {count} entries."|t('web-doctor', { count: eventLimit }) }}</p>
+        {% endif %}
+    {% else %}
+        <p class="light">{{ "Nothing has been recorded against this issue yet."|t('web-doctor') }}</p>
+    {% endif %}
+</div>

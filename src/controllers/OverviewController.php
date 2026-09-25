@@ -10,7 +10,7 @@ use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\HealthSummary;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\services\Permissions;
-use Tahadudhiya\WebDoctor\web\assets\dashboard\DashboardAsset;
+use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
 use yii\web\Response;
@@ -63,7 +63,7 @@ class OverviewController extends Controller
             $failure = Craft::t('web-doctor', 'Web Doctor could not read the last diagnostic run. The details are in Craft’s logs.');
         }
 
-        $this->getView()->registerAssetBundle(DashboardAsset::class);
+        $this->getView()->registerAssetBundle(ControlPanelAsset::class);
 
         return $this->renderTemplate('web-doctor/_index', [
             'title' => $plugin->getSettings()->pluginName,
@@ -129,7 +129,28 @@ class OverviewController extends Controller
             return $this->redirectToPostedUrl();
         }
 
-        $this->setSuccessFlash(Craft::t('web-doctor', '{count, plural, =1{1 check ran.} other{# checks ran.}}', ['count' => $run->count()]));
+        // The run is stored before this, so a reconciliation that fails costs the Issue Center
+        // an update rather than costing the reader the results they asked for. It is reported
+        // rather than swallowed: an Issue Center silently one run out of date is worse than one
+        // that says it could not be brought up to date.
+        try {
+            $reconciliation = $this->plugin()->getIssues()->reconcile($run);
+        } catch (Throwable $e) {
+            $this->logFailure('The Issue Center could not be brought up to date after a diagnostic run', $e);
+            $this->setFailFlash(Craft::t('web-doctor', 'The checks ran, but the issue list could not be updated. The details are in Craft’s logs.'));
+
+            return $this->redirectToPostedUrl();
+        }
+
+        $this->setSuccessFlash(Craft::t(
+            'web-doctor',
+            '{count, plural, =1{1 check ran.} other{# checks ran.}} {opened, plural, =0{No new issues.} =1{1 new issue.} other{# new issues.}} {resolved, plural, =0{} =1{1 issue resolved.} other{# issues resolved.}}',
+            [
+                'count' => $run->count(),
+                'opened' => $reconciliation->opened + $reconciliation->recurred,
+                'resolved' => $reconciliation->resolved,
+            ],
+        ));
 
         return $this->redirectToPostedUrl();
     }

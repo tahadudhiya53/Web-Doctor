@@ -1,0 +1,178 @@
+{# The issue list, kept apart from the control panel shell it is shown in so that what Web Doctor
+   renders can be rendered — and asserted against — on its own. #}
+
+{% import "web-doctor/_macros" as shared %}
+
+{% if failure %}
+    <div class="pane wd-failure" role="alert">
+        <p><strong>{{ failure }}</strong></p>
+    </div>
+{% endif %}
+
+{% if issues is not null %}
+    <div class="pane">
+        <p class="wd-issues__headline">
+            {{ "{count, plural, =0{Nothing is outstanding.} =1{1 issue is outstanding.} other{# issues are outstanding.}}"|t('web-doctor', { count: outstandingCount }) }}
+        </p>
+        <p class="light">
+            {{ "An issue is a warning or a failure that a check reported. A check that errored or could not tell is not an issue: it counts against the health score, because an unanswered question is not a clean bill of health, but it does not assert that anything is wrong."|t('web-doctor') }}
+        </p>
+    </div>
+
+    <form method="get" action="" accept-charset="UTF-8" class="pane wd-filters">
+        <h2>{{ "Filter"|t('web-doctor') }}</h2>
+
+        <div class="wd-filters__grid">
+            <fieldset class="wd-filters__group">
+                <legend>{{ "Status"|t('web-doctor') }}</legend>
+                {% for status in statuses %}
+                    <label class="wd-filters__check">
+                        <input type="checkbox" name="status[]" value="{{ status.value }}"{{ filter.hasStatus(status) ? ' checked' : '' }}>
+                        {{ status.label() }}
+                        <span class="light">({{ counts[status.value] ?? 0 }})</span>
+                    </label>
+                {% endfor %}
+            </fieldset>
+
+            <fieldset class="wd-filters__group">
+                <legend>{{ "Severity"|t('web-doctor') }}</legend>
+                {% for severity in severities %}
+                    <label class="wd-filters__check">
+                        <input type="checkbox" name="severity[]" value="{{ severity.value }}"{{ filter.hasSeverity(severity) ? ' checked' : '' }}>
+                        {{ severity.label() }}
+                    </label>
+                {% endfor %}
+            </fieldset>
+
+            <div class="wd-filters__group">
+                <label for="wd-filter-diagnostic">{{ "Check"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-filter-diagnostic" name="diagnostic">
+                        <option value="">{{ "Any check"|t('web-doctor') }}</option>
+                        {% for id, name in diagnostics %}
+                            <option value="{{ id }}"{{ filter.diagnosticId == id ? ' selected' : '' }}>{{ name }} ({{ id }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <label for="wd-filter-site">{{ "Site"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-filter-site" name="siteId">
+                        <option value="">{{ "Any site"|t('web-doctor') }}</option>
+                        <option value="none"{{ filter.withoutSite ? ' selected' : '' }}>{{ "No particular site"|t('web-doctor') }}</option>
+                        {% for id, name in sites %}
+                            <option value="{{ id }}"{{ filter.siteId == id ? ' selected' : '' }}>{{ name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <label for="wd-filter-environment">{{ "Environment"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-filter-environment" name="environment">
+                        <option value="">{{ "Any environment"|t('web-doctor') }}</option>
+                        {% for environment in environments %}
+                            <option value="{{ environment }}"{{ filter.environment == environment ? ' selected' : '' }}>{{ environment }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+
+            <div class="wd-filters__group">
+                <label for="wd-filter-from">{{ "Last seen from"|t('web-doctor') }}</label>
+                <input type="date" id="wd-filter-from" name="from" class="text fullwidth" value="{{ filter.detectedFrom }}">
+
+                <label for="wd-filter-to">{{ "Last seen to"|t('web-doctor') }}</label>
+                <input type="date" id="wd-filter-to" name="to" class="text fullwidth" value="{{ filter.detectedTo }}">
+            </div>
+        </div>
+
+        <div class="wd-filters__actions">
+            <button type="submit" class="btn submit">{{ "Apply"|t('web-doctor') }}</button>
+            <a class="btn" href="{{ cpUrl('web-doctor/issues', { status: allStatuses }) }}">{{ "Show everything"|t('web-doctor') }}</a>
+        </div>
+    </form>
+
+    {% if issues.isEmpty() %}
+        <div class="pane wd-empty">
+            <p>
+                {{- filter.isFiltering()
+                    ? "No issues match this filter."|t('web-doctor')
+                    : "No issues have been recorded."|t('web-doctor') -}}
+            </p>
+            <p class="light">{{ "Issues are recorded when a check reports a warning or a failure. Run the checks from the overview to find out where this installation stands."|t('web-doctor') }}</p>
+        </div>
+    {% else %}
+        <div class="pane">
+            <div class="wd-table-scroll">
+            <table class="data fullwidth wd-issues">
+                <thead>
+                    <tr>
+                        {% for key, label in {
+                            severity: "Severity"|t('web-doctor'),
+                            title: "Issue"|t('web-doctor'),
+                            status: "Status"|t('web-doctor'),
+                            occurrences: "Seen"|t('web-doctor'),
+                            firstDetected: "First seen"|t('web-doctor'),
+                            lastDetected: "Last seen"|t('web-doctor'),
+                        } %}
+                            <th scope="col"{{ key == 'title' ? '' : ' class="wd-col-narrow"' }}
+                                {%- if filter.isSortedBy(key) %} aria-sort="{{ filter.ascending ? 'ascending' : 'descending' }}"{% endif %}>
+                                <a href="{{ cpUrl('web-doctor/issues', filter.sortedBy(key).toParams()) }}">
+                                    {{- label }}{% if filter.isSortedBy(key) %} <span aria-hidden="true">{{ filter.ascending ? '↑' : '↓' }}</span>{% endif -%}
+                                </a>
+                            </th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for issue in issues.issues %}
+                        <tr>
+                            <td class="wd-col-narrow">
+                                <span class="wd-pill wd-pill--severity wd-pill--severity-{{ issue.severity.value }}">{{ issue.severity.label() }}</span>
+                            </td>
+                            <td class="wd-col-detail">
+                                <div class="wd-result__name">
+                                    <a href="{{ cpUrl('web-doctor/issues/' ~ issue.id) }}">{{ shared.text(issue.title) }}</a>
+                                </div>
+                                <div class="wd-result__id">
+                                    <code>{{ issue.diagnosticId }}</code>
+                                    &middot; {{ issue.category.label() }}
+                                    &middot; {{ issue.environment }}
+                                    {%- if issue.affectedPlugin %} &middot; {{ issue.affectedPlugin }}{% endif %}
+                                </div>
+                            </td>
+                            <td class="wd-col-narrow">
+                                <span class="wd-pill wd-pill--issue-{{ issue.status.value }}">{{ issue.status.label() }}</span>
+                            </td>
+                            <td class="wd-col-narrow">{{ issue.occurrences }}</td>
+                            <td class="wd-col-narrow">{{ issue.firstDetected|datetime('short') }}</td>
+                            <td class="wd-col-narrow">{{ issue.lastDetected|datetime('short') }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+
+            <div class="wd-pager">
+                <p class="light">
+                    {{ "Showing {first}–{last} of {total}."|t('web-doctor', {
+                        first: issues.firstPosition(),
+                        last: issues.lastPosition(),
+                        total: issues.total,
+                    }) }}
+                </p>
+                {% if issues.hasPages() %}
+                    <nav class="wd-pager__links" aria-label="{{ "Pagination"|t('web-doctor') }}">
+                        {% if issues.hasPreviousPage() %}
+                            <a class="btn" href="{{ cpUrl('web-doctor/issues', filter.onPage(issues.currentPage() - 1).toParams()) }}">{{ "Previous"|t('web-doctor') }}</a>
+                        {% endif %}
+                        <span class="light">{{ "Page {page} of {pages}"|t('web-doctor', { page: issues.currentPage(), pages: issues.pageCount() }) }}</span>
+                        {% if issues.hasNextPage() %}
+                            <a class="btn" href="{{ cpUrl('web-doctor/issues', filter.onPage(issues.currentPage() + 1).toParams()) }}">{{ "Next"|t('web-doctor') }}</a>
+                        {% endif %}
+                    </nav>
+                {% endif %}
+            </div>
+        </div>
+    {% endif %}
+{% endif %}

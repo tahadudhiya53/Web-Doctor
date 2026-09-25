@@ -1,0 +1,17 @@
+{#
+    Shared rendering for text Web Doctor did not write itself — what a check reported, what a
+    person gave as a reason. Anything redaction withheld is shown as a labelled mark, never as the
+    bracketed marker a reader would have to interpret.
+#}
+
+{% macro redacted() -%}
+    <span class="wd-mark wd-mark--redacted" title="{{ 'Withheld because it is, or may be, a credential. It was removed before anything was stored and cannot be recovered here.'|t('web-doctor') }}">{{ "Redacted"|t('web-doctor') }}</span>
+{%- endmacro %}
+
+{% macro text(value) -%}
+    {%- import _self as m -%}
+    {%- set parts = (value ?? '')|split(constant('Tahadudhiya\\WebDoctor\\helpers\\Redaction::REDACTED')) -%}
+    {%- for part in parts -%}
+        {{ part }}{% if not loop.last %}{{ m.redacted() }}{% endif %}
+    {%- endfor -%}
+{%- endmacro %}
