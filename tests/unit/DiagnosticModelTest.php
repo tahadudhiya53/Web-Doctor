@@ -13,19 +13,25 @@ use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\EvidenceType;
 use Tahadudhiya\WebDoctor\enums\ExecutionMode;
+use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\helpers\EvidenceDisplay;
+use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
+use Tahadudhiya\WebDoctor\models\IssueFilter;
+use Tahadudhiya\WebDoctor\models\IssueList;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic;
 
 /**
- * The value objects a diagnostic run is made of: the context that identifies it, the results it
- * produces, the evidence behind them, the sanitised exception any failure is reduced to, and the
- * base class a check is written against.
+ * The value objects Web Doctor's domain is made of: the context that identifies a run, the
+ * results it produces, the evidence behind them, the sanitised exception any failure is reduced
+ * to, the base class a check is written against, the fingerprint that decides when two findings
+ * are the same problem, and the filter the Issue Center is read through.
  */
 class DiagnosticModelTest extends TestCase
 {
@@ -83,6 +89,11 @@ class DiagnosticModelTest extends TestCase
 
         self::assertSame(Redaction::REDACTED, $json['options']['apiKey']);
         self::assertSame(60, $json['options']['window']);
+
+        // A run is cached as a serialized PHP object, which never calls jsonSerialize(), so the
+        // context has to be safe as it stands rather than only as it is rendered.
+        self::assertStringNotContainsString('hunter2', serialize($context));
+        self::assertSame(60, $context->option('window'));
     }
 
     public function testARunWithNoSiteSaysSoRatherThanInventingOne(): void
@@ -234,13 +245,21 @@ class DiagnosticModelTest extends TestCase
             12.5,
         );
 
-        $carried = ['environment' => null, 'runId' => null, 'startedAt' => null, 'finishedAt' => null, 'durationMs' => null];
+        $carried = ['environment' => null, 'runId' => null, 'startedAt' => null, 'finishedAt' => null, 'durationMs' => null, 'evidence' => null];
 
         self::assertEquals(
             array_diff_key($result->jsonSerialize(), $carried),
             array_diff_key($copy->jsonSerialize(), $carried),
         );
+
+        // The evidence comes across whole, and attributed to the run it was stamped with.
+        $attribution = ['diagnosticId' => null, 'runId' => null, 'environment' => null, 'siteId' => null];
+
         self::assertCount(1, $copy->evidence());
+        self::assertEquals(
+            array_diff_key($result->evidence()[0]->jsonSerialize(), $attribution),
+            array_diff_key($copy->evidence()[0]->jsonSerialize(), $attribution),
+        );
         self::assertSame('some-plugin', $copy->affectedPlugin);
         self::assertTrue($copy->repairAvailable);
         self::assertTrue($copy->verificationAvailable);
@@ -469,6 +488,341 @@ class DiagnosticModelTest extends TestCase
         self::assertSame('craft.version', $json['source']);
         self::assertSame(['version' => '5.0.0'], $json['data']);
         self::assertSame('2026-01-01T12:00:00+00:00', $json['observedAt']);
+    }
+
+    public function testEvidenceCarriesTheFactWhereItCameFromAndHowItWasGathered(): void
+    {
+        $observed = new DateTimeImmutable('2026-03-01T08:00:00+00:00');
+        $recorded = new DateTimeImmutable('2026-03-01T08:05:00+00:00');
+
+        $evidence = new Evidence(
+            type: EvidenceType::LOG_ENTRY,
+            label: 'Mailer error',
+            source: 'email.configuration',
+            data: ['message' => 'Connection timed out'],
+            observedAt: $observed,
+            recordedAt: $recorded,
+            metadata: ['linesRead' => 400, 'window' => 'PT1H'],
+            reference: 'storage/logs/web-2026-03-01.log:1204',
+            confidence: Confidence::POSSIBLE,
+        );
+
+        self::assertSame(EvidenceType::LOG_ENTRY, $evidence->type);
+        self::assertSame('email.configuration', $evidence->source);
+        self::assertSame(['message' => 'Connection timed out'], $evidence->data);
+        self::assertSame(['linesRead' => 400, 'window' => 'PT1H'], $evidence->metadata);
+        self::assertSame('storage/logs/web-2026-03-01.log:1204', $evidence->reference);
+        self::assertSame(Confidence::POSSIBLE, $evidence->confidence);
+        self::assertSame($observed, $evidence->observedAt);
+        self::assertSame($recorded, $evidence->recordedAt);
+        self::assertFalse($evidence->truncated);
+
+        // Where it was gathered is not the diagnostic's to say; nothing has stamped it yet.
+        self::assertNull($evidence->runId);
+        self::assertNull($evidence->environment);
+        self::assertNull($evidence->siteId);
+        self::assertNull($evidence->diagnosticId);
+
+        // Directly observed is the ordinary case, and says so by claiming no confidence at all.
+        self::assertNull(Evidence::presence('Key', 'x', 'tests.source')->confidence);
+    }
+
+    public function testEvidenceIsAttributedToTheRunThatGatheredItAndCannotClaimAnother(): void
+    {
+        // A diagnostic that names its own run, site and environment is overruled by the engine,
+        // for the same reason a result's run is stamped rather than claimed.
+        $claimed = new Evidence(
+            type: EvidenceType::QUEUE,
+            label: 'Queue depth',
+            source: 'queue.backlog',
+            data: ['waiting' => 4],
+            diagnosticId: 'someone.else',
+            runId: 'claimed-run',
+            environment: 'claimed-environment',
+            siteId: 999,
+        );
+
+        $result = new DiagnosticResult(
+            diagnosticId: 'queue.backlog',
+            name: 'Queue backlog',
+            category: DiagnosticCategory::QUEUE,
+            status: DiagnosticStatus::WARNING,
+            evidence: [$claimed],
+        );
+
+        $at = new DateTimeImmutable();
+        $context = new DiagnosticContext(siteId: 3, environment: 'staging', runId: 'real-run');
+        $evidence = $result->withExecution($context, $at, $at, 1.0)->evidence()[0];
+
+        self::assertSame('queue.backlog', $evidence->diagnosticId);
+        self::assertSame('real-run', $evidence->runId);
+        self::assertSame('staging', $evidence->environment);
+        self::assertSame(3, $evidence->siteId);
+        self::assertSame(['waiting' => 4], $evidence->data);
+        self::assertSame($claimed->recordedAt, $evidence->recordedAt);
+
+        // A run with no particular site attributes its evidence to none, rather than to whichever
+        // site the evidence claimed.
+        $siteless = $result->withExecution(new DiagnosticContext(environment: 'staging'), $at, $at, 1.0)->evidence()[0];
+
+        self::assertNull($siteless->siteId);
+    }
+
+    public function testEvidenceSerializesWholeAndIsIdentifiedByWhatItSaysRatherThanWhenItWasSeen(): void
+    {
+        $evidence = new Evidence(
+            type: EvidenceType::DATABASE,
+            label: 'Character set',
+            source: 'database.charset',
+            data: ['charset' => 'utf8mb4'],
+            metadata: ['columnsInspected' => false],
+            reference: 'elements_sites',
+            confidence: Confidence::HIGH,
+        );
+
+        $json = $evidence->withAttribution('database.charset', new DiagnosticContext(siteId: 2, environment: 'production', runId: 'run-1'))
+            ->jsonSerialize();
+
+        self::assertSame([
+            'type', 'label', 'source', 'reference', 'data', 'metadata', 'confidence', 'truncated',
+            'redactions', 'diagnosticId', 'runId', 'environment', 'siteId', 'observedAt', 'recordedAt',
+        ], array_keys($json));
+        self::assertSame('database', $json['type']);
+        self::assertSame('elements_sites', $json['reference']);
+        self::assertSame(['columnsInspected' => false], $json['metadata']);
+        self::assertSame('high', $json['confidence']);
+        self::assertSame('run-1', $json['runId']);
+        self::assertSame('production', $json['environment']);
+        self::assertSame(2, $json['siteId']);
+
+        // The same fact seen by another run, at another moment, is the same fact.
+        $later = new Evidence(
+            type: EvidenceType::DATABASE,
+            label: 'Character set',
+            source: 'database.charset',
+            data: ['charset' => 'utf8mb4'],
+            recordedAt: new DateTimeImmutable('+1 day'),
+            metadata: ['columnsInspected' => false],
+            reference: 'elements_sites',
+            confidence: Confidence::HIGH,
+        );
+
+        self::assertSame($evidence->digest(), $later->withAttribution('database.charset', new DiagnosticContext(runId: 'run-2'))->digest());
+        self::assertSame(64, strlen($evidence->digest()));
+    }
+
+    /**
+     * @return array<string, array{Evidence}>
+     */
+    public static function differentFacts(): array
+    {
+        $base = ['type' => EvidenceType::QUEUE_JOB, 'label' => 'Failed job', 'source' => 'queue.failedJobs', 'data' => ['count' => 3]];
+
+        return [
+            'another reading' => [new Evidence(...['data' => ['count' => 17]] + $base)],
+            'another kind of fact' => [new Evidence(...['type' => EvidenceType::QUEUE] + $base)],
+            'another label' => [new Evidence(...['label' => 'Failed import'] + $base)],
+            'another source' => [new Evidence(...['source' => 'queue.backlog'] + $base)],
+            'another place' => [new Evidence(...['reference' => 'job #42'] + $base)],
+            'other notes' => [new Evidence(...['metadata' => ['sampleLimit' => 50]] + $base)],
+            'held with another confidence' => [new Evidence(...['confidence' => Confidence::POSSIBLE] + $base)],
+        ];
+    }
+
+    #[DataProvider('differentFacts')]
+    public function testWhatMakesItADifferentFact(Evidence $other): void
+    {
+        // A count that moved is a new reading worth keeping, and so is anything else about what
+        // the fact says — so each of these is stored as a fact of its own.
+        $base = new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Failed job', source: 'queue.failedJobs', data: ['count' => 3]);
+
+        self::assertNotSame($base->digest(), $other->digest());
+    }
+
+    public function testTheSameFactIsTheSameFactHoweverAndWheneverItIsSeen(): void
+    {
+        // Everything that changes between sightings — the run, when it was recorded, when it was
+        // last true, the site and environment stamped on it — is left out, or every run of a
+        // check reporting a moving timestamp would store a new row for the same fact.
+        $fact = static fn(?DateTimeImmutable $observed, ?DateTimeImmutable $recorded): Evidence => new Evidence(
+            type: EvidenceType::QUEUE_JOB,
+            label: 'Search index update',
+            source: 'queue.failedJobs',
+            data: ['error' => 'Timed out', 'occurrences' => 3],
+            observedAt: $observed,
+            recordedAt: $recorded,
+            metadata: ['sampleLimit' => 10],
+            reference: 'queue',
+            confidence: Confidence::HIGH,
+        );
+
+        $first = $fact(new DateTimeImmutable('2026-01-01T00:00:00+00:00'), new DateTimeImmutable('2026-01-01T00:00:05+00:00'));
+        $again = $fact(new DateTimeImmutable('2026-02-01T00:00:00+00:00'), new DateTimeImmutable('2026-02-01T00:00:05+00:00'))
+            ->withAttribution('queue.failedJobs', new DiagnosticContext(siteId: 4, environment: 'production', runId: 'another-run'));
+
+        self::assertSame($first->digest(), $again->digest());
+        self::assertSame($first->digest(), $fact(null, null)->digest());
+    }
+
+    public function testEvidenceExactlyAtItsBudgetIsKeptWholeAndOneByteOverIsCut(): void
+    {
+        // The budget is bytes of the encoded fact, not characters, and the boundary is exact.
+        $atLimit = $this->dataEncodingTo(Evidence::MAX_DATA_BYTES);
+
+        self::assertSame(Evidence::MAX_DATA_BYTES, strlen(Evidence::encode($atLimit)));
+
+        $kept = new Evidence(EvidenceType::LOG_ENTRY, 'At the limit', 'tests.budget', $atLimit);
+
+        self::assertSame($atLimit, $kept->data);
+        self::assertFalse($kept->truncated);
+
+        $over = $this->dataEncodingTo(Evidence::MAX_DATA_BYTES + 1);
+        $cut = new Evidence(EvidenceType::LOG_ENTRY, 'One byte over', 'tests.budget', $over);
+
+        self::assertTrue($cut->truncated);
+        self::assertLessThanOrEqual(Evidence::MAX_DATA_BYTES, strlen(Evidence::encode($cut->data)));
+
+        // The notes have a budget of their own, held the same way.
+        $notes = new Evidence(EvidenceType::LOG_ENTRY, 'Long notes', 'tests.budget', metadata: $this->dataEncodingTo(Evidence::MAX_METADATA_BYTES + 1));
+
+        self::assertTrue($notes->truncated);
+        self::assertLessThanOrEqual(Evidence::MAX_METADATA_BYTES, strlen(Evidence::encode($notes->metadata)));
+    }
+
+    public function testCuttingMultibyteTextNeverProducesAnInvalidFact(): void
+    {
+        // Three- and four-byte characters, long enough to be cut by every bound there is: the
+        // string limit, the summary a too-large entry is reduced to, the label and the reference.
+        $euro = str_repeat('€', 5000);
+        $emoji = str_repeat('🙂', 5000);
+        $nested = ['level' => ['deeper' => array_fill(0, 40, str_repeat('ü', 900))]];
+
+        $evidence = new Evidence(
+            type: EvidenceType::LOG_ENTRY,
+            label: $emoji,
+            source: 'tests.utf8',
+            data: ['euro' => $euro, 'emoji' => $emoji, 'nested' => $nested] + array_fill_keys(range(0, 20), $euro),
+            metadata: ['note' => $emoji],
+            reference: $euro,
+        );
+
+        $encoded = json_encode($evidence->jsonSerialize());
+
+        self::assertIsString($encoded, 'The fact must still encode as JSON.');
+        self::assertTrue(mb_check_encoding($encoded, 'UTF-8'));
+        self::assertTrue($evidence->truncated);
+
+        foreach ([$evidence->label, (string)$evidence->reference, (string)$evidence->get('euro'), (string)$evidence->get('emoji')] as $text) {
+            self::assertTrue(mb_check_encoding($text, 'UTF-8'), 'A cut landed inside a character.');
+        }
+
+        // Malformed input is repaired rather than carried into something that cannot be stored.
+        $malformed = new Evidence(EvidenceType::LOG_ENTRY, "bad \xC3\x28 label", 'tests.utf8', ['line' => "bad \xFF byte"]);
+
+        self::assertTrue(mb_check_encoding($malformed->label, 'UTF-8'));
+        self::assertTrue(mb_check_encoding((string)$malformed->get('line'), 'UTF-8'));
+    }
+
+    public function testEvidenceIsHeldToABudgetAndSaysWhenItWasCut(): void
+    {
+        // Every entry is within what redaction allows on its own; together they are far beyond
+        // what one fact may occupy.
+        $data = [];
+
+        for ($i = 0; $i < 60; $i++) {
+            $data["line$i"] = str_repeat(chr(97 + $i % 26), 1500);
+        }
+
+        $data = ['first' => 'kept whole'] + $data;
+
+        $evidence = new Evidence(
+            type: EvidenceType::LOG_ENTRY,
+            label: str_repeat('l', 900),
+            source: 'tests.budget',
+            data: $data,
+            metadata: ['sample' => array_fill(0, 90, str_repeat('m', 100))],
+            reference: str_repeat('r', 900),
+        );
+
+        self::assertLessThanOrEqual(Evidence::MAX_DATA_BYTES, strlen(Evidence::encode($evidence->data)));
+        self::assertLessThanOrEqual(Evidence::MAX_METADATA_BYTES, strlen(Evidence::encode($evidence->metadata)));
+        self::assertLessThanOrEqual(Evidence::MAX_LABEL_LENGTH, mb_strlen($evidence->label));
+        self::assertLessThanOrEqual(Evidence::MAX_REFERENCE_LENGTH, mb_strlen((string)$evidence->reference));
+        self::assertTrue($evidence->truncated);
+
+        // What the diagnostic put first is what survives, and what did not survive is counted.
+        self::assertSame('kept whole', $evidence->get('first'));
+        self::assertMatchesRegularExpression('/^\d+ more omitted$/', (string)$evidence->get(Redaction::OMITTED_KEY));
+
+        // Being cut is part of the fact, so it survives the fact being stamped with its run.
+        self::assertTrue($evidence->withAttribution('tests.budget', new DiagnosticContext())->truncated);
+
+        // And evidence that fitted says so.
+        self::assertFalse((new Evidence(EvidenceType::SYSTEM, 'Small', 'tests.budget', ['a' => 1]))->truncated);
+        self::assertTrue(Evidence::stackTrace(new \RuntimeException('Boom'), 'tests.budget', frames: 1)->truncated);
+    }
+
+    public function testWithheldValuesAreCountedSoAReaderKnowsWhatIsMissing(): void
+    {
+        $evidence = new Evidence(
+            type: EvidenceType::CONFIGURATION,
+            label: 'Mailer settings',
+            source: 'email.configuration',
+            data: [
+                'host' => 'smtp.example.com',
+                'password' => 'hunter2',
+                'note' => 'retry with token=abc123 then apiKey=def456',
+                'fromEmail' => Redaction::PRESENT,
+            ],
+        );
+
+        // Two whole values and two inside a sentence. A presence word is an answer, not a
+        // withheld value, so it is not counted.
+        self::assertSame(3, $evidence->redactions());
+        self::assertSame(3, $evidence->jsonSerialize()['redactions']);
+        self::assertSame(0, (new Evidence(EvidenceType::SYSTEM, 'Clean', 'tests.source', ['a' => 'b']))->redactions());
+    }
+
+    public function testTheDisplayTreeMarksEverythingThatWasWithheldOrCut(): void
+    {
+        // A page shows a withheld value as withheld, not as a bracket a reader has to interpret.
+        $tree = EvidenceDisplay::tree([
+            'host' => 'smtp.example.com',
+            'password' => Redaction::REDACTED,
+            'message' => 'refused: password=' . Redaction::REDACTED . ' for ' . Redaction::REDACTED,
+            'fromEmail' => Redaction::MISSING,
+            'port' => 587,
+            'secure' => true,
+            'proxy' => null,
+            'deep' => Redaction::DEPTH_LIMIT,
+            'log' => 'a long line' . Redaction::TRUNCATED,
+            'hosts' => ['a', 'b'],
+            Redaction::OMITTED_KEY => '3 more omitted',
+        ]);
+
+        self::assertSame('map', $tree['kind']);
+        self::assertSame('3 more omitted', $tree['omitted']);
+
+        $nodes = array_column($tree['entries'], 'node', 'key');
+
+        self::assertArrayNotHasKey(Redaction::OMITTED_KEY, $nodes);
+        self::assertSame(['kind' => 'text', 'segments' => [['text' => 'smtp.example.com', 'redacted' => false]], 'truncated' => false], $nodes['host']);
+        self::assertSame(['kind' => 'redacted'], $nodes['password']);
+        self::assertSame([
+            ['text' => 'refused: password=', 'redacted' => false],
+            ['text' => '', 'redacted' => true],
+            ['text' => ' for ', 'redacted' => false],
+            ['text' => '', 'redacted' => true],
+        ], $nodes['message']['segments']);
+        self::assertSame(['kind' => 'presence', 'value' => Redaction::MISSING], $nodes['fromEmail']);
+        self::assertSame(['kind' => 'scalar', 'value' => '587'], $nodes['port']);
+        self::assertSame(['kind' => 'scalar', 'value' => 'true'], $nodes['secure']);
+        self::assertSame(['kind' => 'scalar', 'value' => 'null'], $nodes['proxy']);
+        self::assertSame(['kind' => 'deep'], $nodes['deep']);
+        self::assertTrue($nodes['log']['truncated']);
+        self::assertSame('a long line', $nodes['log']['segments'][0]['text']);
+        self::assertSame('list', $nodes['hosts']['kind']);
+        self::assertCount(2, $nodes['hosts']['items']);
     }
 
     public function testOnlyTypesDeliberatelyApprovedAreClientSafe(): void
@@ -726,5 +1080,326 @@ class DiagnosticModelTest extends TestCase
         ])->evidence()[0];
 
         self::assertSame('tests.evidence', $evidence->source);
+    }
+
+    // --- The fingerprint: what makes two findings the same problem.
+    //
+    // This is the load-bearing decision in the Issue Center. Too much goes in and an issue
+    // fragments into a new one every run, destroying its history; too little goes in and two
+    // unrelated problems merge, so resolving one silently closes the other. Both directions are
+    // pinned: what must match, and what must not.
+
+    private function aFinding(
+        string $diagnosticId = 'craft.version',
+        DiagnosticStatus $status = DiagnosticStatus::FAIL,
+        string $summary = 'Something is wrong.',
+        ?Severity $severity = null,
+        ?string $affectedComponent = null,
+        ?string $affectedPlugin = null,
+    ): DiagnosticResult {
+        return new DiagnosticResult(
+            diagnosticId: $diagnosticId,
+            name: 'A check',
+            category: DiagnosticCategory::CRAFT,
+            status: $status,
+            summary: $summary,
+            severity: $severity,
+            affectedComponent: $affectedComponent,
+            affectedPlugin: $affectedPlugin,
+        );
+    }
+
+    public function testTheSameProblemAlwaysFingerprintsTheSame(): void
+    {
+        $finding = $this->aFinding();
+
+        self::assertSame(
+            Fingerprint::forResult($finding, 'production', 1),
+            Fingerprint::forResult($finding, 'production', 1),
+        );
+    }
+
+    public function testTheReadingOfAProblemIsNotItsIdentity(): void
+    {
+        // Wording, severity and status all describe how the problem looks right now. A check
+        // reporting "3 jobs have failed" and then "17 jobs have failed" — or warning and then
+        // failing — is reporting one problem twice, and raising a fresh issue each time would
+        // destroy the history that makes an issue worth keeping.
+        $identity = Fingerprint::forResult($this->aFinding(), 'production', 1);
+
+        $readings = [
+            'wording' => $this->aFinding(summary: '17 jobs have failed.'),
+            'severity' => $this->aFinding(severity: Severity::CRITICAL),
+            'status' => $this->aFinding(status: DiagnosticStatus::WARNING),
+        ];
+
+        foreach ($readings as $what => $reading) {
+            self::assertSame($identity, Fingerprint::forResult($reading, 'production', 1), $what);
+        }
+    }
+
+    /**
+     * @return array<string, array{DiagnosticResult, string, int|null}>
+     */
+    public static function distinctProblems(): array
+    {
+        $plain = new DiagnosticResult(
+            diagnosticId: 'craft.version',
+            name: 'A check',
+            category: DiagnosticCategory::CRAFT,
+            status: DiagnosticStatus::FAIL,
+            summary: 'Something is wrong.',
+        );
+
+        $with = static fn(array $overrides): DiagnosticResult => new DiagnosticResult(
+            diagnosticId: $overrides['id'] ?? 'craft.version',
+            name: 'A check',
+            category: DiagnosticCategory::CRAFT,
+            status: $overrides['status'] ?? DiagnosticStatus::FAIL,
+            summary: 'Something is wrong.',
+            affectedComponent: $overrides['component'] ?? null,
+            affectedPlugin: $overrides['plugin'] ?? null,
+        );
+
+        return [
+            'another check' => [$with(['id' => 'queue.backlog']), 'production', 1],
+            'another environment' => [$plain, 'staging', 1],
+            'another site' => [$plain, 'production', 2],
+            // A run with no particular site in view is not a run that was looking at site 1.
+            'no site at all' => [$plain, 'production', null],
+            'another component' => [$with(['component' => 'fileinfo']), 'production', 1],
+            'another plugin' => [$with(['plugin' => 'commerce']), 'production', 1],
+        ];
+    }
+
+    #[DataProvider('distinctProblems')]
+    public function testWhatMakesItADifferentProblem(DiagnosticResult $other, string $environment, ?int $siteId): void
+    {
+        self::assertNotSame(
+            Fingerprint::forResult($this->aFinding(), 'production', 1),
+            Fingerprint::forResult($other, $environment, $siteId),
+        );
+    }
+
+    public function testTheEncodingCannotBeGamedIntoACollision(): void
+    {
+        // Naming nothing and naming an empty string are different statements.
+        self::assertNotSame(Fingerprint::of(['a', null, 'b']), Fingerprint::of(['a', '', 'b']));
+
+        // The separator cannot appear in a part, so no arrangement of values can be rewritten as
+        // a different arrangement with the same hash.
+        self::assertNotSame(Fingerprint::of(['craft.version', 'production']), Fingerprint::of(['craft.versionproduction', '']));
+        self::assertNotSame(Fingerprint::of(['a.b', 'c']), Fingerprint::of(['a', 'b.c']));
+    }
+
+    public function testAFingerprintNamesItsSchemeAndIsAFixedLengthDigest(): void
+    {
+        $fingerprint = Fingerprint::forResult($this->aFinding(), 'production', 1);
+
+        self::assertMatchesRegularExpression('/\A[0-9a-f]{64}\z/', $fingerprint);
+
+        // Changing what goes into a fingerprint changes what counts as the same problem, so the
+        // scheme is inside the hash: old issues stop matching openly rather than two schemes'
+        // answers silently merging into one issue.
+        self::assertNotSame($fingerprint, Fingerprint::of([
+            'craft.version',
+            'production',
+            '1',
+            null,
+            null,
+        ]));
+    }
+
+    // --- The issue filter: the one place a URL decides what the database is asked.
+
+    public function testTheFilterKeepsWhatItRecognises(): void
+    {
+        $filter = IssueFilter::fromParams([
+            'status' => ['new', 'ignored'],
+            'severity' => 'critical',
+        ]);
+
+        self::assertSame([IssueStatus::NEW, IssueStatus::IGNORED], $filter->statuses);
+        self::assertSame([Severity::CRITICAL], $filter->severities);
+        self::assertTrue($filter->hasStatus(IssueStatus::NEW));
+        self::assertFalse($filter->hasStatus(IssueStatus::RESOLVED));
+        self::assertTrue($filter->hasSeverity(Severity::CRITICAL));
+    }
+
+    public function testTheFilterDropsWhatItDoesNotRecogniseRatherThanRefusingIt(): void
+    {
+        // A stale bookmark naming something that no longer exists should show the list, not an
+        // error page — but it must not reach the query either.
+        $filter = IssueFilter::fromParams([
+            'status' => ['new', 'nonsense', 'DROP TABLE', ['nested'], 7, null, 'new'],
+            'severity' => ['made-up'],
+        ]);
+
+        self::assertSame([IssueStatus::NEW], $filter->statuses);
+        self::assertSame([], $filter->severities);
+    }
+
+    public function testOnlyAKnownColumnCanBeSortedOn(): void
+    {
+        foreach (['id; DROP TABLE', 'fingerprint', 'latestResult'] as $refused) {
+            self::assertSame('lastDetected', IssueFilter::fromParams(['sort' => $refused])->sort, $refused);
+        }
+
+        foreach (IssueFilter::SORTABLE as $name => $column) {
+            self::assertSame($name, IssueFilter::fromParams(['sort' => $name])->sort);
+            self::assertMatchesRegularExpression('/\A[A-Za-z]+\z/', $column);
+        }
+    }
+
+    public function testADateThatIsNotOneIsDropped(): void
+    {
+        foreach (['yesterday', '2026-13-45', '2026-02-30', '12/01/2026', '2026-01-01 10:00'] as $bad) {
+            self::assertNull(IssueFilter::fromParams(['from' => $bad])->detectedFrom, $bad);
+        }
+
+        self::assertSame('2026-01-31', IssueFilter::fromParams(['from' => '2026-01-31'])->detectedFrom);
+    }
+
+    public function testFreeTextIsTrimmedAndBounded(): void
+    {
+        self::assertSame('queue.backlog', IssueFilter::fromParams(['diagnostic' => '  queue.backlog  '])->diagnosticId);
+        self::assertNull(IssueFilter::fromParams(['diagnostic' => '   '])->diagnosticId);
+        self::assertSame(100, mb_strlen((string)IssueFilter::fromParams(['diagnostic' => str_repeat('a', 500)])->diagnosticId));
+        self::assertSame(255, mb_strlen((string)IssueFilter::fromParams(['environment' => str_repeat('b', 500)])->environment));
+    }
+
+    public function testPagingIsClampedToSomethingASiteCanServe(): void
+    {
+        foreach (['0', '-4', 'seven'] as $nonsense) {
+            self::assertSame(1, IssueFilter::fromParams(['page' => $nonsense])->page, $nonsense);
+        }
+
+        self::assertSame(9, IssueFilter::fromParams(['page' => '9'])->page);
+        self::assertSame(IssueFilter::MAX_PER_PAGE, IssueFilter::fromParams(['perPage' => '100000'])->perPage);
+        self::assertSame(IssueFilter::PER_PAGE, IssueFilter::fromParams([])->perPage);
+        self::assertSame(100, (new IssueFilter(page: 3, perPage: 50))->offset());
+    }
+
+    public function testIssuesBelongingToNoParticularSiteCanBeAskedFor(): void
+    {
+        $none = IssueFilter::fromParams(['siteId' => IssueFilter::NO_SITE]);
+
+        self::assertTrue($none->withoutSite);
+        self::assertNull($none->siteId);
+        self::assertTrue($none->isFiltering());
+
+        $one = IssueFilter::fromParams(['siteId' => '4']);
+
+        self::assertSame(4, $one->siteId);
+        self::assertFalse($one->withoutSite);
+    }
+
+    public function testAFilterSurvivesBeingTurnedIntoALinkAndBack(): void
+    {
+        $original = IssueFilter::fromParams([
+            'status' => ['new', 'investigating'],
+            'severity' => ['high'],
+            'diagnostic' => 'queue.backlog',
+            'siteId' => '2',
+            'environment' => 'production',
+            'from' => '2026-01-01',
+            'to' => '2026-02-01',
+            'sort' => 'severity',
+            'dir' => 'asc',
+            'page' => '3',
+        ]);
+
+        self::assertEquals($original, IssueFilter::fromParams($original->toParams()));
+
+        // A link says what was asked for rather than restating every default.
+        self::assertSame([], (new IssueFilter())->toParams());
+    }
+
+    public function testTheDefaultViewIsWhatIsOutstandingAndSaysSo(): void
+    {
+        // Stated rather than left to an empty filter: a list that quietly hides closed issues
+        // without saying so is one a reader will eventually be misled by.
+        $filter = IssueFilter::outstanding();
+
+        self::assertSame(IssueStatus::open(), $filter->statuses);
+        self::assertTrue($filter->isFiltering());
+        self::assertFalse($filter->hasStatus(IssueStatus::RESOLVED));
+    }
+
+    public function testSortingTurnsTheDirectionAroundAndReturnsToTheFirstPage(): void
+    {
+        $first = (new IssueFilter(page: 6))->sortedBy('severity');
+
+        self::assertSame('severity', $first->sort);
+        self::assertFalse($first->ascending);
+        self::assertSame(1, $first->page);
+
+        self::assertTrue($first->sortedBy('severity')->ascending);
+        // A different column starts over rather than inheriting the other one's direction.
+        self::assertFalse($first->sortedBy('severity')->sortedBy('status')->ascending);
+
+        $unsortable = new IssueFilter(sort: 'severity');
+        self::assertSame($unsortable, $unsortable->sortedBy('fingerprint'));
+    }
+
+    public function testMovingPagesKeepsEverythingElse(): void
+    {
+        $filter = new IssueFilter(statuses: [IssueStatus::NEW], sort: 'severity', ascending: true, page: 2);
+        $moved = $filter->onPage(5);
+
+        self::assertSame(5, $moved->page);
+        self::assertSame([IssueStatus::NEW], $moved->statuses);
+        self::assertSame('severity', $moved->sort);
+        self::assertTrue($moved->ascending);
+        self::assertSame(1, $filter->onPage(0)->page);
+    }
+
+    public function testAPageOfIssuesKnowsWhereItSitsInTheWholeSet(): void
+    {
+        // What a page holds is the database's answer, and the positions are asserted against
+        // real rows elsewhere. The arithmetic around it is this test's.
+        $middle = new IssueList(issues: [], total: 240, filter: new IssueFilter(page: 2, perPage: 50));
+
+        self::assertSame(5, $middle->pageCount());
+        self::assertTrue($middle->hasPages());
+        self::assertTrue($middle->hasPreviousPage());
+        self::assertTrue($middle->hasNextPage());
+        self::assertSame(2, $middle->currentPage());
+
+        $empty = new IssueList(issues: [], total: 0, filter: new IssueFilter());
+
+        self::assertTrue($empty->isEmpty());
+        self::assertSame(1, $empty->pageCount());
+        self::assertFalse($empty->hasPages());
+
+        // A page past the end reports the last page, and no position at all: a page holding
+        // nothing must not claim to be showing rows 4901 to 4900.
+        $beyond = new IssueList(issues: [], total: 10, filter: new IssueFilter(page: 99, perPage: 50));
+
+        self::assertSame(1, $beyond->currentPage());
+        self::assertFalse($beyond->hasNextPage());
+        self::assertSame(0, $beyond->firstPosition());
+        self::assertSame(0, $beyond->lastPosition());
+    }
+
+    /**
+     * Data whose encoded form is exactly the given number of bytes, built from entries each well
+     * within the string limit so only the byte budget can be what cuts it.
+     *
+     * @return array<string, string>
+     */
+    private function dataEncodingTo(int $bytes): array
+    {
+        $data = [];
+        $i = 0;
+
+        while (strlen(Evidence::encode($data)) + 1500 < $bytes) {
+            $data['k' . $i++] = str_repeat('a', 1400);
+        }
+
+        $data['last'] = '';
+        $data['last'] = str_repeat('b', $bytes - strlen(Evidence::encode($data)));
+
+        return $data;
     }
 }

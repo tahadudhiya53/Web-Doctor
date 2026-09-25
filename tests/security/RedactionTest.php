@@ -4,7 +4,9 @@ namespace Tahadudhiya\WebDoctor\Tests\security;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Tahadudhiya\WebDoctor\enums\EvidenceType;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\models\Evidence;
 
 /**
  * The single point Web Doctor's promise never to expose a secret rests on. If anything here
@@ -24,6 +26,12 @@ class RedactionTest extends TestCase
             'secret', 'clientSecret', 'token', 'accessToken', 'refreshToken',
             'privateKey', 'credentials', 'Authorization', 'signature', 'passphrase',
             'hashSalt', 'DSN', 'Cookie', 'sessionId',
+            // The name half of a service login.
+            'DB_USER', 'dbUsername', 'SMTP_USERNAME', 'mailerUser',
+            // Credentials by environment-variable convention.
+            'SENDGRID_KEY', 'SMTP_PASS', 'MAILGUN_AUTH', 'PHP_AUTH_PW',
+            'auth', 'api-key', 'access_token', 'private_key', 'client_secret', 'mail_password',
+            'AWS_SECRET_ACCESS_KEY', 'AWS_ACCESS_KEY_ID', 'GOOGLE_APPLICATION_CREDENTIALS',
         ];
 
         return array_combine($keys, array_map(static fn(string $k): array => [$k], $keys));
@@ -219,6 +227,36 @@ class RedactionTest extends TestCase
                 ['fake-secret-token'],
                 [],
             ],
+            'an API error body quoted as JSON' => [
+                'HTTP 401: {"error":"unauthorised","api_key":"fake-json-key","client_secret": "fake-json-secret"}',
+                ['fake-json-key', 'fake-json-secret'],
+                ['HTTP 401', '"error":"unauthorised"'],
+            ],
+            'JSON nested inside JSON' => [
+                '{"data":{"credentials":{"password":"fake-nested-pw"}},"status":500}',
+                ['fake-nested-pw'],
+                ['"status":500'],
+            ],
+            'JSON with its quotes escaped' => [
+                'payload={\\"access_token\\":\\"fake-escaped-token\\"}',
+                ['fake-escaped-token'],
+                ['payload='],
+            ],
+            'single-quoted pairs' => [
+                "{'secret': 'fake-single-quoted'}",
+                ['fake-single-quoted'],
+                [],
+            ],
+            'an auth option' => [
+                'Redis refused auth=fake-redis-auth on connect',
+                ['fake-redis-auth'],
+                ['Redis refused', 'on connect'],
+            ],
+            'a credential in a URL query' => [
+                'GET https://api.example.com/v1?access_token=fake-query-token&page=2 failed',
+                ['fake-query-token'],
+                ['api.example.com', 'page=2'],
+            ],
         ];
     }
 
@@ -262,7 +300,10 @@ class RedactionTest extends TestCase
             self::assertTrue(Redaction::isSensitiveKey($key), "$key names a credential.");
         }
 
-        foreach (['primaryKey', 'keyword', 'author', 'description', 'tokenizer', 'identifier', 'monkey', 'salty'] as $key) {
+        // `user` and `pass` alone are a person and a status count; `primaryKey` spelt in camel case
+        // is a column. Only the spelling of an environment variable turns a trailing KEY or PASS
+        // into a credential.
+        foreach (['primaryKey', 'keyword', 'author', 'description', 'tokenizer', 'identifier', 'monkey', 'salty', 'user', 'username', 'userId', 'pass', 'cacheKey', 'PRIMARY', 'KEYWORD_LIST'] as $key) {
             self::assertFalse(Redaction::isSensitiveKey($key), sprintf('%s is not a credential.', $key));
         }
     }
@@ -348,5 +389,255 @@ class RedactionTest extends TestCase
         } finally {
             fclose($handle);
         }
+    }
+
+    /**
+     * Built at runtime rather than written out, so a secret scanner reading this file does not
+     * mistake the examples for leaked credentials.
+     *
+     * @return array<string, array{string, string, string}> The text, what must not survive, what must.
+     */
+    public static function credentialShapes(): array
+    {
+        $jwt = 'eyJ' . 'hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N';
+        $aws = 'AKIA' . 'IOSFODNN7EXAMPLE';
+        $stripe = 'sk_' . 'live_' . str_repeat('a1B2', 6);
+        $github = 'gh' . 'p_' . str_repeat('x9Y8', 9);
+        $gitlab = 'gl' . 'pat-' . str_repeat('Qw3_', 6);
+        $slack = 'xo' . 'xb-' . '123456789012-abcdefghijKL';
+        $google = 'AI' . 'za' . str_repeat('Sy0_', 9) . 'Abc';
+        $sendgrid = 'S' . 'G.' . str_repeat('abcd', 5) . '.' . str_repeat('WXYZ', 5);
+        $pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAfakefakefake\n-----END RSA PRIVATE KEY-----";
+
+        return [
+            'a private key' => ["Loaded key: $pem from disk", 'MIIEpAIBAAKCAQEAfakefakefake', 'from disk'],
+            'a private key cut off before its end' => ["-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAAS", 'MIIEvQIBADANBgkqhkiG9w0BAQEFAAS', ''],
+            'an AWS access key ID' => ["Uploading with $aws failed", $aws, 'Uploading with'],
+            'a JSON web token' => ["Rejected $jwt as expired", $jwt, 'as expired'],
+            'a Stripe key' => ["Charge failed using $stripe", $stripe, 'Charge failed'],
+            'a GitHub token' => ["Clone failed for $github", $github, 'Clone failed'],
+            'a GitLab token' => ["Push refused: $gitlab", $gitlab, 'Push refused'],
+            'a Slack token' => ["Slack said invalid_auth for $slack", $slack, 'invalid_auth'],
+            'a Google API key' => ["Maps quota exceeded for $google", $google, 'Maps quota'],
+            'a SendGrid key' => ["Mail rejected: $sendgrid", $sendgrid, 'Mail rejected'],
+            'a Slack webhook' => ['POST https://hooks.slack.com/services/T0001/B0002/abcDEF123 returned 404', 'T0001/B0002/abcDEF123', 'hooks.slack.com/services/'],
+            'a Discord webhook' => ['POST https://discord.com/api/webhooks/1234567/abc-DEF_ghi returned 401', 'abc-DEF_ghi', 'discord.com/api/webhooks/'],
+        ];
+    }
+
+    #[DataProvider('credentialShapes')]
+    public function testACredentialIsRecognisedByItsShapeWhateverSurroundsIt(string $text, string $secret, string $kept): void
+    {
+        // No key names these. The shape is the only thing that says what they are, and an
+        // exception message or a log line is exactly where they appear with nothing beside them.
+        $redacted = Redaction::redactString($text);
+
+        self::assertStringNotContainsString($secret, $redacted);
+        self::assertStringContainsString(Redaction::REDACTED, $redacted);
+        self::assertStringContainsString($kept, $redacted);
+
+        // The same holds under a key nobody would think to guard.
+        self::assertStringNotContainsString($secret, (string)json_encode(Redaction::redact(['note' => $text])));
+    }
+
+    public function testTheEnvironmentsOwnCredentialsAreRecognisedWhereverTheyTurnUp(): void
+    {
+        // A driver that quotes the password it was given, with nothing beside it to say what it
+        // is, is caught because the value itself is known to be a credential.
+        $variables = [
+            'WEBDOCTOR_TEST_API_TOKEN' => 'Zq9-unit-secret-771',
+            'WEBDOCTOR_TEST_SMTP_PASS' => 'p4ss/with+symbols',
+            // Too short to look for without mangling ordinary words, and a plain word.
+            'WEBDOCTOR_TEST_SHORT_SECRET' => 'ab1',
+            'WEBDOCTOR_TEST_WORD_SECRET' => 'recorded',
+            // Not a credential at all.
+            'WEBDOCTOR_TEST_REGION' => 'eu-west-1-zone9',
+        ];
+
+        $this->forgetKnownSecrets();
+
+        foreach ($variables as $name => $value) {
+            putenv("$name=$value");
+        }
+
+        try {
+            $redacted = Redaction::redactString(
+                'Login rejected for Zq9-unit-secret-771 (retry p4ss/with+symbols) ab1 recorded in eu-west-1-zone9',
+            );
+
+            self::assertStringNotContainsString('Zq9-unit-secret-771', $redacted);
+            self::assertStringNotContainsString('p4ss/with+symbols', $redacted);
+            self::assertStringContainsString('Login rejected for', $redacted);
+            self::assertStringContainsString('ab1 recorded in eu-west-1-zone9', $redacted);
+        } finally {
+            foreach (array_keys($variables) as $name) {
+                putenv($name);
+            }
+
+            $this->forgetKnownSecrets();
+        }
+    }
+
+    public function testWhatRedactionLeftBehindCanBeCounted(): void
+    {
+        $marks = Redaction::marks(Redaction::redact([
+            'password' => 'hunter2',
+            'note' => 'retry with token=abc then apiKey=def',
+            'long' => str_repeat('x', 5000),
+            'fromEmail' => Redaction::MISSING,
+        ]));
+
+        self::assertSame(3, $marks['redacted']);
+        self::assertTrue($marks['bounded']);
+        self::assertSame(['redacted' => 0, 'bounded' => false], Redaction::marks(['a' => 'b', 'c' => [1, 2]]));
+        self::assertTrue(Redaction::marks(Redaction::redact(array_fill(0, 500, 'x')))['bounded']);
+    }
+
+    public function testTheProseADiagnosticWritesIsRedactedBeforeAnythingReadsIt(): void
+    {
+        // A result's summary becomes an issue's title, a row on the dashboard and a line in every
+        // report. Diagnostics — other plugins' included — write it from whatever failed, so it is
+        // redacted where the result is built rather than wherever it happens to be shown.
+        $result = new \Tahadudhiya\WebDoctor\models\DiagnosticResult(
+            diagnosticId: 'tests.prose',
+            name: 'Prose',
+            category: \Tahadudhiya\WebDoctor\enums\DiagnosticCategory::EMAIL,
+            status: \Tahadudhiya\WebDoctor\enums\DiagnosticStatus::FAIL,
+            summary: 'SMTP refused: password=hunter2-summary',
+            description: 'Connecting to smtp://mailer:hunter2-description@mail.example.com failed.',
+            recommendation: 'Rotate api_key=hunter2-recommendation and try again.',
+        );
+
+        $json = (string)json_encode($result);
+
+        foreach (['hunter2-summary', 'hunter2-description', 'hunter2-recommendation'] as $secret) {
+            self::assertStringNotContainsString($secret, $json);
+        }
+
+        self::assertStringContainsString('SMTP refused', $result->summary);
+        self::assertStringContainsString('mail.example.com', $result->description);
+    }
+
+    /**
+     * The environment's credentials are read once per process; a test that changes the
+     * environment has to make the helper read it again, and put it back afterwards.
+     */
+    private function forgetKnownSecrets(): void
+    {
+        (new \ReflectionProperty(Redaction::class, 'knownSecrets'))->setValue(null, null);
+    }
+
+    public function testMalformedTextIsRepairedRatherThanCarriedIntoStorage(): void
+    {
+        // One bad byte in an exception message must not become a value that cannot be encoded or
+        // stored in a UTF-8 column.
+        $redacted = Redaction::redactString("Connection failed: \xC3\x28 password=hunter2 \xFF");
+
+        self::assertTrue(mb_check_encoding($redacted, 'UTF-8'));
+        self::assertIsString(json_encode($redacted));
+        self::assertStringNotContainsString('hunter2', $redacted);
+    }
+
+    /**
+     * Every credential form the helper claims to catch, carried through every field a piece of
+     * evidence has, and checked in both forms evidence leaves the process in: JSON, and the
+     * serialized object the latest run is cached as.
+     */
+    public function testNoCredentialSurvivesInAnyFieldOfAPieceOfEvidence(): void
+    {
+        $jwt = 'eyJ' . 'hbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdWRpdCJ9.c2lnbmF0dXJlLWF1ZGl0';
+        $aws = 'AKIA' . 'AUDITAUDITAUDIT1';
+        $stripe = 'sk_' . 'live_' . str_repeat('Au9t', 6);
+        $github = 'gh' . 'p_' . str_repeat('Aud1', 9);
+        $pem = "-----BEGIN PRIVATE KEY-----\nMIIauditauditaudit\n-----END PRIVATE KEY-----";
+
+        $forms = [
+            'password=pw-free-text',
+            '{"api_key":"ak-json"}',
+            "rejected $jwt",
+            "using $aws",
+            "charge $stripe",
+            "clone $github",
+            $pem,
+            'mysql://root:pw-in-dsn@db/craft',
+            'https://hooks.slack.com/services/T1/B2/slackpath9',
+            'Authorization: Bearer bearer-audit-token',
+        ];
+        $secrets = ['pw-free-text', 'ak-json', $jwt, $aws, $stripe, $github, 'MIIauditauditaudit', 'pw-in-dsn', 'T1/B2/slackpath9', 'bearer-audit-token'];
+
+        foreach ($forms as $form) {
+            $evidence = new Evidence(
+                type: EvidenceType::ENVIRONMENT_VARIABLE,
+                label: "label $form",
+                source: "source $form",
+                data: [
+                    'text' => $form,
+                    'nested' => ['deeper' => ['note' => $form]],
+                    'password' => 'pw-under-a-key',
+                    'list' => [$form],
+                ],
+                metadata: ['note' => $form, 'token' => 'tok-under-a-key'],
+                reference: "ref $form",
+            );
+
+            $outputs = [(string)json_encode($evidence), serialize($evidence)];
+
+            foreach ($outputs as $output) {
+                foreach ([...$secrets, 'pw-under-a-key', 'tok-under-a-key'] as $secret) {
+                    self::assertStringNotContainsString($secret, $output, sprintf('%s survived from “%s”.', $secret, $form));
+                }
+            }
+        }
+    }
+
+    public function testAnExceptionAndItsTraceCannotCarryACredentialIntoEvidence(): void
+    {
+        $previous = new \RuntimeException('inner {"client_secret":"cs-inner-audit"}');
+        $exception = new \RuntimeException('outer failed password=pw-outer-audit', 0, $previous);
+
+        $outputs = [
+            serialize(Evidence::fromThrowable($exception, 'tests.exception')),
+            serialize(Evidence::stackTrace($exception, 'tests.exception')),
+            (string)json_encode(Evidence::fromThrowable($exception, 'tests.exception')),
+        ];
+
+        foreach ($outputs as $output) {
+            self::assertStringNotContainsString('pw-outer-audit', $output);
+            self::assertStringNotContainsString('cs-inner-audit', $output);
+        }
+    }
+
+    public function testBeingClientSafeNeverExemptsEvidenceFromRedaction(): void
+    {
+        // Client safety is a floor on top of redaction, never instead of it. Every type approved
+        // for clients is checked, in every field.
+        foreach (EvidenceType::cases() as $type) {
+            if (!$type->isClientSafe()) {
+                continue;
+            }
+
+            $evidence = new Evidence(
+                type: $type,
+                label: 'STRIPE_SECRET=sk-client-label',
+                source: 'tests.client',
+                data: ['STRIPE_SECRET' => 'sk-client-data', 'SMTP_PASS' => 'pw-client-data', 'region' => 'eu-west-1'],
+                metadata: ['token' => 'tok-client-meta'],
+                reference: 'https://user:pw-client-ref@example.com/x',
+            );
+
+            $output = serialize($evidence);
+
+            foreach (['sk-client-label', 'sk-client-data', 'pw-client-data', 'tok-client-meta', 'pw-client-ref'] as $secret) {
+                self::assertStringNotContainsString($secret, $output, sprintf('%s leaked through client-safe %s evidence.', $secret, $type->value));
+            }
+
+            self::assertSame('eu-west-1', $evidence->get('region'));
+        }
+
+        // Approval is a list, so the default for anything not on it — including a type stored by
+        // some other version and read back as the fallback — is to withhold.
+        self::assertFalse(EvidenceType::CONFIGURATION->isClientSafe());
+        self::assertFalse(EvidenceType::EXCEPTION->isClientSafe());
+        self::assertFalse(EvidenceType::STACK_TRACE->isClientSafe());
     }
 }

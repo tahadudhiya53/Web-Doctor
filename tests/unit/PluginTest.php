@@ -4,6 +4,7 @@ namespace Tahadudhiya\WebDoctor\Tests\unit;
 
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
+use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\models\Settings;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\WebDoctor;
@@ -15,8 +16,11 @@ use Tahadudhiya\WebDoctor\WebDoctor;
  */
 class PluginTest extends TestCase
 {
-    /** @var string The version development stays on, in both Composer and the plugin class. */
-    private const VERSION = '1.0.0';
+    /** @var string The release version development stays on, in Composer. */
+    private const VERSION = '5.0.0';
+
+    /** @var string The schema version development stays on, in the plugin class. */
+    private const SCHEMA_VERSION = '1.0.0';
 
     /**
      * @return array<string, mixed>
@@ -34,11 +38,28 @@ class PluginTest extends TestCase
      */
     private function allPermissions(): array
     {
+        return $this->flatten((new Permissions())->definitions());
+    }
+
+    /**
+     * Walks the whole tree rather than one level of it: a permission nested under a nested one
+     * is still a permission Web Doctor declares, and a helper that stopped short would quietly
+     * exempt the deepest ones from every rule these tests check.
+     *
+     * @param array<string, mixed> $definitions
+     * @return list<string>
+     */
+    private function flatten(array $definitions): array
+    {
         $permissions = [];
 
-        foreach ((new Permissions())->definitions() as $permission => $definition) {
+        foreach ($definitions as $permission => $definition) {
             $permissions[] = $permission;
-            $permissions = [...$permissions, ...array_keys($definition['nested'] ?? [])];
+            $nested = is_array($definition) ? ($definition['nested'] ?? []) : [];
+
+            if (is_array($nested)) {
+                $permissions = [...$permissions, ...$this->flatten($nested)];
+            }
         }
 
         return $permissions;
@@ -73,7 +94,7 @@ class PluginTest extends TestCase
         $schemaVersion = (new ReflectionClass(WebDoctor::class))->getDefaultProperties()['schemaVersion'];
 
         self::assertSame(self::VERSION, $this->composer()['version']);
-        self::assertSame(self::VERSION, $schemaVersion);
+        self::assertSame(self::SCHEMA_VERSION, $schemaVersion);
     }
 
     public function testThereIsOnlyEverOneMigration(): void
@@ -90,6 +111,7 @@ class PluginTest extends TestCase
         $components = WebDoctor::config()['components'];
 
         self::assertSame(Permissions::class, $components['permissions']['class']);
+        self::assertSame(\Tahadudhiya\WebDoctor\services\EvidenceStore::class, $components['evidence']['class']);
     }
 
     public function testPluginHasAControlPanelSectionAndSettings(): void
@@ -146,8 +168,17 @@ class PluginTest extends TestCase
     public function testSettingsCarryNothingSecret(): void
     {
         // Web Doctor reports whether a credential is present, never what it is. Nothing in its
-        // own configuration may become a place to keep one.
-        self::assertSame(['pluginName'], (new Settings())->attributes());
+        // own configuration may become a place to keep one — so the list is pinned, and each
+        // name is put past the same test that decides what gets redacted everywhere else.
+        $attributes = (new Settings())->attributes();
+
+        self::assertContains('pluginName', $attributes);
+
+        // Each name is put past the same test that decides what gets redacted everywhere else,
+        // so a setting that looks like somewhere to keep a credential fails here.
+        foreach ($attributes as $attribute) {
+            self::assertFalse(Redaction::isSensitiveKey($attribute), $attribute);
+        }
     }
 
     public function testEveryPermissionIsNamespacedToWebDoctor(): void
@@ -169,10 +200,32 @@ class PluginTest extends TestCase
         self::assertNotSame(Permissions::VIEW, Permissions::RUN);
     }
 
+    public function testChangingAnIssueOrReadingItsEvidenceIsGuardedSeparatelyFromReadingIt(): void
+    {
+        // An issue carries decisions — that something is being looked at, that something will
+        // not be acted on — and a decision recorded against a team's installation is not
+        // everybody's to make. Its evidence carries the internals it was found in, which not
+        // everybody following the issue needs to see.
+        $definitions = (new Permissions())->definitions();
+        $issues = $definitions[Permissions::VIEW]['nested'][Permissions::VIEW_ISSUES] ?? null;
+
+        self::assertIsArray($issues);
+        self::assertArrayHasKey(Permissions::MANAGE_ISSUES, $issues['nested'] ?? []);
+        self::assertArrayHasKey(Permissions::VIEW_EVIDENCE, $issues['nested'] ?? []);
+        self::assertNotSame(Permissions::VIEW_ISSUES, Permissions::MANAGE_ISSUES);
+        self::assertNotSame(Permissions::VIEW_ISSUES, Permissions::VIEW_EVIDENCE);
+    }
+
     public function testOnlyPermissionsWithSomethingBehindThemAreDeclared(): void
     {
         // Permissions arrive with the features they guard. Declaring one early would offer an
         // administrator a switch that changes nothing.
-        self::assertSame([Permissions::VIEW, Permissions::RUN], $this->allPermissions());
+        self::assertSame([
+            Permissions::VIEW,
+            Permissions::RUN,
+            Permissions::VIEW_ISSUES,
+            Permissions::MANAGE_ISSUES,
+            Permissions::VIEW_EVIDENCE,
+        ], $this->allPermissions());
     }
 }

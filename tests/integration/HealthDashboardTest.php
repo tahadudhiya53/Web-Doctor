@@ -17,6 +17,7 @@ use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
+use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\Runs;
@@ -76,6 +77,13 @@ class HealthDashboardTest extends TestCase
     {
         Craft::$app->getUser()->setIdentity(null);
 
+        // Running the dashboard's action reconciles what it found into the Issue Center, which
+        // is a real table in whoever's installation these tests run in. Only the rows this
+        // test's own check could have raised are removed, matched on the ID it registered under.
+        if (Craft::$app->getDb()->tableExists(IssueRecord::TABLE)) {
+            IssueRecord::deleteAll(['like', 'diagnosticId', 'tests.%', false]);
+        }
+
         if ($this->originalRequest !== null) {
             Craft::$app->set('request', $this->originalRequest);
             $this->originalRequest = null;
@@ -104,7 +112,7 @@ class HealthDashboardTest extends TestCase
 
         return new WebDoctor('web-doctor', Craft::$app, $config + [
             'name' => 'Web Doctor',
-            'version' => '1.0.0',
+            'version' => '5.0.0',
         ]);
     }
 
@@ -659,7 +667,7 @@ class HealthDashboardTest extends TestCase
             'Something to look at.',
             [new Evidence(
                 type: EvidenceType::CONFIGURATION,
-                label: 'Mail transport',
+                label: 'Mail transport token=zz-label-secret',
                 source: 'tests.dashboard',
                 data: [
                     'host' => 'smtp.example.test',
@@ -680,9 +688,47 @@ class HealthDashboardTest extends TestCase
         self::assertStringContainsString('Mail transport', $html);
         self::assertStringContainsString('Configuration', $html);
 
-        foreach (['ZZZ-DISTINCTIVE-VALUE-ZZZ', 'smtp.example.test', 'sk-live-should-never-appear', 'hunter2'] as $secret) {
+        foreach (['ZZZ-DISTINCTIVE-VALUE-ZZZ', 'smtp.example.test', 'sk-live-should-never-appear', 'hunter2', 'zz-label-secret'] as $secret) {
             self::assertStringNotContainsString($secret, $html);
         }
+
+        // A label with something withheld from it shows the withheld part as a mark, never as the
+        // bracketed marker a reader would have to interpret.
+        self::assertStringContainsString('Mail transport token=<span class="wd-mark wd-mark--redacted"', $html);
+        self::assertStringNotContainsString(\Tahadudhiya\WebDoctor\helpers\Redaction::REDACTED, $html);
+    }
+
+    public function testARunFromTheControlPanelKeepsTheEvidenceBehindWhatItFinds(): void
+    {
+        // The whole path a person sets going: the run action, the engine stamping the run, the
+        // reconciliation, and the evidence landing against the issue it supports.
+        $this->diagnostic->handler = static fn(TestDiagnostic $d) => $d->build('warning', [
+            'Something to look at.',
+            [new Evidence(
+                type: EvidenceType::QUEUE,
+                label: 'Queue depth',
+                source: 'tests.dashboard',
+                data: ['waiting' => 12, 'apiKey' => 'sk-should-never-be-stored'],
+                runId: 'claimed-by-the-check',
+            )],
+        ]);
+
+        $this->signIn(admin: true);
+        $this->post(['all' => '1']);
+        $this->controller()->runAction('run');
+
+        $issue = IssueRecord::findOne(['diagnosticId' => 'tests.dashboard']);
+
+        self::assertInstanceOf(IssueRecord::class, $issue);
+
+        $row = \Tahadudhiya\WebDoctor\records\EvidenceRecord::findOne(['issueId' => $issue->id]);
+
+        self::assertInstanceOf(\Tahadudhiya\WebDoctor\records\EvidenceRecord::class, $row);
+        self::assertSame('Queue depth', $row->label);
+        self::assertSame($issue->latestRunId, $row->lastRunId);
+        self::assertNotSame('claimed-by-the-check', $row->lastRunId);
+        self::assertSame($issue->environment, $row->environment);
+        self::assertStringNotContainsString('sk-should-never-be-stored', (string)$row->data);
     }
 
     public function testAnExceptionFromACheckIsNotRepeatedRawOnThePage(): void

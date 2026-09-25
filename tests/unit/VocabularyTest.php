@@ -5,12 +5,19 @@ namespace Tahadudhiya\WebDoctor\Tests\unit;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
+use Tahadudhiya\WebDoctor\enums\EvidenceType;
+use Tahadudhiya\WebDoctor\enums\IssueEventType;
+use Tahadudhiya\WebDoctor\enums\IssueResolution;
+use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
 
 /**
- * The words a result is made of: what happened (status), how much it matters (severity) and how
- * firmly it is held (confidence). The rest of Web Doctor reasons from these distinctions, so
- * they are asserted rather than left to whoever reads the enums next.
+ * The words Web Doctor's domain is made of: what happened to a check (status), how much it
+ * matters (severity), how firmly a conclusion is held (confidence), what kind of fact backs it
+ * (evidence type), and where a problem stands
+ * once it outlives the run that found it (issue status, resolution, event type). The rest of the
+ * plugin reasons from these distinctions, so they are asserted rather than left to whoever reads
+ * the enums next.
  */
 class VocabularyTest extends TestCase
 {
@@ -125,10 +132,113 @@ class VocabularyTest extends TestCase
         );
     }
 
-    public function testEveryWordInTheVocabularyIsLabelled(): void
+    public function testEveryWordInTheVocabularyIsLabelledAndSpeltOnce(): void
     {
-        foreach ([...DiagnosticStatus::cases(), ...Severity::cases(), ...Confidence::cases()] as $case) {
-            self::assertNotSame('', $case->label());
+        $vocabularies = [
+            DiagnosticStatus::cases(),
+            Severity::cases(),
+            Confidence::cases(),
+            IssueStatus::cases(),
+            IssueResolution::cases(),
+            IssueEventType::cases(),
+            EvidenceType::cases(),
+        ];
+
+        foreach ($vocabularies as $cases) {
+            $labels = [];
+
+            foreach ($cases as $case) {
+                self::assertNotSame('', $case->label(), $case->value);
+                $labels[] = $case->label();
+            }
+
+            // Two words in one vocabulary reading the same on screen would make a filter or a
+            // status column impossible to act on.
+            self::assertSame($labels, array_unique($labels));
         }
+    }
+
+    public function testEvidenceCanBeTypedByEveryPartOfTheInstallationItDescribes(): void
+    {
+        // Evidence takes the most particular type that is true of it, so both the state of a part
+        // of the installation and the particular facts within it have a word.
+        $missing = array_diff(
+            ['configuration', 'database', 'logEntry', 'queue', 'queueJob', 'filesystem', 'plugin', 'element', 'httpResponse', 'environmentVariable', 'deployment', 'system'],
+            array_column(EvidenceType::cases(), 'value'),
+        );
+
+        self::assertSame([], array_values($missing));
+    }
+
+    // --- Where a problem stands once it outlives the run that found it.
+
+    public function testEveryIssueStatusIsEitherOutstandingOrClosed(): void
+    {
+        $open = IssueStatus::open();
+
+        foreach (IssueStatus::cases() as $status) {
+            self::assertSame(in_array($status, $open, true), $status->isOpen(), $status->value);
+        }
+
+        self::assertNotEmpty($open);
+        self::assertNotCount(count(IssueStatus::cases()), $open);
+    }
+
+    public function testOnlyWebDoctorMaySetAnIssueResolvedOrRepairing(): void
+    {
+        // The distinction the Issue Center rests on. Resolution is established by what a later
+        // run observes and repair state belongs to whatever repairs, so neither is a person's to
+        // type in — otherwise "resolved" would come to mean "somebody clicked resolved".
+        $refused = array_values(array_filter(
+            IssueStatus::cases(),
+            static fn(IssueStatus $s): bool => !$s->isSettableByHand(),
+        ));
+
+        self::assertEqualsCanonicalizing([IssueStatus::RESOLVED, IssueStatus::REPAIRING], $refused);
+
+        $offered = IssueStatus::settableByHand();
+
+        self::assertNotContains(IssueStatus::RESOLVED, $offered);
+        self::assertNotContains(IssueStatus::REPAIRING, $offered);
+        self::assertCount(count(IssueStatus::cases()) - 2, $offered);
+    }
+
+    public function testADismissalIsAClosedJudgementThatNeedsAReasonAndResolvedIsNeither(): void
+    {
+        foreach ([IssueStatus::IGNORED, IssueStatus::WONT_FIX] as $status) {
+            self::assertTrue($status->isDismissal(), $status->value);
+            self::assertTrue($status->requiresReason(), $status->value);
+            self::assertFalse($status->isOpen(), $status->value);
+            // The point of a dismissal is that it is somebody's decision, so it has to be one
+            // they can actually make.
+            self::assertTrue($status->isSettableByHand(), $status->value);
+        }
+
+        // Nobody decided it, so there is nobody to ask for a reason. What stands in for one is
+        // the run that established it.
+        self::assertFalse(IssueStatus::RESOLVED->isDismissal());
+        self::assertFalse(IssueStatus::RESOLVED->requiresReason());
+    }
+
+    public function testIssueStatusesAreOrderedByLifecycleRatherThanAlphabet(): void
+    {
+        $positions = array_map(static fn(IssueStatus $s): int => $s->position(), IssueStatus::cases());
+
+        self::assertSame($positions, array_unique($positions));
+        self::assertLessThan(IssueStatus::RESOLVED->position(), IssueStatus::NEW->position());
+        self::assertLessThan(IssueStatus::RESOLVED->position(), IssueStatus::INVESTIGATING->position());
+    }
+
+    public function testAResolutionSaysHowFirmlyAnIssueIsResolved(): void
+    {
+        self::assertSame(IssueResolution::NONE, IssueResolution::tryFrom('none'));
+        self::assertStringContainsString('not been resolved', IssueResolution::NONE->explanation());
+
+        // The only claim Web Doctor can make today says outright that it is not a verification.
+        // If that sentence ever quietly becomes a stronger one, this fails.
+        $observed = IssueResolution::OBSERVED_CLEAR->explanation();
+
+        self::assertStringContainsString('no longer reports', $observed);
+        self::assertStringContainsString('not a verification', $observed);
     }
 }

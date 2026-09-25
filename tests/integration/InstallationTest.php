@@ -9,6 +9,8 @@ use craft\web\View;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\WebDoctor\console\controllers\WebDoctorController;
 use Tahadudhiya\WebDoctor\models\Settings;
+use Tahadudhiya\WebDoctor\records\IssueEventRecord;
+use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\Tests\_support\TestUser;
 use Tahadudhiya\WebDoctor\WebDoctor;
@@ -34,7 +36,7 @@ class InstallationTest extends TestCase
         // installed package.
         $this->plugin = new WebDoctor('web-doctor', Craft::$app, WebDoctor::config() + [
             'name' => 'Web Doctor',
-            'version' => '1.0.0',
+            'version' => '5.0.0',
             'developer' => 'Taha Dudhiya',
         ]);
     }
@@ -203,15 +205,129 @@ class InstallationTest extends TestCase
         self::assertContains('Web Doctor', $headings);
     }
 
-    public function testNothingIsInstalledIntoTheDatabaseYet(): void
+    public function testWebDoctorOwnsExactlyTheTablesItsRecordsDeclare(): void
     {
-        // Web Doctor owns no tables at this point. This is what fails first if one appears
-        // without the install migration that is supposed to create and drop it.
-        $tables = array_filter(
-            Craft::$app->getDb()->getSchema()->getTableNames(),
-            static fn(string $table): bool => str_starts_with($table, 'webdoctor_'),
+        // What fails first if a table appears that no record class accounts for — or if one a
+        // record expects was never created.
+        self::assertSame($this->declaredTables(), $this->ownedTables());
+    }
+
+    public function testEveryTableWebDoctorCreatesIsAlsoOneItRemoves(): void
+    {
+        // Uninstalling must leave the database as Web Doctor found it. Read from the migration's
+        // own source rather than by running it, because running it would drop the issues of
+        // whoever's installation these tests are running in.
+        $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
+
+        foreach (['IssueRecord', 'IssueEventRecord', 'EvidenceRecord'] as $record) {
+            self::assertMatchesRegularExpression(
+                sprintf('/createTable\(\s*%s::TABLE\b/', $record),
+                $source,
+                "$record's table is never created.",
+            );
+            self::assertMatchesRegularExpression(
+                sprintf('/dropTableIfExists\(\s*%s::TABLE\s*\)/', $record),
+                $source,
+                "$record's table is never dropped.",
+            );
+        }
+    }
+
+    public function testDeletingASiteDropsTheReferenceRatherThanTheIssue(): void
+    {
+        // Most findings are about the installation and merely stamped with whichever site was in
+        // view, so cascading would erase a database problem because an unrelated site was
+        // removed. Read from the migration because deleting a real site is not a test's to do.
+        $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
+
+        foreach (['IssueRecord', 'EvidenceRecord'] as $record) {
+            self::assertMatchesRegularExpression(
+                "/addForeignKey\\([^;]*{$record}::TABLE,\\s*\\['siteId'\\][^;]*'SET NULL'/s",
+                $source,
+                "$record's site reference must be dropped, not cascaded.",
+            );
+        }
+        self::assertStringNotContainsString("['siteId'], Table::SITES, ['id'], 'CASCADE'", $source);
+    }
+
+    public function testTheInstalledForeignKeysDeleteWhatTheyShouldAndNothingElse(): void
+    {
+        // Read from the database itself rather than the migration's source, so what is asserted
+        // is the schema a site actually has.
+        $db = Craft::$app->getDb();
+
+        if (!$db->getIsMysql()) {
+            self::markTestSkipped('Reads MySQL’s information schema.');
+        }
+
+        $rows = (new \craft\db\Query())
+            ->select(['k.TABLE_NAME', 'k.COLUMN_NAME', 'k.REFERENCED_TABLE_NAME', 'r.DELETE_RULE'])
+            ->from(['k' => 'information_schema.KEY_COLUMN_USAGE'])
+            ->innerJoin(['r' => 'information_schema.REFERENTIAL_CONSTRAINTS'], '[[r.CONSTRAINT_NAME]] = [[k.CONSTRAINT_NAME]] AND [[r.CONSTRAINT_SCHEMA]] = [[k.CONSTRAINT_SCHEMA]]')
+            ->where(['k.TABLE_SCHEMA' => $db->getSchema()->defaultSchema ?? $db->createCommand('SELECT DATABASE()')->queryScalar()])
+            ->andWhere(['like', 'k.TABLE_NAME', $db->tablePrefix . 'webdoctor_%', false])
+            ->all();
+
+        $rules = [];
+        $prefix = strlen((string)$db->tablePrefix);
+
+        foreach ($rows as $row) {
+            $row = array_change_key_case($row, CASE_UPPER);
+            $rules[substr((string)$row['TABLE_NAME'], $prefix) . '.' . $row['COLUMN_NAME']] = $row['DELETE_RULE'];
+        }
+
+        ksort($rules);
+
+        self::assertSame([
+            'webdoctor_evidence.issueId' => 'CASCADE',
+            'webdoctor_evidence.siteId' => 'SET NULL',
+            'webdoctor_issue_events.issueId' => 'CASCADE',
+            'webdoctor_issue_events.userId' => 'SET NULL',
+            'webdoctor_issues.siteId' => 'SET NULL',
+            'webdoctor_issues.statusChangedBy' => 'SET NULL',
+        ], $rules);
+    }
+
+    public function testWebDoctorHasOnlyEverHadOneMigration(): void
+    {
+        // The plugin is unreleased, so there is no installed schema anywhere that needs
+        // upgrading: every change is made to the install migration in place.
+        $migrations = glob(dirname(__DIR__, 2) . '/src/migrations/*.php') ?: [];
+
+        self::assertSame(['Install.php'], array_map('basename', $migrations));
+    }
+
+    /**
+     * The tables Web Doctor's record classes say it has, as the database spells them.
+     *
+     * @return list<string>
+     */
+    private function declaredTables(): array
+    {
+        $tables = array_map(
+            static fn(string $table): string => trim($table, '{}%'),
+            [IssueRecord::TABLE, IssueEventRecord::TABLE, \Tahadudhiya\WebDoctor\records\EvidenceRecord::TABLE],
         );
 
-        self::assertSame([], array_values($tables));
+        sort($tables);
+
+        return $tables;
+    }
+
+    /**
+     * The tables that actually exist under Web Doctor's prefix.
+     *
+     * @return list<string>
+     */
+    private function ownedTables(): array
+    {
+        $tables = array_values(array_filter(
+            Craft::$app->getDb()->getSchema()->getTableNames(),
+            static fn(string $table): bool => str_starts_with($table, 'webdoctor_'),
+        ));
+
+        sort($tables);
+
+        return $tables;
     }
 }

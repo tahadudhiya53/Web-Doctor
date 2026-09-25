@@ -41,7 +41,7 @@ class DiagnosticCoreTest extends TestCase
 
         $this->plugin = new WebDoctor('web-doctor', Craft::$app, WebDoctor::config() + [
             'name' => 'Web Doctor',
-            'version' => '1.0.0',
+            'version' => '5.0.0',
         ]);
         $this->other = new ThirdPartyPlugin();
     }
@@ -176,18 +176,6 @@ class DiagnosticCoreTest extends TestCase
         self::assertIsString($json);
         self::assertStringContainsString('tests.serialize', $json);
         self::assertStringContainsString($run->id(), $json);
-    }
-
-    public function testTheDiagnosticCoreStillOwnsNoDatabaseTables(): void
-    {
-        // Nothing here persists anything, so nothing here may have created a table to persist
-        // it into. The first table arrives with the install migration that also drops it.
-        $tables = array_filter(
-            Craft::$app->getDb()->getSchema()->getTableNames(),
-            static fn(string $table): bool => str_starts_with($table, 'webdoctor_'),
-        );
-
-        self::assertSame([], array_values($tables));
     }
 
     // --- The extension point another plugin contributes through.
