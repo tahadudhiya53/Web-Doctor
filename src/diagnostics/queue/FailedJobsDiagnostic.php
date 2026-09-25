@@ -72,7 +72,7 @@ class FailedJobsDiagnostic extends QueueDiagnostic
         if ($total === 0) {
             return $this->pass(
                 Craft::t('web-doctor', 'No queue jobs have failed.'),
-                [$this->evidence(EvidenceType::QUEUE_JOB, Craft::t('web-doctor', 'Failed jobs'), ['failed' => 0])],
+                [$this->evidence(EvidenceType::QUEUE, Craft::t('web-doctor', 'Failed jobs'), ['failed' => 0])],
             );
         }
 
@@ -82,7 +82,7 @@ class FailedJobsDiagnostic extends QueueDiagnostic
         $complete = $examined === $total;
 
         $evidence = [
-            $this->evidence(EvidenceType::QUEUE_JOB, Craft::t('web-doctor', 'Failed jobs'), [
+            $this->evidence(EvidenceType::QUEUE, Craft::t('web-doctor', 'Failed jobs'), [
                 // `failed` is every failure there is; the rest describe the sample that was
                 // looked at. A queue with thousands of failures is exactly the one where
                 // reading them all would be worst, so the difference is stated rather than

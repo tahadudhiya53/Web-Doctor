@@ -43,6 +43,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An evidence inspector on each issue's page, showing the evidence behind the latest finding and
   a paged history of earlier evidence. Withheld values are marked “Redacted”, values cut short
   are marked as such, and each piece of evidence says how many of its values were withheld.
+- New evidence types for the state of the system, the database, the queue, a plugin and a
+  deployment, alongside the existing, more particular ones. The shipped checks use them where
+  they describe the evidence more accurately.
 - “View Web Doctor”, “Run diagnostics”, “View issues”, “Manage issues” and “View evidence”
   permissions, each nested under the one it depends on and checked separately.
 - Plugin settings, overridable from a `config/web-doctor.php` file.

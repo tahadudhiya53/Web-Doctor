@@ -88,7 +88,7 @@ class CharsetDiagnostic extends Diagnostic
         $supportsMb4 = $this->supportsMb4($db);
 
         $evidence = [
-            $this->evidence(EvidenceType::CONFIGURATION, Craft::t('web-doctor', 'Character set'), [
+            $this->evidence(EvidenceType::DATABASE, Craft::t('web-doctor', 'Character set'), [
                 'driver' => $db->getDriverLabel(),
                 'configuredCharset' => $configured,
                 'configuredCollation' => $configuredCollation,
@@ -98,7 +98,7 @@ class CharsetDiagnostic extends Diagnostic
                 'sampledTable' => self::SAMPLED_TABLE,
                 'sampledTableAcceptsMb4' => $supportsMb4,
                 'columnsInspected' => false,
-            ]),
+            ], reference: self::SAMPLED_TABLE),
         ];
 
         if ($db->getIsMysql() && $supportsMb4 === false) {

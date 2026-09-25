@@ -67,7 +67,7 @@ class QueueBacklogDiagnostic extends QueueDiagnostic
         $waitedFor = $oldestStartedWaitingAt === null ? null : max(0, time() - $oldestStartedWaitingAt);
 
         $evidence = [
-            $this->evidence(EvidenceType::QUEUE_JOB, Craft::t('web-doctor', 'Queue depth'), [
+            $this->evidence(EvidenceType::QUEUE, Craft::t('web-doctor', 'Queue depth'), [
                 'waiting' => $waiting,
                 'running' => $counts['reserved'],
                 'delayed' => $counts['delayed'],

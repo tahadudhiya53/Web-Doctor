@@ -120,7 +120,7 @@ class ApplicationDiagnostic extends Diagnostic
      */
     private function state(array $state): Evidence
     {
-        return $this->evidence(EvidenceType::CONFIGURATION, Craft::t('web-doctor', 'Application state'), $state);
+        return $this->evidence(EvidenceType::SYSTEM, Craft::t('web-doctor', 'Application state'), $state);
     }
 
     /**

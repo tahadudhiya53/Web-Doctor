@@ -92,7 +92,7 @@ class ConnectionDiagnostic extends Diagnostic
         }
 
         $required = $this->requiredVersion($db);
-        $connection = $this->evidence(EvidenceType::CONFIGURATION, Craft::t('web-doctor', 'Database server'), [
+        $connection = $this->evidence(EvidenceType::DATABASE, Craft::t('web-doctor', 'Database server'), [
             'succeeded' => true,
             'driver' => $driverLabel,
             'serverVersion' => $serverVersion,
