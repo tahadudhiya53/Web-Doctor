@@ -12,6 +12,8 @@ use Tahadudhiya\WebDoctor\console\controllers\WebDoctorController;
 use Tahadudhiya\WebDoctor\models\Settings;
 use Tahadudhiya\WebDoctor\services\DiagnosticEngine;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
+use Tahadudhiya\WebDoctor\services\EvidenceStore;
+use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\Runs;
 use yii\base\Event;
@@ -21,6 +23,8 @@ use yii\base\Event;
  *
  * @property-read DiagnosticEngine $diagnosticEngine
  * @property-read Diagnostics $diagnostics
+ * @property-read EvidenceStore $evidence
+ * @property-read Issues $issues
  * @property-read Permissions $permissions
  * @property-read Runs $runs
  * @property-read Settings $settings
@@ -52,6 +56,8 @@ class WebDoctor extends Plugin
                     'includeCoreDiagnostics' => true,
                 ],
                 'diagnosticEngine' => ['class' => DiagnosticEngine::class],
+                'evidence' => ['class' => EvidenceStore::class],
+                'issues' => ['class' => Issues::class],
                 'permissions' => ['class' => Permissions::class],
                 'runs' => ['class' => Runs::class],
             ],
@@ -81,6 +87,18 @@ class WebDoctor extends Plugin
 
         $item['label'] = $this->getSettings()->pluginName;
 
+        $subnav = ['overview' => ['label' => Craft::t('web-doctor', 'Overview'), 'url' => 'web-doctor']];
+
+        if ($this->getPermissions()->canViewIssues()) {
+            $subnav['issues'] = ['label' => Craft::t('web-doctor', 'Issues'), 'url' => 'web-doctor/issues'];
+        }
+
+        // A single-entry sub-navigation is noise: it repeats the section's own name underneath
+        // itself and gives a reader nothing to choose between.
+        if (count($subnav) > 1) {
+            $item['subnav'] = $subnav;
+        }
+
         return $item;
     }
 
@@ -106,6 +124,28 @@ class WebDoctor extends Plugin
         $engine->registry ??= $this->getDiagnostics();
 
         return $engine;
+    }
+
+    /**
+     * The problems Web Doctor has found, as they stand across runs.
+     */
+    public function getIssues(): Issues
+    {
+        /** @var Issues $issues */
+        $issues = $this->get('issues');
+
+        // Tied to this plugin instance's store, for the reason the engine is tied to its registry.
+        $issues->evidence ??= $this->getEvidence();
+
+        return $issues;
+    }
+
+    /**
+     * The evidence kept behind issues.
+     */
+    public function getEvidence(): EvidenceStore
+    {
+        return $this->get('evidence');
     }
 
     public function getPermissions(): Permissions
@@ -150,6 +190,10 @@ class WebDoctor extends Plugin
     {
         Event::on(UrlManager::class, UrlManager::EVENT_REGISTER_CP_URL_RULES, function(RegisterUrlRulesEvent $event) {
             $event->rules['web-doctor'] = 'web-doctor/overview/index';
+            $event->rules['web-doctor/issues'] = 'web-doctor/issues/index';
+            // Numeric only, so the route cannot be reached with something that is not an ID and
+            // the controller never has to decide what a non-numeric issue means.
+            $event->rules['web-doctor/issues/<issueId:\d+>'] = 'web-doctor/issues/detail';
         });
     }
 

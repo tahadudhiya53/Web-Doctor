@@ -25,6 +25,26 @@ class Permissions extends Component
      */
     public const RUN = 'webDoctor:runDiagnostics';
 
+    /** @var string Reading the Issue Center: what has been found, and what has been done about it. */
+    public const VIEW_ISSUES = 'webDoctor:viewIssues';
+
+    /**
+     * @var string Changing where an issue stands. Separate from {@see self::VIEW_ISSUES} because
+     * an issue carries decisions — that something is being investigated, that something will not
+     * be acted on — and a decision recorded against a team's installation is not something
+     * everybody who may read the list should be able to make.
+     */
+    public const MANAGE_ISSUES = 'webDoctor:manageIssues';
+
+    /**
+     * @var string Reading what an issue's evidence contains. Separate from {@see self::VIEW_ISSUES}
+     * because the contents are the technical detail — file paths, stack traces, database and
+     * queue errors — and an installation can reasonably let somebody follow what has been found
+     * without showing them the internals it was found in. That is the same line a client-safe
+     * report draws. Without it, a reader still sees what kind of evidence an issue rests on.
+     */
+    public const VIEW_EVIDENCE = 'webDoctor:viewEvidence';
+
     public function register(): void
     {
         Event::on(UserPermissions::class, UserPermissions::EVENT_REGISTER_PERMISSIONS, function(RegisterUserPermissionsEvent $event) {
@@ -36,7 +56,7 @@ class Permissions extends Component
     }
 
     /**
-     * @return array<string, array{label: string, nested?: array<string, array{label: string}>}>
+     * @return array<string, array{label: string, nested?: array<string, mixed>}>
      */
     public function definitions(): array
     {
@@ -46,6 +66,17 @@ class Permissions extends Component
                 'nested' => [
                     self::RUN => [
                         'label' => Craft::t('web-doctor', 'Run diagnostics'),
+                    ],
+                    self::VIEW_ISSUES => [
+                        'label' => Craft::t('web-doctor', 'View issues'),
+                        'nested' => [
+                            self::MANAGE_ISSUES => [
+                                'label' => Craft::t('web-doctor', 'Manage issues'),
+                            ],
+                            self::VIEW_EVIDENCE => [
+                                'label' => Craft::t('web-doctor', 'View evidence'),
+                            ],
+                        ],
                     ],
                 ],
             ],
@@ -60,6 +91,21 @@ class Permissions extends Component
     public function canRun(): bool
     {
         return $this->can(self::RUN);
+    }
+
+    public function canViewIssues(): bool
+    {
+        return $this->can(self::VIEW_ISSUES);
+    }
+
+    public function canManageIssues(): bool
+    {
+        return $this->can(self::MANAGE_ISSUES);
+    }
+
+    public function canViewEvidence(): bool
+    {
+        return $this->can(self::VIEW_EVIDENCE);
     }
 
     /**
