@@ -66,6 +66,16 @@ and no credential is ever recorded as a value — passwords, keys, tokens and DS
 - Craft CMS 5.0.0 or later
 - PHP 8.2 or later
 
+## Versioning
+
+Web Doctor's major version matches the Craft major version it supports:
+
+- **5.x** is for Craft CMS 5.
+
+Versions follow [semantic versioning](https://semver.org/). The plugin's schema version is
+separate. It only tells Craft when to run database migrations, and does not follow the release
+version.
+
 ## Installation
 
 ```bash
