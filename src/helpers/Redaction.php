@@ -16,6 +16,15 @@ final class Redaction
     /** What a sensitive value is replaced with. */
     public const REDACTED = '[redacted]';
 
+    /**
+     * The other marks this helper leaves behind. They are constants so that whatever displays a
+     * redacted value can recognise them and say what happened, rather than showing a reader a
+     * bracket and leaving them to guess.
+     */
+    public const TRUNCATED = '… [truncated]';
+    public const DEPTH_LIMIT = '[…]';
+    public const OMITTED_KEY = '…';
+
     /** The vocabulary for describing a value Web Doctor may not show. */
     public const PRESENT = 'Present';
     public const MISSING = 'Missing';
@@ -31,7 +40,10 @@ final class Redaction
     private const SENSITIVE_WORDS = [
         'password', 'passwd', 'pwd', 'passphrase', 'secret', 'secrets', 'token', 'credential',
         'credentials', 'authorization', 'signature', 'salt', 'dsn', 'cipher', 'cookie',
-        'bearer', 'certificate', 'apikey', 'accesskey', 'privatekey', 'securitykey',
+        'bearer', 'certificate', 'apikey', 'accesskey', 'privatekey', 'securitykey', 'pw',
+        // `auth` on its own holds a login far more often than anything else — an HTTP client's
+        // `auth` option, a Redis `auth`. `author` is a different word and is left alone.
+        'auth',
     ];
 
     /**
@@ -42,7 +54,58 @@ final class Redaction
         'key' => ['api', 'access', 'private', 'public', 'security', 'secret', 'encryption', 'license', 'signing'],
         'id' => ['session'],
         'string' => ['connection'],
+        // Half of a login is still a credential. A bare `user` is left alone — it is as often a
+        // person's name or ID as anything else — but the account a database or mail server is
+        // reached with is not something a report needs to repeat.
+        'user' => self::LOGIN_QUALIFIERS,
+        'username' => self::LOGIN_QUALIFIERS,
     ];
+
+    /** @var string[] What makes a `user` or `username` the name half of a service login. */
+    private const LOGIN_QUALIFIERS = ['db', 'database', 'smtp', 'mail', 'mailer', 'ftp', 'sftp', 'proxy', 'redis'];
+
+    /**
+     * @var string[] Last words that name a credential when the key is spelt as an environment
+     * variable. `SENDGRID_KEY` and `SMTP_PASS` are credentials by convention; `primaryKey` and a
+     * status count under `pass` are not, and the spelling is the only thing that tells them apart.
+     */
+    private const ENVIRONMENT_SUFFIXES = ['key', 'pass'];
+
+    /**
+     * @var array<string, string> Credentials that announce themselves by their shape, whatever
+     * key they sit under and whatever sentence they appear in. Each pattern matches a documented
+     * format, so the list stays short and nothing ordinary resembles an entry on it.
+     */
+    private const CREDENTIAL_SHAPES = [
+        // A PEM private key, whole or cut off before its end marker.
+        'privateKey' => '/-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/s',
+        'awsAccessKeyId' => '/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/',
+        'jwt' => '/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/',
+        'stripe' => '/\b[rs]k_(?:live|test)_[A-Za-z0-9]{8,}/',
+        'github' => '/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/',
+        'gitlab' => '/\bglpat-[A-Za-z0-9_-]{20,}/',
+        'slack' => '/\bxox[abprs]-[A-Za-z0-9-]{10,}/',
+        'googleApiKey' => '/\bAIza[0-9A-Za-z_-]{35}/',
+        'sendgrid' => '/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/',
+    ];
+
+    /**
+     * @var list<string> Webhook URLs whose path is the credential. The host explains what
+     * the URL was for and survives; the path is the secret and does not.
+     */
+    private const WEBHOOK_SHAPES = [
+        '#(hooks\.slack\.com/services/)[A-Za-z0-9/_-]+#',
+        '#(discord(?:app)?\.com/api/webhooks/)[0-9]+/[A-Za-z0-9_-]+#',
+    ];
+
+    /**
+     * @var int The shortest environment value treated as a secret to look for in free text. A
+     * shorter one would be replaced inside ordinary words and make every message unreadable.
+     */
+    private const MIN_KNOWN_SECRET_LENGTH = 8;
+
+    /** @var list<string>|null The environment's credentials, longest first, once read. */
+    private static ?array $knownSecrets = null;
 
     /** How deep a structure is walked before the rest is dropped rather than explored. */
     private const MAX_DEPTH = 6;
@@ -80,6 +143,10 @@ final class Redaction
             return true;
         }
 
+        if (self::isEnvironmentName($key) && in_array($words[array_key_last($words)], self::ENVIRONMENT_SUFFIXES, true)) {
+            return true;
+        }
+
         foreach ($words as $i => $word) {
             if (in_array($word, self::SENSITIVE_WORDS, true)) {
                 return true;
@@ -93,6 +160,15 @@ final class Redaction
         }
 
         return false;
+    }
+
+    /**
+     * Whether a key is spelt the way an environment variable is: upper case, words joined by
+     * underscores.
+     */
+    private static function isEnvironmentName(string $key): bool
+    {
+        return preg_match('/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/', $key) === 1;
     }
 
     /**
@@ -123,7 +199,7 @@ final class Redaction
 
         foreach ($data as $key => $value) {
             if ($kept === self::MAX_ITEMS) {
-                $safe['…'] = sprintf('%d more omitted', count($data) - $kept);
+                $safe[self::OMITTED_KEY] = sprintf('%d more omitted', count($data) - $kept);
                 break;
             }
 
@@ -156,7 +232,7 @@ final class Redaction
         }
 
         if (is_array($value)) {
-            return $depth >= self::MAX_DEPTH ? '[…]' : self::redact($value, $depth);
+            return $depth >= self::MAX_DEPTH ? self::DEPTH_LIMIT : self::redact($value, $depth);
         }
 
         if ($value instanceof \UnitEnum) {
@@ -176,10 +252,33 @@ final class Redaction
 
     /**
      * Makes a loose string safe: credentials embedded in URLs and in `key=value` text are
-     * removed, and the result is truncated so one log line cannot become the whole record.
+     * removed, as are credentials recognisable by their shape and the values of the
+     * environment's own credentials wherever they turn up, and the result is truncated so one
+     * log line cannot become the whole record.
      */
     public static function redactString(string $value): string
     {
+        // Malformed text is repaired first. It cannot be encoded as JSON or stored in a UTF-8
+        // column, so letting it through would turn one bad byte in an exception message into a
+        // reconciliation that fails to save.
+        $value = mb_scrub($value, 'UTF-8');
+
+        // The environment's own credentials, found by value. This is what catches a password a
+        // driver quoted with nothing beside it to say what it was.
+        $secrets = self::knownSecrets();
+
+        if ($secrets !== []) {
+            $value = str_replace($secrets, self::REDACTED, $value);
+        }
+
+        foreach (self::CREDENTIAL_SHAPES as $pattern) {
+            $value = (string)preg_replace($pattern, self::REDACTED, $value);
+        }
+
+        foreach (self::WEBHOOK_SHAPES as $pattern) {
+            $value = (string)preg_replace($pattern, '$1' . self::REDACTED, $value);
+        }
+
         // Credentials in a URL's userinfo, as a database DSN or a webhook URL carries them.
         $value = (string)preg_replace('#([a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]*@#i', '$1' . self::REDACTED . '@', $value);
 
@@ -191,10 +290,89 @@ final class Redaction
         $value = self::redactPairs($value);
 
         if (strlen($value) > self::MAX_STRING_LENGTH) {
-            $value = substr($value, 0, self::MAX_STRING_LENGTH) . '… [truncated]';
+            $value = mb_strcut($value, 0, self::MAX_STRING_LENGTH) . self::TRUNCATED;
         }
 
         return $value;
+    }
+
+    /**
+     * The values of the environment's credentials, so they can be recognised in text that gives
+     * no other sign of carrying one.
+     *
+     * An environment variable counts when its name names a credential. Its value is only looked
+     * for when it could not be mistaken for prose: long enough, and not a plain word — a
+     * development database whose password is `password` would otherwise have that word removed
+     * from every message Web Doctor records. Those values are still caught wherever a key names
+     * them; this is the net beneath that, not a replacement for it.
+     *
+     * Read once per process. The environment does not change under a running request, and
+     * reading it for every string would cost far more than the strings do.
+     *
+     * @return list<string> Longest first, so a secret containing another is replaced whole.
+     */
+    private static function knownSecrets(): array
+    {
+        if (self::$knownSecrets !== null) {
+            return self::$knownSecrets;
+        }
+
+        $secrets = [];
+
+        foreach ([getenv(), $_ENV, $_SERVER] as $variables) {
+            foreach ($variables as $name => $value) {
+                if (
+                    is_string($name)
+                    && is_string($value)
+                    && strlen($value) >= self::MIN_KNOWN_SECRET_LENGTH
+                    && !ctype_alpha($value)
+                    && !self::isPresence($value)
+                    && self::isSensitiveKey($name)
+                ) {
+                    $secrets[$value] = true;
+                }
+            }
+        }
+
+        $secrets = array_keys($secrets);
+        usort($secrets, static fn(string $a, string $b): int => strlen($b) <=> strlen($a));
+
+        return self::$knownSecrets = $secrets;
+    }
+
+    /**
+     * What redaction left behind in a value: how many things were withheld, and whether anything
+     * was cut short. This is what lets a reader be told that a value is incomplete, rather than
+     * finding out by reading it.
+     *
+     * @return array{redacted: int, bounded: bool}
+     */
+    public static function marks(mixed $value): array
+    {
+        if (is_string($value)) {
+            return [
+                'redacted' => substr_count($value, self::REDACTED),
+                'bounded' => $value === self::DEPTH_LIMIT || str_ends_with($value, self::TRUNCATED),
+            ];
+        }
+
+        $marks = ['redacted' => 0, 'bounded' => false];
+
+        if (!is_array($value)) {
+            return $marks;
+        }
+
+        foreach ($value as $key => $item) {
+            if ($key === self::OMITTED_KEY) {
+                $marks['bounded'] = true;
+            }
+
+            $inner = self::marks($item);
+            $marks['redacted'] += $inner['redacted'];
+            $marks['bounded'] = $marks['bounded'] || $inner['bounded'];
+        }
+
+        return $marks;
     }
 
     /**
@@ -204,7 +382,9 @@ final class Redaction
     private const MAX_PAIR_DEPTH = 4;
 
     /**
-     * Removes `key=value` credentials from free text.
+     * Removes `key=value` credentials from free text — including `"key": "value"`, the shape an
+     * API's JSON error body takes when an HTTP client quotes it in an exception, with or without
+     * the quotes escaped.
      *
      * The subtlety is what happens when the key is *not* a credential. An exception message
      * reads `SMTP refused: password=hunter2`, and a pattern matching any `key: value` pair
@@ -223,10 +403,18 @@ final class Redaction
         }
 
         return (string)preg_replace_callback(
-            '/([A-Za-z_][A-Za-z0-9_.\-]*)(\s*[=:]\s*)("[^"]*"|\'[^\']*\'|[^\s,;&]+)/',
-            static fn(array $m): string => self::isSensitiveKey($m[1])
-                ? $m[1] . $m[2] . self::REDACTED
-                : $m[1] . $m[2] . self::redactPairs($m[3], $depth + 1),
+            '/([A-Za-z_][A-Za-z0-9_.\-]*)((?:\\\\?["\'])?\s*[=:]\s*)(\\\\"(?:(?!\\\\").)*\\\\"|"[^"]*"|\'[^\']*\'|[^\s,;&]+)/',
+            static function(array $m) use ($depth): string {
+                if (!self::isSensitiveKey($m[1])) {
+                    return $m[1] . $m[2] . self::redactPairs($m[3], $depth + 1);
+                }
+
+                // A quoted value keeps its quotes, so JSON with a credential removed still reads
+                // as JSON.
+                $quote = preg_match('/^(\\\\"|"|\')/', $m[3], $q) === 1 ? $q[1] : '';
+
+                return $m[1] . $m[2] . $quote . self::REDACTED . $quote;
+            },
             $value,
         );
     }

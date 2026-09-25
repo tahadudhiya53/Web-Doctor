@@ -16,8 +16,8 @@ use Tahadudhiya\WebDoctor\helpers\Redaction;
  *
  * A context carries no secrets. Options scope work — a time window, a component, a limit — and
  * nothing else; where a diagnostic needs a credential it reads it from Craft at the moment it
- * needs it and reports only whether it was there. Options are redacted wherever a context is
- * serialized, but that is a backstop against a mistake rather than permission to make one.
+ * needs it and reports only whether it was there. Options are redacted as the context is built,
+ * but that is a backstop against a mistake rather than permission to make one.
  */
 final class DiagnosticContext implements JsonSerializable
 {
@@ -48,7 +48,10 @@ final class DiagnosticContext implements JsonSerializable
     ) {
         $this->runId = $runId ?? StringHelper::UUID();
         $this->startedAt = $startedAt ?? new DateTimeImmutable();
-        $this->options = $options;
+        // Redacted here as well as when serialized to JSON. A run is cached as a serialized PHP
+        // object, which never calls jsonSerialize(), so the redaction there alone would miss the
+        // one serialization every run goes through.
+        $this->options = Redaction::redact($options);
     }
 
     /**

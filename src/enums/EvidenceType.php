@@ -10,9 +10,18 @@ use Craft;
  * The type is what lets evidence be presented, correlated and filtered without a reader having
  * to interpret free text, and it is what tells a report which evidence is safe to show a
  * client and which is not.
+ *
+ * Some types name the state of a part of the installation — the database, the queue, a plugin —
+ * and some name a particular kind of fact within it — a database error, one queue job, a
+ * plugin's version. Evidence takes the most particular type that is true of it.
  */
 enum EvidenceType: string
 {
+    case SYSTEM = 'system';
+    case DATABASE = 'database';
+    case QUEUE = 'queue';
+    case PLUGIN = 'plugin';
+    case DEPLOYMENT = 'deployment';
     case LOG_ENTRY = 'logEntry';
     case EXCEPTION = 'exception';
     case STACK_TRACE = 'stackTrace';
@@ -35,6 +44,11 @@ enum EvidenceType: string
     public function label(): string
     {
         return match ($this) {
+            self::SYSTEM => Craft::t('web-doctor', 'System'),
+            self::DATABASE => Craft::t('web-doctor', 'Database'),
+            self::QUEUE => Craft::t('web-doctor', 'Queue'),
+            self::PLUGIN => Craft::t('web-doctor', 'Plugin'),
+            self::DEPLOYMENT => Craft::t('web-doctor', 'Deployment'),
             self::LOG_ENTRY => Craft::t('web-doctor', 'Log entry'),
             self::EXCEPTION => Craft::t('web-doctor', 'Exception'),
             self::STACK_TRACE => Craft::t('web-doctor', 'Stack trace'),
