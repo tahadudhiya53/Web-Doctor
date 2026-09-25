@@ -46,6 +46,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - New evidence types for the state of the system, the database, the queue, a plugin and a
   deployment, alongside the existing, more particular ones. The shipped checks use them where
   they describe the evidence more accurately.
+- Redaction that recognises credentials by their shape — private keys, AWS access key IDs, JSON
+  web tokens, Stripe, GitHub, GitLab, Slack, Google and SendGrid keys, and Slack and Discord
+  webhook URLs — and by their value, looking for the environment's own credentials in any text
+  Web Doctor records. The user name half of a database or mail login, and environment-style names
+  ending in `_KEY`, `_PASS` or `_AUTH`, are now treated as credentials too.
 - “View Web Doctor”, “Run diagnostics”, “View issues”, “Manage issues” and “View evidence”
   permissions, each nested under the one it depends on and checked separately.
 - Plugin settings, overridable from a `config/web-doctor.php` file.
@@ -68,6 +73,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installation that merely happened to be stamped with that site.
 - The issue counts shown beside the list were counted over every environment, so they disagreed
   with the list they labelled.
+- An issue's title, description and recommendation were stored exactly as the check wrote them,
+  so a check whose summary quoted a credential — `SMTP refused: password=…` — put it in the
+  database and on the dashboard. A result's wording is now redacted as the result is built.
+- A credential inside a JSON body quoted in an error message — `{"password":"…"}` — and a
+  value under an `auth` key passed through redaction untouched.
+- The reason given when an issue was ignored or ruled out was stored unredacted, as were cache
+  errors written to the log.
+- One malformed byte in a check's output could stop the whole issue list being updated after a
+  run.
 - The issue list and dashboard pushed the control panel sideways on a narrow screen, and the
   bracketed redaction marker was shown as text in issue titles and on the dashboard rather than
   marked as a withheld value.

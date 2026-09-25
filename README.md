@@ -21,6 +21,9 @@ history rather than two reports.
 - **Evidence kept behind every issue** — the facts each check recorded, attributed to the run,
   environment and site they were gathered in, stored once per distinct fact however many runs see
   it, and inspectable on the issue's page with every withheld value clearly marked.
+- **Centralised redaction** — credentials are removed wherever Web Doctor writes anything down,
+  recognised by the key they sit under, by their shape, or by being the value of one of the
+  environment's own credentials. No check has to remember to do it.
 - **Manual runs** — every check or a selection of them, at a chosen depth. Opening the dashboard
   runs nothing.
 - **Diagnostic depth** (shallow / normal / deep) so a run can be bounded.
@@ -292,6 +295,27 @@ erasing it.
 History records the moments worth keeping: the issue appearing, changing, coming back, being moved
 through its lifecycle, being observed clear. A run that finds an issue again unchanged is counted,
 not listed, so the history stays readable however long the issue has been open.
+
+## Redaction
+
+Everything Web Doctor writes down — evidence, the wording of a result, what is stored, what is
+logged — goes through one redaction helper. A credential is recognised three ways:
+
+- **By its key** — `password`, `apiKey`, `DB_PASSWORD`, `clientSecret`, `accessToken`, `auth`, a DSN, the
+  user name half of a database or mail login, and environment-style names ending in `_KEY`,
+  `_PASS` or `_AUTH`. A key is judged word by word, so `keyword` and `author` are left alone.
+- **By its shape** — private keys, AWS access key IDs, JSON web tokens, Stripe, GitHub, GitLab,
+  Slack, Google and SendGrid keys, Slack and Discord webhook URLs, credentials in a URL, and
+  `Authorization` headers — wherever they appear, including loose in an error message or inside
+  a JSON body an error message quotes.
+- **By its value** — the values of the environment's own credentials are looked for in any text Web
+  Doctor records, so a password quoted by a driver with nothing beside it is still caught. Values
+  shorter than eight characters, and values that are a single plain word, are not looked for this
+  way, because replacing them would mangle ordinary text; they are still caught by key.
+
+A secret is replaced outright, never masked into something that hints at it. Where the question
+is only whether something is configured, the answer is `Present`, `Missing`, `Invalid` or
+`Unknown`.
 
 ## How the score works
 
