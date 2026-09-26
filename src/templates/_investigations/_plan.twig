@@ -1,0 +1,58 @@
+{#
+    What an investigation looks at and why: every check with its reason, every related area no
+    check covers here, and what is worth looking at by hand. Shared by the issue page, which shows
+    it before anything runs, and the investigation page, which shows the plan as it was decided.
+#}
+
+{% import "web-doctor/_macros" as shared %}
+
+<p><strong>{{ "Treated as"|t('web-doctor') }}:</strong> {{ plan.ruleLabel }} · <span class="light">{{ "Depth"|t('web-doctor') }}: {{ plan.depth.label() }}</span></p>
+
+{% if plan.checks|length %}
+    <div class="wd-table-scroll">
+    <table class="data fullwidth wd-plan">
+        <thead>
+            <tr>
+                <th scope="col">{{ "Check"|t('web-doctor') }}</th>
+                <th scope="col">{{ "Why it is looked at"|t('web-doctor') }}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for check in plan.checks %}
+                <tr>
+                    <td class="wd-plan__check">
+                        <div class="wd-result__name">{{ shared.text(check.name) }}</div>
+                        <div class="wd-result__id"><code>{{ check.diagnosticId }}</code></div>
+                        {% if check.origin %}<span class="wd-mark wd-mark--origin">{{ "Raised this issue"|t('web-doctor') }}</span>{% endif %}
+                    </td>
+                    <td>{{ shared.text(check.reason) }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+{% else %}
+    <p class="light">{{ "No check registered here covers this problem or anything related to it."|t('web-doctor') }}</p>
+{% endif %}
+
+{% if plan.omitted %}
+    <p class="light">{{ "{count, plural, =1{1 further related check was} other{# further related checks were}} left out to keep the investigation bounded."|t('web-doctor', { count: plan.omitted }) }}</p>
+{% endif %}
+
+{% if plan.uncovered|length %}
+    <h3 class="wd-plan__heading">{{ "Related, but no check here covers it"|t('web-doctor') }}</h3>
+    <ul class="wd-plan__list">
+        {% for area in plan.uncovered %}
+            <li><strong>{{ area.area }}</strong> — {{ shared.text(area.reason) }}</li>
+        {% endfor %}
+    </ul>
+{% endif %}
+
+{% if plan.leads|length %}
+    <h3 class="wd-plan__heading">{{ "Worth inspecting by hand"|t('web-doctor') }}</h3>
+    <ul class="wd-plan__list">
+        {% for lead in plan.leads %}
+            <li>{{ lead }}</li>
+        {% endfor %}
+    </ul>
+{% endif %}

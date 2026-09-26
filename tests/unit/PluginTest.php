@@ -103,15 +103,25 @@ class PluginTest extends TestCase
         // second migration file means the development workflow has been departed from.
         $migrations = glob(__DIR__ . '/../../src/migrations/*.php') ?: [];
 
-        self::assertSame([], array_values(array_diff(array_map('basename', $migrations), ['Install.php'])));
+        self::assertSame(['Install.php'], array_map('basename', $migrations));
     }
 
     public function testServiceComponentsAreRegistered(): void
     {
-        $components = WebDoctor::config()['components'];
+        $classes = array_map(static fn(array $c): string => $c['class'], WebDoctor::config()['components']);
+        $expected = [
+            'diagnostics' => \Tahadudhiya\WebDoctor\services\Diagnostics::class,
+            'diagnosticEngine' => \Tahadudhiya\WebDoctor\services\DiagnosticEngine::class,
+            'errors' => \Tahadudhiya\WebDoctor\services\Errors::class,
+            'evidence' => \Tahadudhiya\WebDoctor\services\EvidenceStore::class,
+            'investigations' => \Tahadudhiya\WebDoctor\services\Investigations::class,
+            'issues' => \Tahadudhiya\WebDoctor\services\Issues::class,
+            'permissions' => Permissions::class,
+            'rootCauses' => \Tahadudhiya\WebDoctor\services\RootCauses::class,
+            'runs' => \Tahadudhiya\WebDoctor\services\Runs::class,
+        ];
 
-        self::assertSame(Permissions::class, $components['permissions']['class']);
-        self::assertSame(\Tahadudhiya\WebDoctor\services\EvidenceStore::class, $components['evidence']['class']);
+        self::assertSame($expected, array_intersect_key($classes, $expected));
     }
 
     public function testPluginHasAControlPanelSectionAndSettings(): void
@@ -197,23 +207,22 @@ class PluginTest extends TestCase
         self::assertArrayHasKey(Permissions::VIEW, $definitions);
         self::assertNotSame('', $definitions[Permissions::VIEW]['label']);
         self::assertArrayHasKey(Permissions::RUN, $definitions[Permissions::VIEW]['nested'] ?? []);
-        self::assertNotSame(Permissions::VIEW, Permissions::RUN);
     }
 
-    public function testChangingAnIssueOrReadingItsEvidenceIsGuardedSeparatelyFromReadingIt(): void
+    public function testChangingInvestigatingOrReadingTheEvidenceOfAnIssueIsGuardedSeparatelyFromReadingIt(): void
     {
         // An issue carries decisions — that something is being looked at, that something will
         // not be acted on — and a decision recorded against a team's installation is not
         // everybody's to make. Its evidence carries the internals it was found in, which not
-        // everybody following the issue needs to see.
+        // everybody following the issue needs to see. Investigating one runs checks on demand,
+        // which is neither of those and costs the site's time.
         $definitions = (new Permissions())->definitions();
         $issues = $definitions[Permissions::VIEW]['nested'][Permissions::VIEW_ISSUES] ?? null;
 
         self::assertIsArray($issues);
         self::assertArrayHasKey(Permissions::MANAGE_ISSUES, $issues['nested'] ?? []);
         self::assertArrayHasKey(Permissions::VIEW_EVIDENCE, $issues['nested'] ?? []);
-        self::assertNotSame(Permissions::VIEW_ISSUES, Permissions::MANAGE_ISSUES);
-        self::assertNotSame(Permissions::VIEW_ISSUES, Permissions::VIEW_EVIDENCE);
+        self::assertArrayHasKey(Permissions::INVESTIGATE_ISSUES, $issues['nested'] ?? []);
     }
 
     public function testOnlyPermissionsWithSomethingBehindThemAreDeclared(): void
@@ -226,6 +235,7 @@ class PluginTest extends TestCase
             Permissions::VIEW_ISSUES,
             Permissions::MANAGE_ISSUES,
             Permissions::VIEW_EVIDENCE,
+            Permissions::INVESTIGATE_ISSUES,
         ], $this->allPermissions());
     }
 }

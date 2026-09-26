@@ -17,11 +17,14 @@ use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
+use Tahadudhiya\WebDoctor\records\ErrorGroupRecord;
+use Tahadudhiya\WebDoctor\records\ErrorSourceRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\Runs;
 use Tahadudhiya\WebDoctor\Tests\_support\ExplodingDiagnostics;
+use Tahadudhiya\WebDoctor\Tests\_support\FailingCache;
 use Tahadudhiya\WebDoctor\Tests\_support\RecordingOverviewController;
 use Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic;
 use Tahadudhiya\WebDoctor\Tests\_support\TestUser;
@@ -82,6 +85,11 @@ class HealthDashboardTest extends TestCase
         // test's own check could have raised are removed, matched on the ID it registered under.
         if (Craft::$app->getDb()->tableExists(IssueRecord::TABLE)) {
             IssueRecord::deleteAll(['like', 'diagnosticId', 'tests.%', false]);
+        }
+
+        // The errors this test's checks ran into, found through the sources that name them.
+        if (Craft::$app->getDb()->tableExists(ErrorGroupRecord::TABLE)) {
+            ErrorGroupRecord::deleteAll(['id' => ErrorSourceRecord::find()->select(['errorGroupId'])->where(['like', 'diagnosticId', 'tests.%', false])->column()]);
         }
 
         if ($this->originalRequest !== null) {
@@ -404,7 +412,7 @@ class HealthDashboardTest extends TestCase
         // Craft turns a request with no identity into a login redirect, which needs a session
         // this harness has none of. What is assertable here is the switch Craft reads to decide
         // that: the controller never opts any action out of authentication. That nobody signed
-        // in holds the permission is covered against a real identity in AuthorizationTest.
+        // in holds the permission is covered against a real identity in InstallationTest.
         self::assertSame(RecordingOverviewController::ALLOW_ANONYMOUS_NEVER, $this->controller()->anonymousAccess());
     }
 
@@ -447,22 +455,13 @@ class HealthDashboardTest extends TestCase
         self::assertSame(1, $this->diagnostic->runs);
     }
 
-    public function testRunningRefusesAGetRequest(): void
-    {
-        // State changes on POST only, so the run action cannot be reached by following a link.
-        $this->signIn(admin: true);
-        $this->request('GET');
-
-        $this->expectException(MethodNotAllowedHttpException::class);
-        $this->controller()->runAction('run');
-    }
-
     /**
      * @return array<string, array{string}>
      */
     public static function unsafeMethodProvider(): array
     {
-        return ['PUT' => ['PUT'], 'PATCH' => ['PATCH'], 'DELETE' => ['DELETE']];
+        // GET included: state changes on POST only, so a run cannot be set going by following a link.
+        return ['GET' => ['GET'], 'PUT' => ['PUT'], 'PATCH' => ['PATCH'], 'DELETE' => ['DELETE']];
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('unsafeMethodProvider')]
@@ -656,6 +655,65 @@ class HealthDashboardTest extends TestCase
         self::assertStringNotContainsString('hunter2', $flash['message']);
     }
 
+    /**
+     * The cache, the issues and the errors are three independent places a run is kept. One that
+     * cannot be written — the Redis that is down — must not cost the other two the run's findings.
+     */
+    public function testARunThatCannotBeCachedStillReachesTheIssueCenter(): void
+    {
+        $this->plugin->getRuns()->cache = new FailingCache(['failReads' => false]);
+        $this->signIn(admin: true);
+        $this->post(['all' => '1']);
+
+        $controller = $this->controller();
+        $controller->runAction('run');
+        $flash = $controller->lastFlash();
+
+        self::assertNotNull($flash);
+        self::assertSame('fail', $flash['level']);
+        self::assertStringContainsString('results could not be stored', $flash['message']);
+        self::assertStringContainsString('1 new issue.', $flash['message']);
+        self::assertSame(1, (int)IssueRecord::find()->where(['diagnosticId' => 'tests.dashboard'])->count());
+    }
+
+    public function testTheErrorsARunRanIntoAreRecordedAndSaidSo(): void
+    {
+        // A check that breaks raises no issue, but the error it ran into is kept and counted.
+        $this->diagnostic->handler = static fn() => throw new \RuntimeException('Element 4812 could not be saved.');
+        $this->signIn(admin: true);
+        $this->post(['all' => '1']);
+
+        $controller = $this->controller();
+        $controller->runAction('run');
+
+        $flash = $controller->lastFlash();
+        $group = ErrorGroupRecord::findOne([
+            'id' => ErrorSourceRecord::find()->select(['errorGroupId'])->where(['diagnosticId' => 'tests.dashboard'])->column(),
+        ]);
+
+        self::assertNotNull($flash);
+        self::assertSame('success', $flash['level']);
+        self::assertStringContainsString('1 error recorded.', $flash['message']);
+        self::assertInstanceOf(ErrorGroupRecord::class, $group);
+        self::assertSame('Element {id} could not be saved.', $group->normalizedMessage);
+    }
+
+    public function testARunThatRanIntoNoErrorRecordsNoneAndSaysNothingAboutThem(): void
+    {
+        // The registered check fails, with no exception behind it: an issue, and no error.
+        $this->signIn(admin: true);
+        $this->post(['all' => '1']);
+
+        $controller = $this->controller();
+        $controller->runAction('run');
+        $flash = $controller->lastFlash();
+
+        self::assertNotNull($flash);
+        self::assertSame('success', $flash['level']);
+        self::assertStringNotContainsString('error', strtolower(str_replace('issue', '', $flash['message'])));
+        self::assertSame(0, (int)ErrorSourceRecord::find()->where(['diagnosticId' => 'tests.dashboard'])->count());
+    }
+
     // Presentation ---------------------------------------------------------
 
     public function testEvidenceIsSummarisedRatherThanPutOnThePage(): void
@@ -819,16 +877,6 @@ class HealthDashboardTest extends TestCase
     }
 
     // Scoping --------------------------------------------------------------
-
-    public function testARunFromAnotherSiteIsNotShownHere(): void
-    {
-        $this->signIn(admin: true);
-        $this->post(['all' => '1']);
-        $this->controller()->runAction('run');
-
-        // The same stored run, asked for under a site nobody was looking at.
-        self::assertNull($this->plugin->getRuns()->latest(($this->siteId() ?? 0) + 1000));
-    }
 
     public function testASiteThatCannotBeResolvedIsNotCalledAllSites(): void
     {

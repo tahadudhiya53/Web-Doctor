@@ -27,7 +27,10 @@
             var controls = form.querySelectorAll('button, input[type="submit"], input[type="checkbox"], select');
 
             for (var i = 0; i < controls.length; i++) {
-                controls[i].disabled = true;
+                if (!controls[i].disabled) {
+                    controls[i].disabled = true;
+                    controls[i].setAttribute('data-wd-disabled', '');
+                }
             }
 
             // Revealing a live region is what announces it; the text is already in the DOM.
@@ -39,4 +42,33 @@
         }, 0);
     });
 
+    // Going back to the page after the run restores it from the browser's cache exactly as it was
+    // left — busy, with everything disabled — so it is put back the way it was before the run.
+    window.addEventListener('pageshow', function(event) {
+        if (!event.persisted) {
+            return;
+        }
+
+        var forms = document.querySelectorAll('[data-wd-run-form][data-wd-running]');
+
+        for (var i = 0; i < forms.length; i++) {
+            var form = forms[i];
+            var controls = form.querySelectorAll('[data-wd-disabled]');
+
+            for (var j = 0; j < controls.length; j++) {
+                controls[j].disabled = false;
+                controls[j].removeAttribute('data-wd-disabled');
+            }
+
+            form.removeAttribute('data-wd-running');
+            form.removeAttribute('aria-busy');
+            form.classList.remove('wd-running');
+
+            var status = form.querySelector('[data-wd-run-status]');
+
+            if (status) {
+                status.hidden = true;
+            }
+        }
+    });
 })();

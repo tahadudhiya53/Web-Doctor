@@ -1,0 +1,102 @@
+{#
+    The issue page's way into an investigation: what one would look at and why, shown before
+    anything runs; the control that starts one, for somebody who may; and the ones already made.
+#}
+
+{% import "web-doctor/_macros" as shared %}
+
+<div class="pane" id="investigate">
+    <h2>{{ "Investigate"|t('web-doctor') }}</h2>
+
+    {% if investigationFailure %}
+        <p class="error">{{ investigationFailure }}</p>
+    {% else %}
+        <p class="light">
+            {{ "An investigation runs the check that raised this issue again, alongside the checks related to it, and records what they report, the evidence they leave and what else is open nearby. It then weighs what was found against Web Doctor’s known causes, saying how firmly each is held and what counts against it."|t('web-doctor') }}
+        </p>
+
+        {% if investigationPlan %}
+            <details class="wd-explainer">
+                <summary>{{ "What an investigation looks at, and why"|t('web-doctor') }}</summary>
+                {% include "web-doctor/_investigations/_plan" with { plan: investigationPlan } only %}
+                <p class="light">{{ "Shown at normal depth. A shallow investigation looks only where the problem was found; a deep one runs the same checks as a normal one and asks each of them to go further."|t('web-doctor') }}</p>
+            </details>
+        {% endif %}
+
+        {% if canInvestigate %}
+            {% if investigationRefusal %}
+                <p class="warning">{{ investigationRefusal }}</p>
+            {% else %}
+                <form method="post" accept-charset="UTF-8" class="wd-toolbar" data-wd-run-form>
+                    {{ csrfInput() }}
+                    {{ actionInput('web-doctor/investigations/start') }}
+                    {{ redirectInput('web-doctor/issues/' ~ issue.id) }}
+                    <input type="hidden" name="issueId" value="{{ issue.id }}">
+
+                    <div class="field">
+                        <label for="wd-investigation-depth">{{ "Depth"|t('web-doctor') }}</label>
+                        <div class="select">
+                            <select id="wd-investigation-depth" name="depth">
+                                {% for depth in depths %}
+                                    <option value="{{ depth.value }}"{{ depth.value == 'normal' ? ' selected' : '' }}>{{ depth.label() }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn submit">{{ "Investigate"|t('web-doctor') }}</button>
+
+                    <p class="wd-run-status" role="status" aria-live="polite" data-wd-run-status hidden>
+                        {{ "Investigating… this page will move on when it finishes."|t('web-doctor') }}
+                    </p>
+                    <p class="light wd-toolbar__note">{{ "The checks run in this request, against this environment and the site this issue was found on."|t('web-doctor') }}</p>
+                </form>
+            {% endif %}
+        {% endif %}
+
+        {% if investigations|length %}
+            <h3 class="wd-plan__heading">{{ "Investigations"|t('web-doctor') }}</h3>
+            <div class="wd-table-scroll">
+            <table class="data fullwidth wd-investigations">
+                <thead>
+                    <tr>
+                        <th scope="col">{{ "Started"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Status"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Depth"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Checks performed"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Reported a problem"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Could not be completed"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Leading cause"|t('web-doctor') }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for investigation in investigations %}
+                        <tr>
+                            <td class="wd-col-narrow"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '/investigations/' ~ investigation.id) }}">{{ investigation.startedAt|datetime('short') }}</a></td>
+                            <td class="wd-col-narrow"><span class="wd-pill wd-pill--investigation-{{ investigation.status.value }}">{{ investigation.status.label() }}</span></td>
+                            <td class="wd-col-narrow">{{ investigation.depth.label() }}</td>
+                            <td>{{ investigation.checksRun }}</td>
+                            <td>{{ investigation.checksWithProblems }}</td>
+                            <td>{{ investigation.checksIncomplete }}</td>
+                            <td>
+                                {% set cause = leadingCauses[investigation.id] ?? null %}
+                                {% if cause %}
+                                    <span class="wd-pill wd-pill--confidence-{{ cause.confidence.value }}">{{ cause.confidence.label() }}</span>
+                                    <a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '/investigations/' ~ investigation.id) }}#causes">{{ shared.text(cause.title) }}</a>
+                                {% else %}
+                                    <span class="light">{{ "None"|t('web-doctor') }}</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+            {% if investigations|length >= investigationLimit %}
+                <p class="light">{{ "Showing the most recent {count}."|t('web-doctor', { count: investigationLimit }) }}</p>
+            {% endif %}
+        {% elseif not canInvestigate %}
+            <p class="light">{{ "Nobody has investigated this issue yet."|t('web-doctor') }}</p>
+        {% endif %}
+    {% endif %}
+</div>

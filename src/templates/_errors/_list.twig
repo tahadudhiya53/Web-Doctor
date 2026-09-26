@@ -1,0 +1,66 @@
+{# The error list, kept apart from the control panel shell for the reason the issue list is. #}
+
+{% if failure %}
+    <div class="pane wd-failure" role="alert">
+        <p><strong>{{ failure }}</strong></p>
+    </div>
+{% endif %}
+
+{% if groups is not null %}
+    <div class="pane">
+        <p class="wd-issues__headline">
+            {{ "{count, plural, =0{No errors have been recorded.} =1{1 error has been recorded.} other{# errors have been recorded.}}"|t('web-doctor', { count: groups.total }) }}
+        </p>
+        <p class="light">
+            {{ "An error is an exception a check ran into: a check that broke, or one that caught the exception that stopped it answering. The same error happening again is counted against the group that describes it, recognised by its type, its message with IDs, timestamps and other values that change each time taken out, where it was thrown and the exceptions behind it. Which check ran into it is not part of that, so one error many checks ran into is one group."|t('web-doctor') }}
+        </p>
+        {% if not canViewEvidence %}
+            <p class="light">{{ "What each error said, and where it was thrown, need the “View evidence” permission."|t('web-doctor') }}</p>
+        {% endif %}
+    </div>
+
+    {% if environments|length > 1 %}
+        <form method="get" action="" accept-charset="UTF-8" class="pane wd-filters">
+            <div class="wd-filters__group">
+                <label for="wd-errors-environment">{{ "Environment"|t('web-doctor') }}</label>
+                <div class="select">
+                    <select id="wd-errors-environment" name="environment">
+                        <option value="">{{ "Any environment"|t('web-doctor') }}</option>
+                        {% for option in environments %}
+                            <option value="{{ option }}"{{ environment == option ? ' selected' : '' }}>{{ option }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="wd-filters__actions">
+                <button type="submit" class="btn submit">{{ "Apply"|t('web-doctor') }}</button>
+            </div>
+        </form>
+    {% endif %}
+
+    {% if groups.isEmpty() %}
+        <div class="pane wd-empty">
+            <p>{{ "No errors have been recorded."|t('web-doctor') }}</p>
+            <p class="light">{{ "Errors are recorded when a diagnostic run or an investigation runs into an exception."|t('web-doctor') }}</p>
+        </div>
+    {% else %}
+        <div class="pane">
+            {% include "web-doctor/_errors/_groups" with { groups: groups.items, issues: issues, canViewEvidence: canViewEvidence } only %}
+
+            <div class="wd-pager">
+                <p class="light">{{ "Page {page} of {pages}"|t('web-doctor', { page: groups.page, pages: groups.pageCount() }) }}</p>
+                {% if groups.pageCount() > 1 %}
+                    <nav class="wd-pager__links" aria-label="{{ "Pagination"|t('web-doctor') }}">
+                        {% set base = environment ? { environment: environment } : {} %}
+                        {% if groups.hasPreviousPage() %}
+                            <a class="btn" href="{{ cpUrl('web-doctor/errors', base|merge({ page: groups.page - 1 })) }}">{{ "Previous"|t('web-doctor') }}</a>
+                        {% endif %}
+                        {% if groups.hasNextPage() %}
+                            <a class="btn" href="{{ cpUrl('web-doctor/errors', base|merge({ page: groups.page + 1 })) }}">{{ "Next"|t('web-doctor') }}</a>
+                        {% endif %}
+                    </nav>
+                {% endif %}
+            </div>
+        </div>
+    {% endif %}
+{% endif %}

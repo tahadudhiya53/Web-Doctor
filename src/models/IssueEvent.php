@@ -3,7 +3,6 @@
 namespace Tahadudhiya\WebDoctor\models;
 
 use DateTimeImmutable;
-use JsonSerializable;
 use Tahadudhiya\WebDoctor\enums\IssueEventType;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
@@ -16,7 +15,7 @@ use Tahadudhiya\WebDoctor\records\IssueEventRecord;
  * current state implies: an issue ignored twice before being acted on is a different story from
  * one nobody ever saw.
  */
-final class IssueEvent implements JsonSerializable
+final class IssueEvent
 {
     private function __construct(
         public readonly int $id,
@@ -47,25 +46,6 @@ final class IssueEvent implements JsonSerializable
             userId: $record->userId === null ? null : (int)$record->userId,
             occurredAt: self::time($record->dateCreated),
         );
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    public function jsonSerialize(): array
-    {
-        return [
-            'id' => $this->id,
-            'issueId' => $this->issueId,
-            'type' => $this->type->value,
-            'fromStatus' => $this->fromStatus?->value,
-            'toStatus' => $this->toStatus?->value,
-            'severity' => $this->severity?->value,
-            'note' => $this->note,
-            'runId' => $this->runId,
-            'userId' => $this->userId,
-            'occurredAt' => $this->occurredAt->format(DATE_ATOM),
-        ];
     }
 
     private static function time(?string $value): DateTimeImmutable

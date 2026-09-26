@@ -2,23 +2,21 @@
 
 namespace Tahadudhiya\WebDoctor\services;
 
-use Craft;
 use craft\db\ActiveQuery;
 use craft\helpers\Db;
 use DateTimeImmutable;
 use DateTimeInterface;
 use RuntimeException;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\Savepoint;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\EvidencePage;
 use Tahadudhiya\WebDoctor\models\StoredEvidence;
 use Tahadudhiya\WebDoctor\records\EvidenceRecord;
-use Throwable;
 use yii\base\Component;
 use yii\db\Expression;
-use yii\db\IntegrityException;
 
 /**
  * The evidence Web Doctor keeps, and the rules about what is worth keeping.
@@ -87,11 +85,9 @@ class EvidenceStore extends Component
 
             // Another request stored this fact between the lookup and the insert. Its row is the
             // fact now, so this sighting is counted against it.
-            $existing += $this->existing($issueId, [$digest]);
-
-            if (!isset($existing[$digest])) {
-                throw new RuntimeException(sprintf('Evidence %s for issue %d could not be stored or found.', $digest, $issueId));
-            }
+            $winner = Savepoint::committed(EvidenceRecord::find()->where(['issueId' => $issueId, 'digest' => $digest]))[0]
+                ?? throw new RuntimeException(sprintf('Evidence %s for issue %d could not be stored or found.', $digest, $issueId));
+            $existing[$digest] = (int)$winner->id;
         }
 
         if ($existing !== []) {
@@ -190,62 +186,47 @@ class EvidenceStore extends Component
     /**
      * Inserts a new fact, or reports that somebody else already has.
      *
-     * In a nested transaction for the reason {@see Issues} gives for issues: PostgreSQL abandons
-     * the whole transaction after a failed statement, so a lost race has to roll back only itself.
-     *
      * @return int|null The new row's ID, or null when the fact was stored while this was being built.
      */
     private function create(int $issueId, string $digest, Evidence $evidence, DiagnosticResult $result, DiagnosticRun $run, string $seenAt): ?int
     {
-        $savepoint = Craft::$app->getDb()->beginTransaction();
+        $record = new EvidenceRecord();
+        $record->issueId = $issueId;
+        $record->digest = $digest;
+        $record->diagnosticId = $result->diagnosticId;
+        $record->type = $evidence->type->value;
+        $record->label = $evidence->label;
+        $record->source = $evidence->source;
+        $record->reference = $evidence->reference;
+        // Redacted as it goes in, although the evidence redacted itself when it was built.
+        // This is a serialization boundary, and every one of those redacts.
+        $record->data = $evidence->data === [] ? null : Evidence::encode(Redaction::redact($evidence->data));
+        $record->metadata = $evidence->metadata === [] ? null : Evidence::encode(Redaction::redact($evidence->metadata));
+        $record->confidence = $evidence->confidence?->value;
+        $record->truncated = $evidence->truncated;
+        // Attributed to the run being reconciled — the same context the issue's fingerprint was
+        // built from — and never to whatever the evidence says about itself. The engine
+        // stamps those to match, but a run assembled any other way must not be able to file
+        // evidence under a site or environment its issue does not belong to.
+        $record->environment = $run->context->environment;
+        $record->siteId = $run->context->siteId;
+        $record->firstRunId = $run->id();
+        $record->lastRunId = $run->id();
+        $record->occurrences = 1;
+        $record->observedAt = $evidence->observedAt === null ? null : $this->forDb($evidence->observedAt);
+        $record->firstSeen = $seenAt;
+        $record->lastSeen = $seenAt;
 
-        try {
-            $record = new EvidenceRecord();
-            $record->issueId = $issueId;
-            $record->digest = $digest;
-            $record->diagnosticId = $result->diagnosticId;
-            $record->type = $evidence->type->value;
-            $record->label = $evidence->label;
-            $record->source = $evidence->source;
-            $record->reference = $evidence->reference;
-            // Redacted as it goes in, although the evidence redacted itself when it was built.
-            // This is a serialization boundary, and every one of those redacts.
-            $record->data = $evidence->data === [] ? null : Evidence::encode(Redaction::redact($evidence->data));
-            $record->metadata = $evidence->metadata === [] ? null : Evidence::encode(Redaction::redact($evidence->metadata));
-            $record->confidence = $evidence->confidence?->value;
-            $record->truncated = $evidence->truncated;
-            // Attributed to the run being reconciled — the same context the issue's fingerprint was
-            // built from — and never to whatever the evidence says about itself. The engine
-            // stamps those to match, but a run assembled any other way must not be able to file
-            // evidence under a site or environment its issue does not belong to.
-            $record->environment = $run->context->environment;
-            $record->siteId = $run->context->siteId;
-            $record->firstRunId = $run->id();
-            $record->lastRunId = $run->id();
-            $record->occurrences = 1;
-            $record->observedAt = $evidence->observedAt === null ? null : $this->forDb($evidence->observedAt);
-            $record->firstSeen = $seenAt;
-            $record->lastSeen = $seenAt;
-
+        $inserted = Savepoint::insert(static function() use ($record): void {
             if (!$record->save()) {
                 throw new RuntimeException(sprintf(
                     'Web Doctor evidence could not be saved: %s',
                     Redaction::redactString(json_encode($record->getErrors()) ?: 'unknown error'),
                 ));
             }
+        });
 
-            $savepoint->commit();
-
-            return (int)$record->id;
-        } catch (IntegrityException) {
-            $savepoint->rollBack();
-
-            return null;
-        } catch (Throwable $e) {
-            $savepoint->rollBack();
-
-            throw $e;
-        }
+        return $inserted ? (int)$record->id : null;
     }
 
     /**

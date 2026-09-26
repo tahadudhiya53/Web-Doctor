@@ -3,7 +3,6 @@
 namespace Tahadudhiya\WebDoctor\models;
 
 use DateTimeImmutable;
-use JsonSerializable;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\IssueResolution;
@@ -18,7 +17,7 @@ use Tahadudhiya\WebDoctor\records\IssueRecord;
  * Immutable. The service reads a record and hands out one of these, so nothing downstream holds
  * an object it could save by accident.
  */
-final class Issue implements JsonSerializable
+final class Issue
 {
     /**
      * @param string $fingerprint What makes this problem this problem.
@@ -109,40 +108,6 @@ final class Issue implements JsonSerializable
     public function isRecurring(): bool
     {
         return $this->occurrences > 1;
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    public function jsonSerialize(): array
-    {
-        return [
-            'id' => $this->id,
-            'fingerprint' => $this->fingerprint,
-            'diagnosticId' => $this->diagnosticId,
-            'diagnosticName' => $this->diagnosticName,
-            'category' => $this->category->value,
-            'title' => $this->title,
-            'description' => $this->description,
-            'recommendation' => $this->recommendation,
-            'severity' => $this->severity->value,
-            'status' => $this->status->value,
-            'resolution' => $this->resolution->value,
-            'resultStatus' => $this->resultStatus->value,
-            'environment' => $this->environment,
-            'siteId' => $this->siteId,
-            'siteName' => $this->siteName,
-            'affectedComponent' => $this->affectedComponent,
-            'affectedPlugin' => $this->affectedPlugin,
-            'occurrences' => $this->occurrences,
-            'firstDetected' => $this->firstDetected->format(DATE_ATOM),
-            'lastDetected' => $this->lastDetected->format(DATE_ATOM),
-            'resolvedAt' => $this->resolvedAt?->format(DATE_ATOM),
-            'firstRunId' => $this->firstRunId,
-            'latestRunId' => $this->latestRunId,
-            'resolvedByRunId' => $this->resolvedByRunId,
-            'latestResult' => $this->latestResult,
-        ];
     }
 
     /**

@@ -45,6 +45,14 @@ class Permissions extends Component
      */
     public const VIEW_EVIDENCE = 'webDoctor:viewEvidence';
 
+    /**
+     * @var string Investigating an issue: running the checks related to it and recording what
+     * they find. Separate from {@see self::VIEW_ISSUES} because it spends the site's time on
+     * demand, as a diagnostic run does, and separate from {@see self::MANAGE_ISSUES} because
+     * looking into a problem is not deciding anything about it.
+     */
+    public const INVESTIGATE_ISSUES = 'webDoctor:investigateIssues';
+
     public function register(): void
     {
         Event::on(UserPermissions::class, UserPermissions::EVENT_REGISTER_PERMISSIONS, function(RegisterUserPermissionsEvent $event) {
@@ -56,7 +64,7 @@ class Permissions extends Component
     }
 
     /**
-     * @return array<string, array{label: string, nested?: array<string, mixed>}>
+     * @return array<string, array{label: string, info?: string, nested?: array<string, mixed>}>
      */
     public function definitions(): array
     {
@@ -75,6 +83,10 @@ class Permissions extends Component
                             ],
                             self::VIEW_EVIDENCE => [
                                 'label' => Craft::t('web-doctor', 'View evidence'),
+                            ],
+                            self::INVESTIGATE_ISSUES => [
+                                'label' => Craft::t('web-doctor', 'Investigate issues'),
+                                'info' => Craft::t('web-doctor', 'Runs the checks related to an issue and records what they find.'),
                             ],
                         ],
                     ],
@@ -106,6 +118,11 @@ class Permissions extends Component
     public function canViewEvidence(): bool
     {
         return $this->can(self::VIEW_EVIDENCE);
+    }
+
+    public function canInvestigate(): bool
+    {
+        return $this->can(self::INVESTIGATE_ISSUES);
     }
 
     /**

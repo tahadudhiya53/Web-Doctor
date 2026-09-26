@@ -42,17 +42,17 @@
 <div class="pane">
     <h2>{{ "Where this came from"|t('web-doctor') }}</h2>
     <dl class="wd-meta">
-        <div><dt>{{ "Check"|t('web-doctor') }}</dt><dd>{{ issue.diagnosticName }}</dd></div>
+        <div><dt>{{ "Check"|t('web-doctor') }}</dt><dd>{{ shared.text(issue.diagnosticName) }}</dd></div>
         <div><dt>{{ "Check ID"|t('web-doctor') }}</dt><dd><code>{{ issue.diagnosticId }}</code></dd></div>
         <div><dt>{{ "Category"|t('web-doctor') }}</dt><dd>{{ issue.category.label() }}</dd></div>
         <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ issue.environment }}</dd></div>
         <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ siteLabel }}</dd></div>
         <div><dt>{{ "Result"|t('web-doctor') }}</dt><dd>{{ issue.resultStatus.label() }}</dd></div>
         {% if issue.affectedComponent %}
-            <div><dt>{{ "Affected component"|t('web-doctor') }}</dt><dd>{{ issue.affectedComponent }}</dd></div>
+            <div><dt>{{ "Affected component"|t('web-doctor') }}</dt><dd>{{ shared.text(issue.affectedComponent) }}</dd></div>
         {% endif %}
         {% if issue.affectedPlugin %}
-            <div><dt>{{ "Affected plugin"|t('web-doctor') }}</dt><dd>{{ issue.affectedPlugin }}</dd></div>
+            <div><dt>{{ "Affected plugin"|t('web-doctor') }}</dt><dd>{{ shared.text(issue.affectedPlugin) }}</dd></div>
         {% endif %}
         <div><dt>{{ "First seen"|t('web-doctor') }}</dt><dd>{{ issue.firstDetected|datetime('short') }}</dd></div>
         <div><dt>{{ "Last seen"|t('web-doctor') }}</dt><dd>{{ issue.lastDetected|datetime('short') }}</dd></div>
@@ -65,6 +65,10 @@
 </div>
 
 {% include "web-doctor/_issues/_evidence" %}
+
+{% include "web-doctor/_issues/_errors" %}
+
+{% include "web-doctor/_issues/_investigate" %}
 
 {% if canManage %}
     <form method="post" accept-charset="UTF-8" class="pane wd-issue__form">
@@ -81,7 +85,12 @@
         <div class="field">
             <label for="wd-issue-status">{{ "Status"|t('web-doctor') }}</label>
             <div class="select">
-                <select id="wd-issue-status" name="status">
+                <select id="wd-issue-status" name="status" required>
+                    {# A status nobody sets by hand has no option of its own, and a browser left with
+                       nothing selected picks the first — so saving would quietly reopen the issue. #}
+                    {% if issue.status not in settableStatuses %}
+                        <option value="" selected disabled>{{ "Currently “{status}” — choose a status"|t('web-doctor', { status: issue.status.label() }) }}</option>
+                    {% endif %}
                     {% for status in settableStatuses %}
                         <option value="{{ status.value }}"{{ issue.status.value == status.value ? ' selected' : '' }}>{{ status.label() }}</option>
                     {% endfor %}
@@ -91,12 +100,8 @@
 
         <div class="field">
             <label for="wd-issue-note">{{ "Reason"|t('web-doctor') }}</label>
-            <div class="instructions"><p>{{ "Required when ignoring an issue or ruling it out."|t('web-doctor') }}</p></div>
-            {# A reason with something withheld from it is not offered back for editing: a text field
-               cannot show the mark, and saving it would write the marker in as the reason. It is
-               still shown, marked, above. #}
-            {% set redactedNote = constant('Tahadudhiya\\WebDoctor\\helpers\\Redaction::REDACTED') in (issue.statusNote ?? '') %}
-            <textarea id="wd-issue-note" name="note" class="text fullwidth" rows="3">{{ redactedNote ? '' : issue.statusNote }}</textarea>
+            <div class="instructions"><p>{{ "Required when ignoring an issue or ruling it out. The reason already given is shown above; it is not carried over to a new status."|t('web-doctor') }}</p></div>
+            <textarea id="wd-issue-note" name="note" class="text fullwidth" rows="3"></textarea>
         </div>
 
         <button type="submit" class="btn submit">{{ "Save"|t('web-doctor') }}</button>

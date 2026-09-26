@@ -10,14 +10,13 @@ matches the Craft major version the plugin supports, so the first release is 5.0
 
 ### Added
 
-- Web Doctor installs as a Craft CMS 5 plugin, with a health dashboard in the control panel.
-- A health dashboard showing what the last run concluded: the health score with the weights and
-  per-check penalties behind it, counts by severity and status, and every check's status,
-  severity, summary, evidence summary, timestamp and duration, grouped by category. Opening it
-  runs nothing; checks run when a user asks for them, all of them or a selection, at a chosen
-  depth. A score is shown only when the run covered every registered check. Results from checks
-  that no longer exist stay visible in a section of their own and count toward nothing. Evidence
-  is summarised, never displayed.
+- A health dashboard in the control panel showing what the last run concluded: the health score
+  with the weights and per-check penalties behind it, counts by severity and status, and every
+  check's status, severity, summary, evidence summary, timestamp and duration, grouped by
+  category. Opening it runs nothing; checks run when a user asks for them, all of them or a
+  selection, at a chosen depth. A score is shown only when the run covered every registered check.
+  Results from checks that no longer exist stay visible in a section of their own and count toward
+  nothing.
 - Eighteen built-in checks covering Craft, PHP, the database, plugins, the queue, project config,
   asset filesystems, storage directories, the mailer and the environment. They read only: nothing
   is sent, written or created, no log file is searched, and no credential is ever recorded as a
@@ -29,9 +28,8 @@ matches the Craft major version the plugin supports, so the first release is 5.0
 - An Issue Center: warnings and failures become issues that persist across runs, identified by a
   stable fingerprint so the same problem found again updates one record rather than raising
   another. Each carries its severity, where it came from, when it was first and last seen, how
-  many times, the evidence behind it, and a history of what has happened to it. The
-  list filters by status, severity, check, site, environment and date, sorts by any of those, and
-  pages.
+  many times, the evidence behind it, and a history of what has happened to it. The list filters
+  by status, severity, check, site, environment and date, sorts by any of those, and pages.
 - Issue statuses, with resolution established rather than asserted: an issue resolves only when
   the check that raised it runs again and no longer reports the problem, recorded against the run
   that established it. Nobody can mark an issue resolved by hand. Somebody who has decided an
@@ -44,46 +42,40 @@ matches the Craft major version the plugin supports, so the first release is 5.0
 - An evidence inspector on each issue's page, showing the evidence behind the latest finding and
   a paged history of earlier evidence. Withheld values are marked “Redacted”, values cut short
   are marked as such, and each piece of evidence says how many of its values were withheld.
-- New evidence types for the state of the system, the database, the queue, a plugin and a
-  deployment, alongside the existing, more particular ones. The shipped checks use them where
-  they describe the evidence more accurately.
-- Redaction that recognises credentials by their shape — private keys, AWS access key IDs, JSON
-  web tokens, Stripe, GitHub, GitLab, Slack, Google and SendGrid keys, and Slack and Discord
-  webhook URLs — and by their value, looking for the environment's own credentials in any text
-  Web Doctor records. The user name half of a database or mail login, and environment-style names
-  ending in `_KEY`, `_PASS` or `_AUTH`, are now treated as credentials too.
-- “View Web Doctor”, “Run diagnostics”, “View issues”, “Manage issues” and “View evidence”
-  permissions, each nested under the one it depends on and checked separately.
+- Redaction applied wherever Web Doctor writes anything down. Credentials are recognised by the
+  key they sit under — including the user name half of a database or mail login, session IDs,
+  form and array keys, and environment-style names ending in `_KEY`, `_PASS` or `_AUTH` — by their
+  shape — private keys, AWS access key IDs, JSON web tokens, Stripe, GitHub, GitLab, Slack, Google
+  and SendGrid keys, Slack and Discord webhook URLs, credentials in a URL and authorization
+  headers — and by their value, looking for the environment's own credentials in any text Web
+  Doctor records.
+- Investigations: from an issue's page, run the check that raised it again alongside the checks
+  related to it, chosen deterministically from a published list of relationships between kinds of
+  problem, each with its reason, at a chosen depth and bounded to 25 checks. Each investigation
+  records what every check reported, the evidence it left (bounded, redacted, and shown only to
+  users with “View evidence”), other issues open nearby in the same environment and site, and a
+  timeline, and is kept against the issue. Findings update the Issue Center like any other run.
+  Areas no installed check covers, and leads worth following by hand, are listed rather than
+  omitted.
+- Error grouping: every exception a diagnostic run or an investigation runs into is recorded
+  against a group identified by its class, its message with the values that vary between
+  occurrences taken out, where it was thrown, the exceptions behind it and, where a trace was
+  recorded, the calls at the top of it — so the same error seen again is counted rather than
+  listed. Each group keeps its occurrence count, when it was first and last seen, the checks that
+  ran into it and the issues it relates to, bounded to 500 per environment and site.
+- An Errors page in the control panel, and an errors section on each issue's page and each
+  investigation's page. What an error said, where it was thrown and its trace are shown only to
+  users with “View evidence”.
+- Root-cause analysis: each investigation weighs what its checks found — their results, the
+  evidence they recorded, the errors they ran into, failed queue jobs, configuration and
+  environment state, and when related issues were first seen — against a fixed, published list of
+  nine known causes. Each cause that fits is kept with the problem it would explain, the evidence
+  for it, the reasoning, its confidence (possible, likely, high or confirmed), what counts against
+  it, what was looked for and not found, related issues, a recommended action and what to
+  investigate next. A cause is confirmed only on evidence recorded by a check that established it,
+  with nothing against it.
+- “View Web Doctor”, “Run diagnostics”, “View issues”, “Manage issues”, “View evidence” and
+  “Investigate issues” permissions, each nested under the one it depends on and checked separately.
 - Plugin settings, overridable from a `config/web-doctor.php` file.
 - A `php craft webdoctor/status` command reporting the plugin's version, schema version and
   settings validity, exiting non-zero when the settings are invalid.
-
-### Fixed
-
-- `queue.failedJobs` counted and sampled failures from every queue channel rather than only the
-  one it was inspecting, so an installation running more than one queue component saw another
-  queue's failures reported as this one's.
-- An issue's identity included the status of the result that raised it, so a check that warned
-  and then failed about the same thing closed one issue and opened another, splitting one
-  problem's history in two.
-- Two requests reconciling the same finding at once could both try to create the issue, and the
-  one that lost turned a database constraint into an unhandled error.
-- An issue's status could change without the history entry recording it, leaving a decision
-  nobody could account for.
-- Deleting a site deleted every issue found while looking at it, including findings about the
-  installation that merely happened to be stamped with that site.
-- The issue counts shown beside the list were counted over every environment, so they disagreed
-  with the list they labelled.
-- An issue's title, description and recommendation were stored exactly as the check wrote them,
-  so a check whose summary quoted a credential — `SMTP refused: password=…` — put it in the
-  database and on the dashboard. A result's wording is now redacted as the result is built.
-- A credential inside a JSON body quoted in an error message — `{"password":"…"}` — and a
-  value under an `auth` key passed through redaction untouched.
-- The reason given when an issue was ignored or ruled out was stored unredacted, as were cache
-  errors written to the log.
-- One malformed byte in a check's output could stop the whole issue list being updated after a
-  run.
-- The issue list and dashboard pushed the control panel sideways on a narrow screen, and the
-  bracketed redaction marker was shown as text in issue titles and on the dashboard rather than
-  marked as a withheld value.
-- A page number past the end of the results reported a range no row occupied.

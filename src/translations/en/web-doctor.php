@@ -794,7 +794,4 @@ return [
     'An issue cannot be moved to “{status}” by hand. That state is established by what Web Doctor observes, not by a request.' => 'An issue cannot be moved to “{status}” by hand. That state is established by what Web Doctor observes, not by a request.',
     'Setting an issue to “{status}” is a decision rather than an outcome, so it needs a reason.' => 'Setting an issue to “{status}” is a decision rather than an outcome, so it needs a reason.',
     'No issue exists with the ID {id}.' => 'No issue exists with the ID {id}.',
-    'The checks ran, but the results could not be stored. Check that Craft’s cache is writable.' => 'The checks ran, but the results could not be stored. Check that Craft’s cache is writable.',
-    '{count, plural, =1{1 check ran.} other{# checks ran.}} {opened, plural, =0{No new issues.} =1{1 new issue.} other{# new issues.}} {resolved, plural, =0{} =1{1 issue resolved.} other{# issues resolved.}}' => '{count, plural, =1{1 check ran.} other{# checks ran.}} {opened, plural, =0{No new issues.} =1{1 new issue.} other{# new issues.}} {resolved, plural, =0{} =1{1 issue resolved.} other{# issues resolved.}}',
-    'Required when ignoring an issue or ruling it out.' => 'Required when ignoring an issue or ruling it out.',
 ];

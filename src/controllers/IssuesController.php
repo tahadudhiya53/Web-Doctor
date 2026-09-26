@@ -4,10 +4,15 @@ namespace Tahadudhiya\WebDoctor\controllers;
 
 use Craft;
 use craft\web\Controller;
+use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\models\ErrorGroup;
+use Tahadudhiya\WebDoctor\models\Investigation;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
 use Tahadudhiya\WebDoctor\models\SafeException;
+use Tahadudhiya\WebDoctor\services\Investigations;
+use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
 use Tahadudhiya\WebDoctor\WebDoctor;
@@ -25,9 +30,6 @@ use yii\web\Response;
  */
 class IssuesController extends Controller
 {
-    /** @var int How much of an issue's history the detail page shows. */
-    private const EVENT_LIMIT = 50;
-
     public function beforeAction($action): bool
     {
         if (!parent::beforeAction($action)) {
@@ -68,7 +70,7 @@ class IssuesController extends Controller
             // Counted under the same filter, minus the status facet the numbers sit beside.
             $counts = $plugin->getIssues()->countsByStatus($filter);
         } catch (Throwable $e) {
-            $this->logFailure('The issue list could not be read', $e);
+            SafeException::log('The issue list could not be read', $e);
 
             return $this->renderTemplate('web-doctor/_issues/_index', [
                 'title' => Craft::t('web-doctor', 'Issues'),
@@ -111,9 +113,9 @@ class IssuesController extends Controller
 
         try {
             $issue = $plugin->getIssues()->get($issueId);
-            $events = $issue === null ? [] : $plugin->getIssues()->events($issueId, self::EVENT_LIMIT);
+            $events = $issue === null ? [] : $plugin->getIssues()->events($issueId, Issues::EVENT_LIMIT);
         } catch (Throwable $e) {
-            $this->logFailure('An issue could not be read', $e);
+            SafeException::log('An issue could not be read', $e);
 
             throw new NotFoundHttpException(Craft::t('web-doctor', 'That issue could not be read.'));
         }
@@ -133,8 +135,49 @@ class IssuesController extends Controller
             $latestEvidence = $plugin->getEvidence()->latest($issue->id, $issue->latestRunId);
             $earlierEvidence = $plugin->getEvidence()->earlier($issue->id, $issue->latestRunId, is_numeric($page) ? (int)$page : 1);
         } catch (Throwable $e) {
-            $this->logFailure('An issue\'s evidence could not be read', $e);
+            SafeException::log('An issue\'s evidence could not be read', $e);
             $evidenceFailure = Craft::t('web-doctor', 'Web Doctor could not read the evidence behind this issue. The details are in Craft’s logs.');
+        }
+
+        // Read on its own for the same reason. What an investigation would look at is worked out
+        // from the registry without running anything, so the reader can see the reasons first.
+        $investigationFailure = null;
+        $investigations = [];
+        $investigationPlan = null;
+        $investigationRefusal = null;
+        $leadingCauses = [];
+
+        try {
+            $investigations = $plugin->getInvestigations()->forIssue($issue->id);
+            $investigationPlan = $plugin->getInvestigations()->plan($issue);
+            $investigationRefusal = $plugin->getInvestigations()->refusal($issue);
+        } catch (Throwable $e) {
+            SafeException::log('An issue\'s investigations could not be read', $e);
+            $investigationFailure = Craft::t('web-doctor', 'Web Doctor could not read the investigations of this issue. The details are in Craft’s logs.');
+        }
+
+        // Read on its own, so a cause that cannot be read costs the list its causes rather than
+        // costing the reader the investigations.
+        try {
+            $leadingCauses = $plugin->getRootCauses()->leading(array_map(static fn(Investigation $i): int => $i->id, $investigations));
+        } catch (Throwable $e) {
+            SafeException::log('An issue\'s investigations\' causes could not be read', $e);
+        }
+
+        // Read on its own for the same reason.
+        $errorsFailure = null;
+        $errorGroups = [];
+        $errorIssues = [];
+
+        try {
+            $errorGroups = $plugin->getErrors()->forIssue($issue->id);
+            $errorIssues = $plugin->getIssues()->getMany(array_values(array_unique(array_merge(
+                [],
+                ...array_map(static fn(ErrorGroup $group): array => $group->issueIds(), $errorGroups),
+            ))));
+        } catch (Throwable $e) {
+            SafeException::log('An issue\'s errors could not be read', $e);
+            $errorsFailure = Craft::t('web-doctor', 'Web Doctor could not read the errors related to this issue. The details are in Craft’s logs.');
         }
 
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
@@ -148,11 +191,22 @@ class IssuesController extends Controller
             // here rather than merely discouraged.
             'settableStatuses' => IssueStatus::settableByHand(),
             'canManage' => $plugin->getPermissions()->canManageIssues(),
-            'eventLimit' => self::EVENT_LIMIT,
+            'eventLimit' => Issues::EVENT_LIMIT,
             'latestEvidence' => $latestEvidence,
             'earlierEvidence' => $earlierEvidence,
             'evidenceFailure' => $evidenceFailure,
             'canViewEvidence' => $plugin->getPermissions()->canViewEvidence(),
+            'investigations' => $investigations,
+            'investigationPlan' => $investigationPlan,
+            'investigationRefusal' => $investigationRefusal,
+            'investigationFailure' => $investigationFailure,
+            'leadingCauses' => $leadingCauses,
+            'investigationLimit' => Investigations::HISTORY_LIMIT,
+            'canInvestigate' => $plugin->getPermissions()->canInvestigate(),
+            'depths' => DiagnosticDepth::cases(),
+            'errorGroups' => $errorGroups,
+            'errorIssues' => $errorIssues,
+            'errorsFailure' => $errorsFailure,
         ]);
     }
 
@@ -182,7 +236,8 @@ class IssuesController extends Controller
         $note = is_string($note) ? $note : null;
 
         try {
-            $this->plugin()->getIssues()->transition($issueId, $status, $note, $this->userId());
+            $before = $this->plugin()->getIssues()->get($issueId);
+            $issue = $this->plugin()->getIssues()->transition($issueId, $status, $note, $this->userId());
         } catch (InvalidArgumentException $e) {
             // Refusals are the service stating its rules — a status nobody may set by hand, a
             // dismissal with no reason — and the reader is the person who needs to hear them.
@@ -190,13 +245,18 @@ class IssuesController extends Controller
 
             return $this->redirectToPostedUrl();
         } catch (Throwable $e) {
-            $this->logFailure('An issue could not be updated', $e);
+            SafeException::log('An issue could not be updated', $e);
             $this->setFailFlash(Craft::t('web-doctor', 'The issue could not be updated. The details are in Craft’s logs.'));
 
             return $this->redirectToPostedUrl();
         }
 
-        $this->setSuccessFlash(Craft::t('web-doctor', 'Issue updated.'));
+        // Saving the status an issue already has, with no new reason, is not an update, and saying
+        // it was would tell the reader a reason they typed had been kept.
+        $unchanged = $before !== null && $before->status === $issue->status && $before->statusNote === $issue->statusNote;
+        $this->setSuccessFlash($unchanged
+            ? Craft::t('web-doctor', 'Nothing changed: the issue already had that status and reason.')
+            : Craft::t('web-doctor', 'Issue updated.'));
 
         return $this->redirectToPostedUrl();
     }
@@ -310,17 +370,6 @@ class IssuesController extends Controller
         } catch (Throwable) {
             return null;
         }
-    }
-
-    /**
-     * Records a failure through the same sanitised representation everything else goes through,
-     * so the log cannot become the boundary that leaks what the page does not.
-     */
-    private function logFailure(string $what, Throwable $exception): void
-    {
-        $safe = SafeException::from($exception);
-
-        Craft::error(sprintf('%s. %s at %s', $what, $safe->summary(), $safe->origin), WebDoctor::LOG_CATEGORY);
     }
 
     private function plugin(): WebDoctor

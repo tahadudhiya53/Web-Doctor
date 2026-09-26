@@ -3,9 +3,12 @@
 namespace Tahadudhiya\WebDoctor\Tests\unit;
 
 use PHPUnit\Framework\TestCase;
+use Tahadudhiya\WebDoctor\enums\ConditionRole;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\EvidenceType;
+use Tahadudhiya\WebDoctor\enums\InvestigationStatus;
+use Tahadudhiya\WebDoctor\enums\InvestigationStepType;
 use Tahadudhiya\WebDoctor\enums\IssueEventType;
 use Tahadudhiya\WebDoctor\enums\IssueResolution;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
@@ -14,8 +17,10 @@ use Tahadudhiya\WebDoctor\enums\Severity;
 /**
  * The words Web Doctor's domain is made of: what happened to a check (status), how much it
  * matters (severity), how firmly a conclusion is held (confidence), what kind of fact backs it
- * (evidence type), and where a problem stands
- * once it outlives the run that found it (issue status, resolution, event type). The rest of the
+ * (evidence type), where a problem stands
+ * once it outlives the run that found it (issue status, resolution, event type), how an
+ * investigation of it went (investigation status, step type), and what part a finding plays in a
+ * cause it is weighed for (condition role). The rest of the
  * plugin reasons from these distinctions, so they are asserted rather than left to whoever reads
  * the enums next.
  */
@@ -130,6 +135,9 @@ class VocabularyTest extends TestCase
             [Confidence::CONFIRMED, Confidence::HIGH, Confidence::LIKELY, Confidence::POSSIBLE, Confidence::INFORMATIONAL],
             Confidence::cases(),
         );
+
+        // Ranked in the same order, so causes are sorted by what the words mean.
+        self::assertSame([4, 3, 2, 1, 0], array_map(static fn(Confidence $c): int => $c->rank(), Confidence::cases()));
     }
 
     public function testEveryWordInTheVocabularyIsLabelledAndSpeltOnce(): void
@@ -142,6 +150,9 @@ class VocabularyTest extends TestCase
             IssueResolution::cases(),
             IssueEventType::cases(),
             EvidenceType::cases(),
+            InvestigationStatus::cases(),
+            InvestigationStepType::cases(),
+            ConditionRole::cases(),
         ];
 
         foreach ($vocabularies as $cases) {
@@ -240,5 +251,31 @@ class VocabularyTest extends TestCase
 
         self::assertStringContainsString('no longer reports', $observed);
         self::assertStringContainsString('not a verification', $observed);
+    }
+
+    // --- How an investigation went.
+
+    public function testAnInvestigationSaysWhetherItGotItsAnswersNotWhatTheyWere(): void
+    {
+        // Only a running investigation is unfinished. The other three are all endings, and they
+        // differ in how much of the plan was answered — never in whether the site looked healthy.
+        self::assertSame([InvestigationStatus::RUNNING], array_values(array_filter(
+            InvestigationStatus::cases(),
+            static fn(InvestigationStatus $s): bool => !$s->isFinished(),
+        )));
+        self::assertSame(['running', 'completed', 'partial', 'failed'], InvestigationStatus::values());
+    }
+
+    // --- What a finding does to a cause it is weighed for.
+
+    public function testOnlyEvidenceAgainstACauseCountsAgainstIt(): void
+    {
+        // Required, supporting and confirming evidence are all evidence for a cause; a reader shown
+        // "the evidence" has to be shown those three, and what counts against it apart from them.
+        self::assertSame([ConditionRole::CONTRADICTING], array_values(array_filter(
+            ConditionRole::cases(),
+            static fn(ConditionRole $r): bool => !$r->isFor(),
+        )));
+        self::assertSame(['required', 'supporting', 'confirming', 'contradicting'], ConditionRole::values());
     }
 }

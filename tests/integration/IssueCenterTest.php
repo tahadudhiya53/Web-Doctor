@@ -21,6 +21,7 @@ use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\Savepoint;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
@@ -189,24 +190,6 @@ class IssueCenterTest extends TestCase
         self::assertLessThan($issue->lastDetected, $issue->firstDetected);
     }
 
-    /**
-     * The wording and the severity are the current reading, not the identity. A check reporting
-     * "3 jobs have failed" and then "17 jobs have failed" is one problem, and raising a fresh
-     * issue each time a number moved would destroy the history that makes it worth having.
-     */
-    public function testAChangedReadingUpdatesTheIssueRatherThanRaisingAnother(): void
-    {
-        $this->issues->reconcile($this->diagnosticRun([$this->finding(status: DiagnosticStatus::FAIL, summary: '3 jobs have failed.', severity: Severity::MEDIUM)]));
-        $this->issues->reconcile($this->diagnosticRun([$this->finding(status: DiagnosticStatus::FAIL, summary: '17 jobs have failed.', severity: Severity::CRITICAL)]));
-
-        $issue = $this->only();
-
-        self::assertSame('17 jobs have failed.', $issue->title);
-        self::assertSame(Severity::CRITICAL, $issue->severity);
-        self::assertSame(2, $issue->occurrences);
-        self::assertContains(IssueEventType::CHANGED, $this->eventTypes($issue));
-    }
-
     public function testAnUnchangedSightingAddsNoHistory(): void
     {
         $this->issues->reconcile($this->diagnosticRun([$this->finding(status: DiagnosticStatus::FAIL)]));
@@ -232,9 +215,10 @@ class IssueCenterTest extends TestCase
     }
 
     /**
-     * A problem that gets worse, or better, is the same problem. The result status is the current
-     * reading of an issue, not its identity — if it were, a check that warned and then failed
-     * would close one issue and open another, splitting one problem's history in two.
+     * A problem that gets worse, or better, is the same problem. The wording, the severity and the
+     * result status are the current reading of an issue, not its identity: a check reporting
+     * "3 jobs have failed" and then "17", or warning and then failing, is reporting one problem,
+     * and raising a fresh issue each time would split its history in two.
      */
     public function testAProblemThatChangesSeverityOrStatusStaysOneIssue(): void
     {
@@ -271,6 +255,7 @@ class IssueCenterTest extends TestCase
     public function testACheckThatLaterPassesResolvesItsIssue(): void
     {
         $this->issues->reconcile($this->diagnosticRun([$this->finding(status: DiagnosticStatus::FAIL)]));
+        $this->issues->transition($this->only()->id, IssueStatus::INVESTIGATING, 'Waiting on the host.');
         $clean = $this->diagnosticRun([$this->finding(status: DiagnosticStatus::PASS)]);
         $outcome = $this->issues->reconcile($clean);
 
@@ -283,6 +268,8 @@ class IssueCenterTest extends TestCase
         self::assertNotNull($issue->resolvedAt);
         self::assertFalse($issue->isOpen());
         self::assertContains(IssueEventType::RESOLVED, $this->eventTypes($issue));
+        // The reason given for investigating does not read as the reason it is resolved.
+        self::assertNull($issue->statusNote);
     }
 
     /**
@@ -377,35 +364,45 @@ class IssueCenterTest extends TestCase
      * Two requests reconciling the same finding at once both look, both miss, and both insert.
      * The second insert must join the issue the first created rather than fail the run.
      *
-     * The losing request is reproduced by blinding the lookup, which is the state a real second
-     * request is in between its own lookup and its insert. Genuine parallelism cannot be run
-     * inside one PHPUnit process, so what is exercised here is the unique-key conflict and the
-     * reload that follows it — the part that would otherwise be an unhandled database error.
+     * The winner commits on a second connection after the loser has already read inside its own
+     * transaction, as a real second request would. That ordering matters: under REPEATABLE READ
+     * the loser's snapshot was fixed by that first read, so an ordinary re-read after the conflict
+     * cannot see the winner's row at all.
      */
     public function testARequestThatLosesTheRaceToCreateAnIssueJoinsTheWinner(): void
     {
         $this->issues->reconcile($this->diagnosticRun([$this->finding(status: DiagnosticStatus::FAIL)]));
+        $winner = $this->racedRow(IssueRecord::findOne(['environment' => $this->environment]));
 
-        $blind = new class() extends Issues {
-            private int $looks = 0;
+        $loser = new class() extends Issues {
+            /** @var callable|null */
+            public $commitWinner;
 
             protected function findByFingerprint(string $fingerprint): ?IssueRecord
             {
-                // Blind on the first look only: that is the one that decides to insert.
-                return $this->looks++ === 0 ? null : parent::findByFingerprint($fingerprint);
+                $found = parent::findByFingerprint($fingerprint);
+
+                if ($this->commitWinner !== null) {
+                    ($this->commitWinner)();
+                    $this->commitWinner = null;
+                }
+
+                return $found;
             }
         };
+        $loser->commitWinner = $winner;
 
-        $outcome = $blind->reconcile($this->diagnosticRun([$this->finding(status: DiagnosticStatus::FAIL)]));
+        $outcome = $loser->reconcile($this->diagnosticRun([$this->finding(status: DiagnosticStatus::FAIL)]));
 
         self::assertSame(0, $outcome->opened);
         self::assertSame(1, $outcome->updated);
 
-        // One row, and the detection that lost the race still counted.
+        // One row, and the detection that lost the race still counted — against the winner, with
+        // no "detected" of its own. (The winner's own history went with the row it was put back as.)
         $issue = $this->only();
 
         self::assertSame(2, $issue->occurrences);
-        self::assertSame([IssueEventType::DETECTED], $this->eventTypes($issue));
+        self::assertSame([], $this->eventTypes($issue));
     }
 
     public function testTheDatabaseItselfRefusesASecondIssueForOneFingerprint(): void
@@ -419,9 +416,32 @@ class IssueCenterTest extends TestCase
         $duplicate = $row->getAttributes(null, ['id', 'uid']);
 
         // The application avoids this collision; the index is what makes that avoidance safe
-        // rather than merely likely.
-        $this->expectException(IntegrityException::class);
-        Craft::$app->getDb()->createCommand()->insert(IssueRecord::TABLE, $duplicate)->execute();
+        // rather than merely likely — and it is the one refusal read as a lost race.
+        try {
+            Craft::$app->getDb()->createCommand()->insert(IssueRecord::TABLE, $duplicate)->execute();
+            self::fail('A second row for one fingerprint was accepted.');
+        } catch (IntegrityException $e) {
+            self::assertTrue(Savepoint::isUniqueViolation($e));
+        }
+    }
+
+    /**
+     * Any other refusal is the database saying something is wrong, and is reported as itself: read
+     * as a lost race, it would send the reconciliation looking for a winner that does not exist.
+     */
+    public function testAFindingTheDatabaseRefusesForAnotherReasonFailsWithThatReason(): void
+    {
+        // A site deleted outright between the run and its reconciliation.
+        $run = $this->diagnosticRun([$this->finding(status: DiagnosticStatus::FAIL)], siteId: 2147480000);
+
+        try {
+            $this->issues->reconcile($run);
+            self::fail('A finding for a site that does not exist was stored.');
+        } catch (IntegrityException $e) {
+            self::assertFalse(Savepoint::isUniqueViolation($e));
+        }
+
+        self::assertSame([], $this->all());
     }
 
     /**
@@ -594,14 +614,27 @@ class IssueCenterTest extends TestCase
         self::assertNull($issue->resolvedByRunId);
     }
 
-    public function testSettingTheStatusItAlreadyHasChangesNothing(): void
+    /**
+     * The same status again is nothing, unless it comes with a different reason: that is somebody
+     * restating their decision, and it is kept and recorded like any other.
+     */
+    public function testSettingTheStatusItAlreadyHasChangesNothingButANewReason(): void
     {
         $this->issues->reconcile($this->diagnosticRun([$this->finding(status: DiagnosticStatus::FAIL)]));
         $id = $this->only()->id;
 
         $this->issues->transition($id, IssueStatus::NEW);
-
         self::assertSame([IssueEventType::DETECTED], $this->eventTypes($this->only()));
+
+        $this->issues->transition($id, IssueStatus::IGNORED, 'Accepted for now.');
+        $this->issues->transition($id, IssueStatus::IGNORED, 'Accepted for now.');
+        self::assertCount(2, $this->eventTypes($this->only()));
+
+        $issue = $this->issues->transition($id, IssueStatus::IGNORED, 'Accepted until the host upgrades.');
+
+        self::assertSame('Accepted until the host upgrades.', $issue->statusNote);
+        self::assertSame('Accepted until the host upgrades.', $this->issues->events($id)[0]->note);
+        self::assertCount(3, $this->eventTypes($this->only()));
     }
 
     public function testAStatusChangeIsRecordedWithWhatItMovedBetween(): void
@@ -623,8 +656,6 @@ class IssueCenterTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->issues->transition(0, IssueStatus::CONFIRMED);
     }
-
-    // What is stored ---------------------------------------------------------
 
     // The evidence behind an issue ------------------------------------------
 
@@ -831,25 +862,36 @@ class IssueCenterTest extends TestCase
     }
 
     /**
-     * The losing request is reproduced by blinding the lookup, as it is for issues: that is the
-     * state a real second request is in between its lookup and its insert.
+     * Two requests reconciling one issue serialise on the issue's row, but the loser's snapshot was
+     * fixed by its first read, before the winner committed. So the winner's fact is committed on
+     * another connection just after that read: the loser cannot see it and has to rejoin it.
      */
     public function testARequestThatLosesTheRaceToStoreEvidenceJoinsTheWinner(): void
     {
         $evidence = fn(): Evidence => new Evidence(EvidenceType::QUEUE, 'Failed jobs', 'tests.check', ['failed' => 3]);
 
         $this->issues->reconcile($this->diagnosticRun([$this->finding(evidence: [$evidence()])]));
+        $winner = $this->racedRow(EvidenceRecord::findOne(['environment' => $this->environment]));
 
-        $this->issues->evidence = new class() extends EvidenceStore {
-            private int $looks = 0;
+        $loser = new class() extends Issues {
+            /** @var callable|null */
+            public $commitWinner;
 
-            protected function existing(int $issueId, array $digests): array
+            protected function findByFingerprint(string $fingerprint): ?IssueRecord
             {
-                return $this->looks++ === 0 ? [] : parent::existing($issueId, $digests);
+                $found = parent::findByFingerprint($fingerprint);
+
+                if ($this->commitWinner !== null) {
+                    ($this->commitWinner)();
+                    $this->commitWinner = null;
+                }
+
+                return $found;
             }
         };
+        $loser->commitWinner = $winner;
 
-        $this->issues->reconcile($this->diagnosticRun([$this->finding(evidence: [$evidence()])]));
+        $loser->reconcile($this->diagnosticRun([$this->finding(evidence: [$evidence()])]));
 
         $issue = $this->only();
 
@@ -1165,10 +1207,10 @@ class IssueCenterTest extends TestCase
     /**
      * "No particular site" means never associated with one. An issue whose site was deleted also
      * has a null siteId, and treating the two alike would file a finding made about one site
-     * among the installation-wide ones — the exact confusion the retained site name exists to
-     * prevent.
+     * among the installation-wide ones — or let a run that never looked at that site close them —
+     * the exact confusion the retained site name exists to prevent.
      */
-    public function testTheNoSiteFilterExcludesIssuesWhoseSiteWasDeleted(): void
+    public function testNoParticularSiteExcludesIssuesWhoseSiteWasDeleted(): void
     {
         $siteId = $this->siteId();
 
@@ -1210,6 +1252,12 @@ class IssueCenterTest extends TestCase
 
         // The counts beside the list are the same query, so they exclude it too.
         self::assertSame(1, $this->issues->countsByStatus($filter)[IssueStatus::NEW->value]);
+
+        // And a run about no particular site, finding the check clean, closes only the issue that
+        // was about no particular site: it never looked at the site that was deleted.
+        self::assertSame(1, $this->issues->reconcile($this->diagnosticRun([$this->finding(status: DiagnosticStatus::PASS)]))->resolved);
+        self::assertSame(IssueStatus::RESOLVED, $this->issues->get($installationWide->id)?->status);
+        self::assertSame(IssueStatus::NEW, $this->issues->get($scoped->id)?->status);
     }
 
     public function testFilteringByDateUsesWhenTheIssueWasLastSeen(): void
@@ -1263,6 +1311,13 @@ class IssueCenterTest extends TestCase
         self::assertFalse($second->hasNextPage());
         self::assertSame(3, $second->firstPosition());
         self::assertSame(3, $second->lastPosition());
+
+        // A page past the end — a stale bookmark, or a run that resolved what was on it — is the
+        // last page, not "nothing matches" with no way back.
+        $beyond = $this->find(new IssueFilter(environment: $this->environment, sort: 'severity', page: 9, perPage: 2));
+
+        self::assertSame(array_map(static fn(Issue $i): int => $i->id, $second->issues), array_map(static fn(Issue $i): int => $i->id, $beyond->issues));
+        self::assertSame(2, $beyond->currentPage());
     }
 
     public function testTheChecksAndEnvironmentsOfferedAreTheOnesThatHaveRaisedSomething(): void
@@ -1274,6 +1329,20 @@ class IssueCenterTest extends TestCase
         self::assertArrayHasKey('tests.critical', $diagnostics);
         self::assertArrayHasKey('tests.high', $diagnostics);
         self::assertContains($this->environment, $this->issues->knownEnvironments());
+
+        // A check renamed since is offered under the name it most recently reported, whichever
+        // order the database happens to hand the two names back in.
+        $critical = IssueRecord::findOne(['environment' => $this->environment, 'diagnosticId' => 'tests.critical']);
+        self::assertNotNull($critical);
+        $renamed = $critical->getAttributes(null, ['id', 'uid']);
+        $critical->updateAttributes(['diagnosticName' => 'Old name', 'lastDetected' => '2001-01-01 00:00:00']);
+        Craft::$app->getDb()->createCommand()->insert(IssueRecord::TABLE, [
+            'fingerprint' => str_repeat('e', 64),
+            'diagnosticName' => 'Current name',
+            'uid' => \craft\helpers\StringHelper::UUID(),
+        ] + $renamed)->execute();
+
+        self::assertSame('Current name', $this->issues->knownDiagnostics()['tests.critical']);
     }
 
     public function testIssuesAreCountedByStatusWithoutLoadingThem(): void
@@ -1376,6 +1445,28 @@ class IssueCenterTest extends TestCase
         self::assertCount(1, $issues, 'Expected exactly one issue in this environment.');
 
         return $issues[0];
+    }
+
+    /**
+     * Takes a stored row away and returns what puts it back as another request would: on a
+     * connection of its own, committed, while the caller's transaction is still open.
+     *
+     * @return callable(): void
+     */
+    private function racedRow(?\yii\db\ActiveRecord $row): callable
+    {
+        self::assertNotNull($row);
+
+        $table = $row::tableName();
+        $attributes = $row->getAttributes();
+        $row->delete();
+
+        return static function() use ($table, $attributes): void {
+            $other = clone Craft::$app->getDb();
+            $other->open();
+            $other->createCommand()->insert($table, $attributes)->execute();
+            $other->close();
+        };
     }
 
     /**
@@ -1554,7 +1645,7 @@ class IssueCenterTest extends TestCase
     }
 
     /**
-     * The refusal the whole phase turns on, checked where a person would actually meet it.
+     * The refusal the Issue Center turns on, checked where a person would actually meet it.
      */
     public function testTheControllerWillNotDeclareAnIssueResolved(): void
     {
@@ -1567,6 +1658,26 @@ class IssueCenterTest extends TestCase
 
         self::assertSame(IssueStatus::NEW, $this->reread($issue)->status);
         self::assertSame('fail', $this->flash($controller)['level']);
+    }
+
+    public function testAChangeSaysWhetherAnythingChanged(): void
+    {
+        $issue = $this->seedIssue();
+        $this->signIn(admin: true);
+
+        $this->post(['issueId' => $issue->id, 'status' => IssueStatus::CONFIRMED->value, 'note' => '']);
+        $controller = $this->controller();
+        $controller->runAction('update-status');
+
+        self::assertSame(IssueStatus::CONFIRMED, $this->reread($issue)->status);
+        self::assertSame(['level' => 'success', 'message' => 'Issue updated.'], $this->flash($controller));
+
+        // Saved again as it is: not an update, and not reported as one.
+        $this->post(['issueId' => $issue->id, 'status' => IssueStatus::CONFIRMED->value, 'note' => '']);
+        $controller = $this->controller();
+        $controller->runAction('update-status');
+
+        self::assertStringStartsWith('Nothing changed', $this->flash($controller)['message']);
     }
 
     public function testAStatusWebDoctorDoesNotHaveIsRefused(): void
@@ -1778,6 +1889,17 @@ class IssueCenterTest extends TestCase
         self::assertStringNotContainsString('value="repairing"', $html);
         self::assertStringContainsString('value="ignored"', $html);
         self::assertStringContainsString('is not on this list', $html);
+
+        // Once it is resolved, nothing on the form is chosen for the reader: a browser left with
+        // no selected option submits the first, which would reopen the issue as new. Nor is the
+        // last reason offered back, to be saved as the reason for whatever is chosen next.
+        IssueRecord::updateAll(['status' => IssueStatus::RESOLVED->value, 'statusNote' => 'Waiting on the host.'], ['id' => $issue->id]);
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+
+        self::assertMatchesRegularExpression('/<option value="" selected disabled>/', $html);
+        self::assertDoesNotMatchRegularExpression('/<option value="[a-z_]+" selected>/', $html);
+        self::assertMatchesRegularExpression('#<textarea id="wd-issue-note"[^>]*></textarea>#', $html);
+        self::assertStringContainsString('Waiting on the host.', $html);
     }
 
     public function testSomebodyWhoMayOnlyReadIsOfferedNoControls(): void

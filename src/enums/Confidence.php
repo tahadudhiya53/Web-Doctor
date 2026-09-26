@@ -37,4 +37,19 @@ enum Confidence: string
             self::INFORMATIONAL => Craft::t('web-doctor', 'Informational'),
         };
     }
+
+    /**
+     * How firmly this is held, from context to certainty. Root causes are ordered and weighed
+     * through this, so the order is stated once rather than re-derived wherever they are ranked.
+     */
+    public function rank(): int
+    {
+        return match ($this) {
+            self::INFORMATIONAL => 0,
+            self::POSSIBLE => 1,
+            self::LIKELY => 2,
+            self::HIGH => 3,
+            self::CONFIRMED => 4,
+        };
+    }
 }

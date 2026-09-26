@@ -18,25 +18,4 @@ final class IssueReconciliation
         public readonly int $resolved = 0,
     ) {
     }
-
-    /**
-     * Whether anything changed at all.
-     */
-    public function isEmpty(): bool
-    {
-        return $this->opened === 0 && $this->updated === 0 && $this->recurred === 0 && $this->resolved === 0;
-    }
-
-    /**
-     * @return array<string, int>
-     */
-    public function toArray(): array
-    {
-        return [
-            'opened' => $this->opened,
-            'updated' => $this->updated,
-            'recurred' => $this->recurred,
-            'resolved' => $this->resolved,
-        ];
-    }
 }

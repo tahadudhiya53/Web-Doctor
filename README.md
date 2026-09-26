@@ -21,14 +21,25 @@ history rather than two reports.
 - **Evidence kept behind every issue** — the facts each check recorded, attributed to the run,
   environment and site they were gathered in, stored once per distinct fact however many runs see
   it, and inspectable on the issue's page with every withheld value clearly marked.
+- **Investigations** — from an issue's page, run the check that raised it again alongside the
+  checks related to it, chosen from a fixed, published list of what is related to what, each with
+  the reason it was chosen. What each check reported, the evidence it left, what else is open
+  nearby and a timeline of the whole investigation are kept against the issue.
+- **Possible causes, with the evidence for and against them** — each investigation weighs what it
+  found against a fixed list of known causes, and says for each one that fits how firmly it is
+  held, why, and what counts against it.
+- **Errors grouped rather than listed** — every exception a check runs into is recognised by its
+  type, its message with the values that change between occurrences taken out, where it was thrown
+  and the exceptions behind it, so the same error seen again is counted against one group, with
+  how often and between when it was seen, which checks ran into it and which issues it relates to.
 - **Centralised redaction** — credentials are removed wherever Web Doctor writes anything down,
   recognised by the key they sit under, by their shape, or by being the value of one of the
   environment's own credentials. No check has to remember to do it.
 - **Manual runs** — every check or a selection of them, at a chosen depth. Opening the dashboard
   runs nothing.
 - **Diagnostic depth** (shallow / normal / deep) so a run can be bounded.
-- **Five permissions**, so reading results, running checks, reading issues, changing them and
-  reading what their evidence contains are each granted separately.
+- **Six permissions**, so reading results, running checks, reading issues, changing them,
+  reading what their evidence contains and investigating them are each granted separately.
 - **Environment- and site-scoped results**, so one environment's answers are never shown as
   another's.
 - **`php craft webdoctor/status`** for confirming an installation from a script.
@@ -83,8 +94,8 @@ composer require tahadudhiya53/craft-web-doctor
 php craft plugin/install web-doctor
 ```
 
-Installing creates the three tables the Issue Center uses. Uninstalling drops them and leaves
-nothing else behind.
+Installing creates the tables listed under [What is stored](#what-is-stored). Uninstalling drops
+them and leaves nothing else behind.
 
 ## Usage
 
@@ -117,22 +128,20 @@ Under a **Web Doctor** heading in a user group's permissions:
 |---|---|---|
 | View Web Doctor | `webDoctor:view` | Reaching Web Doctor in the control panel |
 | Run diagnostics | `webDoctor:runDiagnostics` | Setting checks running from the dashboard |
-| View issues | `webDoctor:viewIssues` | Reading the Issue Center |
+| View issues | `webDoctor:viewIssues` | Reading the Issue Center and the errors the checks ran into |
 | Manage issues | `webDoctor:manageIssues` | Changing where an issue stands |
-| View evidence | `webDoctor:viewEvidence` | Reading what an issue's evidence contains |
+| View evidence | `webDoctor:viewEvidence` | Reading what an issue's evidence contains, and what an error said and where it was thrown |
+| Investigate issues | `webDoctor:investigateIssues` | Starting an investigation of an issue |
 
 A non-admin also needs Craft's own **Access Web Doctor** permission (under "Access the control
 panel") to reach the section at all.
 
-Each is nested under the one it depends on and checked separately — "Manage issues" and "View
-evidence" both sit under "View issues". Reading what a previous run concluded costs nothing while
-starting a run spends the site's time on demand; an issue carries decisions — that something is
-being investigated, that something will not be acted on — which is not everybody's to record
-against a team's installation; and evidence carries the internals a problem was found in — file
-paths, stack traces, database and queue errors — which somebody following an issue does not
-necessarily need to see. Without "View evidence", a reader still sees what kind of evidence an
-issue rests on. Admins pass, as they do
-elsewhere in Craft.
+Each is nested under the one it depends on and checked separately: running checks and starting
+investigations spend the site's time, changing an issue records a decision, and evidence carries
+internals — file paths, stack traces, database errors — that somebody following an issue may not
+need. Without "View evidence", a reader still sees what kind of evidence an issue rests on.
+Reading a finished investigation needs only "View issues". Admins pass, as they do elsewhere in
+Craft.
 
 ## Running checks from code
 
@@ -292,10 +301,138 @@ wrote, such as an issue's title. They were removed before anything was stored an
 recovered. A value cut short is marked as such, and each piece of evidence
 says how many values in it were withheld.
 
+### Investigations
+
+An issue's page has an **Investigate** section. Before anything runs it shows what an
+investigation would look at and why; somebody with "Investigate issues" can then start one at a
+chosen depth.
+
+Which checks run is decided deterministically from the kind of problem — the category of the check
+that raised it — using one written-out list of relationships, each with its reason. A database
+problem, for example, also looks at the queue (Craft's default queue keeps its jobs in the
+database), plugins (they bring tables and migrations of their own) and the environment (connection
+settings usually come from it). An email problem looks at the environment and at the queue's
+failed jobs and backlog; a failing request looks at PHP, plugins, the database, the queue, Craft,
+configuration and the environment. The check that raised the issue always runs first.
+
+- **Shallow** runs only the issue's own check and the rest of its category. **Normal** adds the
+  related areas. **Deep** runs the same checks as normal and asks each to go further.
+- A finding that names a plugin brings the plugin checks in.
+- A related area that no installed check covers is listed as such, and each plan also names what
+  is worth inspecting by hand — Craft's logs, a mail provider's delivery log — that no check reads.
+- An investigation runs at most 25 checks (`maxChecks` on the `investigations` component).
+
+The checks run in the request, against this environment and the site the issue was found on. An
+issue found in another environment, or on a site that has since been deleted (including one Craft
+has moved to the trash), is not investigated here, and the page says why. Their findings go
+through the Issue Center like any other run: a related check that finds a problem raises or updates its own issue, and if the issue's own check
+no longer reports the problem the issue is observed clear.
+
+Each investigation page shows its status — completed; partly completed when a check broke or could
+not tell, or when the investigation stopped part-way with some results already recorded; or could
+not finish when it stopped before recording any — what the issue's own check reported this time,
+every check performed with its result and reason, the checks that could not be completed, related signals
+(problems the related checks found, and other issues already open in the same environment and site,
+in an area the investigation looked at or naming the same plugin), the evidence each check recorded
+and a timeline. What was observed is then weighed against the known causes (see below).
+
+An investigation that stops records why by the kind of error only; the details are in Craft's logs.
+An investigation keeps at most 100 pieces of evidence (`maxEvidence`), and an issue keeps its 20
+most recent investigations (`maxPerIssue`). Investigations are deleted with their issue.
+
+### Possible causes
+
+The last thing an investigation does is weigh what it found against Web Doctor's fixed list of
+known causes. Nothing is inferred: each cause is written out with what it requires, what supports
+it, what establishes it and what counts against it, and the same findings always produce the same
+causes in the same order. The causes are:
+
+| Cause | What it rests on |
+|---|---|
+| The database is refusing the credentials Craft connects with | A failed connection, the server refusing the login, whether a user and password are configured |
+| Craft cannot reach the database server | A failed connection, an error saying the server could not be reached, other database checks breaking |
+| The database's character set cannot store some of what is written to it | The character-set check, errors and failed queue jobs recording a value refused for its characters |
+| Nothing is taking jobs off the queue | How long the oldest job has waited, whether anything is running, whether Craft runs the queue itself |
+| Queue jobs are running out of memory | Failed jobs whose recorded error is PHP running out of memory, PHP's memory limit, repeated failures |
+| A deployment has not been finished here | Pending migrations and project config changes, schema version mismatches, a recorded deployment, problems first seen together |
+| Several of these problems come from the same place | Other problems naming the same plugin or component, the plugin's health, errors thrown from its code, problems first seen together |
+| One error is behind several checks | The same error run into by the issue's own check and others |
+| A setting this environment depends on is missing | A required setting the issue's own check recorded as missing |
+
+A cause is offered only for a problem it could explain, and only when what it requires was found.
+Only problems still open, in the same environment and site, count as history for it — an issue
+somebody ignored or ruled out does not. How firmly it is held follows one published rule, shown on
+the page beside every cause:
+
+- **Possible** — what the cause requires was found;
+- **Likely** — and at least one signal that supports it;
+- **High confidence** — and every signal that supports it, where it has at least two;
+- **Confirmed** — evidence that establishes it was found, recorded by a check that itself
+  established it, and nothing counts against it.
+
+Each thing found that counts against a cause lowers it one step, never below Possible, and some
+causes are never held above a stated level — the character-set cause, for instance, stays at
+Likely because only one table is sampled. For each cause the page shows the problem, the evidence
+(each fact linked to the check, evidence, error or issue it came from), the reasoning, the
+confidence, the contradicting evidence, what was looked for and not found, related issues, a
+recommended action and what to investigate next. What the evidence contains is shown only to users
+with "View evidence". A cause is a candidate, not a verdict, and causes are kept only for an
+investigation that finishes.
+
+Web Doctor does not read logs or record requests or deployments, so nothing here correlates by
+request, and the deployment cause can use a recorded deployment only when a check contributes one.
+
+### Errors
+
+The **Errors** page, beside Issues, lists the exceptions Web Doctor's checks have run into: a check
+that broke, or a check that caught the exception that stopped it answering. Each is shown with its
+type, how many times it has been seen, when it was first and last seen, which checks ran into it,
+and which issues it is related to. An issue's page shows the errors run into by the check behind
+it, and an investigation's page shows the errors its checks ran into.
+
+The same error happening again is counted rather than listed again. What makes two occurrences one
+error is:
+
+- **the exception's class** — an anonymous class is named by what it extends;
+- **its message, with the values that vary between occurrences taken out** — record IDs, UUIDs,
+  timestamps, IP and email addresses, memory addresses, hashes and random tokens, SQL `IN` lists,
+  amounts in a unit, a URL's query string and the IDs in its path, and a deploy tool's release
+  directory. Each is replaced by what kind of value it was, so `Element 4812 could not be saved`
+  and `Element 77 could not be saved` are both `Element {id} could not be saved`;
+- **where it was thrown**, as a file relative to the installation (or to `vendor/`) and a line;
+- **the exceptions behind it**, normalised the same way;
+- **the calls at the top of its trace**, where a trace was recorded, without files or lines;
+- **the environment and site** it happened in.
+
+Nothing is removed for merely being a number or a name: an error code, an HTTP status, a SQLSTATE,
+a table, column, class or host name, or a path inside the installation is often the only thing
+that tells two causes apart, and merging two different errors would be the worse mistake. For the same
+reason the line stays part of it: an error that moves line because the code around it changed is
+counted as a new error rather than risk merging it with a neighbour. Which check ran into an error
+is not part of it, so a database refusing connections is one error however many checks hit it.
+
+Each result that recorded an error is one occurrence. An error is recorded whatever the result's
+status — a check that broke raises no issue, but a check that breaks the same way on every run is
+exactly what grouping is for. An error is related to the issue that check's findings are recorded
+on in that environment and site, if the check has raised one.
+
+What an error said, where it was thrown and its trace are shown only to users with "View evidence".
+Everybody who may read issues sees its type, counts, dates, checks and related issues. Messages are
+redacted before they are grouped and again when they are stored. Each environment and site keeps at
+most 500 errors (`maxGroups` on the `errors` component); the least recently seen go first, and a
+deleted site's errors are kept apart from the installation-wide ones. A single run that meets more
+distinct errors than that records the ones already kept first, then new ones in the order it met
+them, up to the limit, and says how many more it did not record.
+
 ### What is stored
 
 Issues, their history and their evidence live in three tables: `webdoctor_issues`,
-`webdoctor_issue_events` and `webdoctor_evidence`. Evidence is deleted with the issue it supports.
+`webdoctor_issue_events` and `webdoctor_evidence`. Investigations and their timelines live in
+`webdoctor_investigations` and `webdoctor_investigation_steps`, and the causes each weighed in
+`webdoctor_root_causes`. Evidence and investigations are deleted with the issue they support, and
+causes with their investigation. Errors live in `webdoctor_error_groups`, with the checks that
+ran into each in `webdoctor_error_sources`; an error outlives the issues it relates to, and deleting
+an issue only drops the link.
 
 Deleting a site does not delete the issues found while looking at it, or their evidence. Most
 findings are about the installation and merely stamped with whichever site was in view, so the
@@ -311,9 +448,10 @@ not listed, so the history stays readable however long the issue has been open.
 Everything Web Doctor writes down — evidence, the wording of a result, what is stored, what is
 logged — goes through one redaction helper. A credential is recognised three ways:
 
-- **By its key** — `password`, `apiKey`, `DB_PASSWORD`, `clientSecret`, `accessToken`, `auth`, a DSN, the
-  user name half of a database or mail login, and environment-style names ending in `_KEY`,
-  `_PASS` or `_AUTH`. A key is judged word by word, so `keyword` and `author` are left alone.
+- **By its key** — `password`, `apiKey`, `DB_PASSWORD`, `clientSecret`, `accessToken`, `auth`, a
+  DSN, a session ID, the user name half of a database or mail login, and environment-style names
+  ending in `_KEY`, `_PASS` or `_AUTH` — including form and array keys such as `config[password]`.
+  A key is judged word by word, so `keyword` and `author` are left alone.
 - **By its shape** — private keys, AWS access key IDs, JSON web tokens, Stripe, GitHub, GitLab,
   Slack, Google and SendGrid keys, Slack and Discord webhook URLs, credentials in a URL, and
   `Authorization` headers — wherever they appear, including loose in an error message or inside
@@ -351,6 +489,15 @@ subtract nothing, and the floor is 0.
   its latest result.
 - **Issue history is kept, but not pruned.** There is no retention policy yet, so an installation
   diagnosed on a schedule for a long time will accumulate rows.
+- **Investigations run synchronously**, in the request that starts them, and are bounded by the
+  number of checks they may run rather than queued.
+- **Errors are the ones Web Doctor's checks run into.** Web Doctor does not capture the exceptions
+  a site throws while serving requests or running queue jobs, and does not read Craft's logs, so an
+  error the checks never touch is not grouped here. The error text a failed queue job recorded is
+  reported by `queue.failedJobs` as evidence, not grouped as an error.
+- **Investigations do not read logs.** Where logs would help, the plan says so.
+- **`email.configuration` reads Craft's mail settings.** A mailer replaced wholesale in
+  `config/app.php` is not what it inspects.
 - **Checks establish what they say and no more.** `filesystem.volumes` proves a volume can be
   read, not written. `email.configuration` proves the settings are complete, not that mail is
   delivered. `database.charset` samples one table. `queue.failedJobs` reads the most recent

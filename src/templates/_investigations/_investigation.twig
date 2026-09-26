@@ -1,0 +1,358 @@
+{#
+    One investigation, kept apart from the control panel shell for the same reason the issue page
+    is. What evidence contains is shown only to somebody who may see it; everybody who may read the
+    issue sees what kind of evidence was found.
+#}
+
+{% import _self as inv %}
+{% import "web-doctor/_macros" as shared %}
+
+{% macro fact(item, canViewEvidence) %}
+    {% import "web-doctor/_issues/_evidence" as ev %}
+    {% import "web-doctor/_macros" as shared %}
+    {% set evidence = item.evidence %}
+    {% set redactions = evidence.redactions() %}
+    <details class="wd-evidence">
+        <summary class="wd-evidence__summary">
+            <span class="wd-evidence__type">{{ evidence.type.label() }}</span>
+            <span class="wd-evidence__label">{{ shared.text(evidence.label) }}</span>
+            {% if redactions %}
+                <span class="wd-mark wd-mark--redacted">{{ "{count, plural, =1{1 value withheld} other{# values withheld}}"|t('web-doctor', { count: redactions }) }}</span>
+            {% endif %}
+            {% if evidence.truncated %}
+                <span class="wd-mark wd-mark--truncated">{{ "Shortened"|t('web-doctor') }}</span>
+            {% endif %}
+        </summary>
+
+        <dl class="wd-meta wd-evidence__meta">
+            <div><dt>{{ "Recorded by"|t('web-doctor') }}</dt><dd><code>{{ shared.text(evidence.source) }}</code></dd></div>
+            {% if canViewEvidence and evidence.reference %}
+                <div><dt>{{ "Where to find it"|t('web-doctor') }}</dt><dd><code>{{ shared.text(evidence.reference) }}</code></dd></div>
+            {% endif %}
+            {% if evidence.observedAt %}
+                <div><dt>{{ "True as of"|t('web-doctor') }}</dt><dd>{{ evidence.observedAt|datetime('short') }}</dd></div>
+            {% endif %}
+            <div><dt>{{ "Recorded"|t('web-doctor') }}</dt><dd>{{ evidence.recordedAt|datetime('short') }}</dd></div>
+            {% if evidence.confidence %}
+                <div><dt>{{ "Confidence"|t('web-doctor') }}</dt><dd>{{ evidence.confidence.label() }}</dd></div>
+            {% endif %}
+        </dl>
+
+        {% if canViewEvidence %}
+            <div class="wd-evidence__body">
+                <h4 class="wd-evidence__heading">{{ "What was recorded"|t('web-doctor') }}</h4>
+                {{ ev.node(item.data) }}
+                {% if evidence.metadata|length %}
+                    <h4 class="wd-evidence__heading">{{ "How it was gathered"|t('web-doctor') }}</h4>
+                    {{ ev.node(item.metadata) }}
+                {% endif %}
+            </div>
+        {% endif %}
+    </details>
+{% endmacro %}
+
+{% macro issueLink(step, text) %}
+    {% import "web-doctor/_macros" as shared %}
+    {% if step.relatedIssueId %}
+        <a href="{{ cpUrl('web-doctor/issues/' ~ step.relatedIssueId) }}">{{ shared.text(text) }}</a>
+    {% else %}
+        {{ shared.text(text) }}
+    {% endif %}
+{% endmacro %}
+
+{% set outcome = investigation.originOutcome() %}
+
+<p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id) }}">&larr; {{ "Back to the issue"|t('web-doctor') }}</a></p>
+
+<div class="pane wd-investigation">
+    <h2 class="wd-issue__title">{{ "Investigation"|t('web-doctor') }}: {{ shared.text(issue.title) }}</h2>
+
+    <div class="wd-issue__pills">
+        <span class="wd-pill wd-pill--investigation-{{ investigation.status.value }}">{{ investigation.status.label() }}</span>
+        <span class="wd-pill wd-pill--severity wd-pill--severity-{{ issue.severity.value }}">{{ issue.severity.label() }}</span>
+        <span class="wd-pill wd-pill--issue-{{ issue.status.value }}">{{ issue.status.label() }}</span>
+    </div>
+
+    <div class="wd-investigation__summary">
+        {% if investigation.status.value == 'running' %}
+            <p><strong>{{ "This investigation has not finished."|t('web-doctor') }}</strong> {{ "It runs in the request that started it. If it has been running for more than a few minutes, that request ended before it could finish, and what is below is as far as it got."|t('web-doctor') }}</p>
+        {% elseif investigation.failure %}
+            <p><strong>{{ "This investigation stopped before it finished."|t('web-doctor') }}</strong> {{ shared.text(investigation.failure) }}
+                {% if investigation.checksRun %}{{ "What it recorded before it stopped is below; nothing after that point was recorded."|t('web-doctor') }}{% endif %}</p>
+        {% endif %}
+
+        {% if outcome == 'present' %}
+            <p>{{ "The check that raised this issue ran again and still reports it."|t('web-doctor') }}</p>
+        {% elseif outcome == 'clear' %}
+            <p>{{ "The check that raised this issue ran again and no longer reports the problem."|t('web-doctor') }}</p>
+        {% elseif outcome == 'inconclusive' %}
+            <p>{{ "The check that raised this issue ran again but reached no conclusion, so whether the problem is still there is not known."|t('web-doctor') }}</p>
+        {% elseif outcome == 'unavailable' %}
+            <p>{{ "The check that raised this issue is not installed here any more, so it could not be asked again."|t('web-doctor') }}</p>
+        {% endif %}
+
+        {% if investigation.status.isFinished() and investigation.status.value != 'failed' %}
+            <p>{{ "{run, plural, =0{No checks ran.} =1{1 check ran:} other{# checks ran:}} {problems, plural, =0{none reported a problem} =1{1 reported a problem} other{# reported a problem}}, {incomplete, plural, =0{none failed to complete} =1{1 could not be completed} other{# could not be completed}} and {skipped, plural, =0{all applied here} =1{1 did not apply here} other{# did not apply here}}."|t('web-doctor', {
+                run: investigation.checksRun,
+                problems: investigation.checksWithProblems,
+                incomplete: investigation.checksIncomplete,
+                skipped: investigation.checksSkipped,
+            }) }} {{ "{count, plural, =0{No other issues were open nearby.} =1{1 other issue was open nearby.} other{# other issues were open nearby.}}"|t('web-doctor', { count: investigation.relatedIssues }) }}</p>
+        {% endif %}
+
+        <p class="light">{{ "Everything below the possible causes is what was observed. The causes are weighed from it by fixed rules, each with the evidence for and against it; none is established unless it is marked Confirmed."|t('web-doctor') }}</p>
+    </div>
+
+    <div class="wd-counts">
+        <div class="wd-count"><span class="wd-count__value">{{ investigation.checksRun }}</span><span class="wd-count__label">{{ "Checks performed"|t('web-doctor') }}</span></div>
+        <div class="wd-count{{ investigation.checksWithProblems ? ' wd-count--warning' }}"><span class="wd-count__value">{{ investigation.checksWithProblems }}</span><span class="wd-count__label">{{ "Reported a problem"|t('web-doctor') }}</span></div>
+        <div class="wd-count{{ investigation.checksIncomplete ? ' wd-count--high' }}"><span class="wd-count__value">{{ investigation.checksIncomplete }}</span><span class="wd-count__label">{{ "Could not be completed"|t('web-doctor') }}</span></div>
+        <div class="wd-count"><span class="wd-count__value">{{ investigation.evidenceCount }}</span><span class="wd-count__label">{{ "Evidence found"|t('web-doctor') }}</span></div>
+    </div>
+
+    <dl class="wd-meta">
+        <div><dt>{{ "Started"|t('web-doctor') }}</dt><dd>{{ investigation.startedAt|datetime('short') }}</dd></div>
+        <div><dt>{{ "Finished"|t('web-doctor') }}</dt><dd>{{ investigation.finishedAt ? investigation.finishedAt|datetime('short') : '—' }}</dd></div>
+        {% if investigation.durationMs is not null %}
+            <div><dt>{{ "Duration"|t('web-doctor') }}</dt><dd>{{ (investigation.durationMs / 1000)|number_format(2) }}s</dd></div>
+        {% endif %}
+        <div><dt>{{ "Depth"|t('web-doctor') }}</dt><dd>{{ investigation.depth.label() }}</dd></div>
+        {% if startedBy %}
+            <div><dt>{{ "Started by"|t('web-doctor') }}</dt><dd>{{ startedBy }}</dd></div>
+        {% endif %}
+        <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ investigation.environment }}</dd></div>
+        {% if investigation.runId %}
+            <div><dt>{{ "Run ID"|t('web-doctor') }}</dt><dd><code>{{ investigation.runId }}</code></dd></div>
+        {% endif %}
+    </dl>
+</div>
+
+{% include "web-doctor/_investigations/_causes" %}
+
+<div class="pane" id="checks">
+    <h2>{{ "Checks performed"|t('web-doctor') }}</h2>
+
+    {% if checks|length %}
+        <div class="wd-table-scroll">
+        <table class="data fullwidth wd-results">
+            <thead>
+                <tr>
+                    <th scope="col">{{ "Check"|t('web-doctor') }}</th>
+                    <th scope="col" class="wd-col-narrow">{{ "Result"|t('web-doctor') }}</th>
+                    <th scope="col">{{ "What it reported"|t('web-doctor') }}</th>
+                    <th scope="col" class="wd-col-narrow">{{ "Evidence"|t('web-doctor') }}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for step in checks %}
+                    <tr id="check-{{ step.diagnosticId }}">
+                        <td>
+                            <div class="wd-result__name">{{ shared.text(step.diagnosticName ?? step.diagnosticId) }}</div>
+                            <div class="wd-result__id"><code>{{ step.diagnosticId }}</code></div>
+                            {% if step.diagnosticId == issue.diagnosticId %}<span class="wd-mark wd-mark--origin">{{ "Raised this issue"|t('web-doctor') }}</span>{% endif %}
+                            {% if step.note %}<div class="wd-result__note light">{{ shared.text(step.note) }}</div>{% endif %}
+                        </td>
+                        <td class="wd-col-narrow">
+                            {% if step.status %}<span class="wd-pill wd-pill--{{ step.status.value }}">{{ step.status.label() }}</span>{% endif %}
+                            {% if step.severity and step.status and step.status.isProblem() %}<div class="light">{{ step.severity.label() }}</div>{% endif %}
+                        </td>
+                        <td>
+                            <div class="wd-result__summary">{{ inv.issueLink(step, step.summary) }}</div>
+                            {% if step.durationMs is not null %}<div class="wd-result__timing">{{ step.durationMs|number_format(1) }}&thinsp;ms</div>{% endif %}
+                        </td>
+                        <td class="wd-col-narrow">{{ step.evidenceCount }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    {% else %}
+        <p class="light">{{ "No checks ran."|t('web-doctor') }}</p>
+    {% endif %}
+
+    {% if incomplete|length %}
+        <h3 class="wd-plan__heading">{{ "Checks that could not be completed"|t('web-doctor') }}</h3>
+        <p class="light">{{ "A check that broke or could not tell established nothing either way, so what it would have shown is still unknown."|t('web-doctor') }}</p>
+        <ul class="wd-plan__list">
+            {% for step in incomplete %}
+                <li><strong>{{ shared.text(step.diagnosticName ?? step.diagnosticId) }}</strong> — {{ shared.text(step.summary) }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+</div>
+
+<div class="pane" id="signals">
+    <h2>{{ "Related signals"|t('web-doctor') }}</h2>
+
+    {% if findings|length or relatedIssues|length %}
+        {% if findings|length %}
+            <h3 class="wd-plan__heading">{{ "Problems the related checks reported"|t('web-doctor') }}</h3>
+            <ul class="wd-signals">
+                {% for step in findings %}
+                    <li>
+                        {% if step.severity %}<span class="wd-pill wd-pill--severity wd-pill--severity-{{ step.severity.value }}">{{ step.severity.label() }}</span>{% endif %}
+                        {{ inv.issueLink(step, step.summary) }}
+                        <span class="light">— {{ shared.text(step.diagnosticName ?? step.diagnosticId) }}</span>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        {% if relatedIssues|length %}
+            <h3 class="wd-plan__heading">{{ "Issues already open nearby"|t('web-doctor') }}</h3>
+            <p class="light">{{ "Open in the same environment and site, in an area this investigation looked at or naming the same plugin — as they stood when it ran."|t('web-doctor') }}</p>
+            <ul class="wd-signals">
+                {% for step in relatedIssues %}
+                    <li>
+                        {% if step.severity %}<span class="wd-pill wd-pill--severity wd-pill--severity-{{ step.severity.value }}">{{ step.severity.label() }}</span>{% endif %}
+                        {{ inv.issueLink(step, step.summary) }}
+                        <span class="light">— {{ shared.text(step.diagnosticName ?? step.diagnosticId) }}{% if step.note %}, {{ shared.text(step.note) }}{% endif %}</span>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+    {% else %}
+        <p class="light">{{ "Nothing else nearby reported a problem, and no other issue was open nearby."|t('web-doctor') }}</p>
+    {% endif %}
+</div>
+
+<div class="pane" id="errors">
+    <h2>{{ "Errors"|t('web-doctor') }}</h2>
+
+    {% if errorsFailure %}
+        <p class="error">{{ errorsFailure }}</p>
+    {% elseif errors|length %}
+        <p class="light">{{ "Exceptions the checks ran into during this investigation, with how often each has been seen here altogether. The same error run into by several checks is one error."|t('web-doctor') }}</p>
+        <div class="wd-table-scroll">
+        <table class="data fullwidth wd-errors">
+            <thead>
+                <tr>
+                    <th scope="col">{{ "Error"|t('web-doctor') }}</th>
+                    <th scope="col" class="wd-col-narrow">{{ "Seen"|t('web-doctor') }}</th>
+                    <th scope="col" class="wd-col-narrow">{{ "First seen"|t('web-doctor') }}</th>
+                    <th scope="col" class="wd-col-narrow">{{ "Last seen"|t('web-doctor') }}</th>
+                    <th scope="col">{{ "Checks affected"|t('web-doctor') }}</th>
+                    <th scope="col">{{ "Related issues"|t('web-doctor') }}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for seen in errors %}
+                    {% set group = seen.group %}
+                    <tr>
+                        <td class="wd-col-detail">
+                            <div class="wd-result__name">
+                                {% if group %}
+                                    <a href="{{ cpUrl('web-doctor/errors/' ~ group.id) }}"><code>{{ seen.signature.shortClass() }}</code></a>
+                                    {% if group.isRepeated() %}<span class="wd-mark wd-mark--repeated">{{ "Repeated"|t('web-doctor') }}</span>{% endif %}
+                                {% else %}
+                                    <code>{{ seen.signature.shortClass() }}</code>
+                                {% endif %}
+                            </div>
+                            {% if canViewEvidence and seen.signature.message %}
+                                <div class="wd-error__message">{{ shared.text(seen.signature.message) }}</div>
+                            {% endif %}
+                        </td>
+                        {% if group %}
+                            <td class="wd-col-narrow">{{ group.occurrences }}</td>
+                            <td class="wd-col-narrow">{{ group.firstSeen|datetime('short') }}</td>
+                            <td class="wd-col-narrow">{{ group.lastSeen|datetime('short') }}</td>
+                        {% else %}
+                            <td class="wd-col-narrow light" colspan="3">{{ "Not kept"|t('web-doctor') }}</td>
+                        {% endif %}
+                        <td>
+                            <ul class="wd-error__list">
+                                {% for name in seen.diagnostics %}
+                                    <li>{{ shared.text(name) }}</li>
+                                {% endfor %}
+                            </ul>
+                        </td>
+                        <td>
+                            {% set related = group ? group.issueIds() : [] %}
+                            {% if related|length %}
+                                <ul class="wd-error__list">
+                                    {% for issueId in related %}
+                                        {% set relatedIssue = errorIssues[issueId] ?? null %}
+                                        <li>
+                                            {% if issueId == issue.id %}
+                                                <span class="wd-mark wd-mark--origin">{{ "This issue"|t('web-doctor') }}</span>
+                                            {% elseif relatedIssue %}
+                                                <a href="{{ cpUrl('web-doctor/issues/' ~ issueId) }}">{{ shared.text(relatedIssue.title) }}</a>
+                                            {% else %}
+                                                <a href="{{ cpUrl('web-doctor/issues/' ~ issueId) }}">{{ 'Issue #{id}'|t('web-doctor', { id: issueId }) }}</a>
+                                            {% endif %}
+                                        </li>
+                                    {% endfor %}
+                                </ul>
+                            {% else %}
+                                <span class="light">{{ "None"|t('web-doctor') }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+        {% if errors|filter(seen => seen.group is null)|length %}
+            <p class="light">{{ "“Not kept” means the error is no longer among those Web Doctor keeps: the least recently seen are removed once there are more than it holds."|t('web-doctor') }}</p>
+        {% endif %}
+    {% else %}
+        <p class="light">{{ "None of the checks ran into an error."|t('web-doctor') }}</p>
+    {% endif %}
+</div>
+
+<div class="pane" id="evidence">
+    <h2>{{ "Evidence found"|t('web-doctor') }}</h2>
+    <p class="light">
+        {{ "What each check recorded during this investigation. Anything that is, or may be, a credential was removed before it was stored and is marked “Redacted”; it cannot be recovered here."|t('web-doctor') }}
+    </p>
+    {% if not canViewEvidence %}
+        <p class="light">{{ "You can see what kind of evidence was found. What it contains needs the “View evidence” permission."|t('web-doctor') }}</p>
+    {% endif %}
+
+    {% set withEvidence = checks|filter(step => step.evidenceCount) %}
+    {% for step in withEvidence %}
+        <h3 class="wd-plan__heading" id="evidence-{{ step.diagnosticId }}">{{ shared.text(step.diagnosticName ?? step.diagnosticId) }}</h3>
+        <div class="wd-evidence-group">
+            {% for item in step.evidenceItems() %}
+                {{ inv.fact(item, canViewEvidence) }}
+            {% endfor %}
+        </div>
+        {% if step.evidenceTruncated %}
+            <p class="light"><span class="wd-mark wd-mark--truncated">{{ "Left out"|t('web-doctor') }}</span> {{ "{kept} of {total} kept: the investigation keeps a bounded amount of evidence."|t('web-doctor', { kept: step.evidence|length, total: step.evidenceCount }) }}</p>
+        {% endif %}
+    {% endfor %}
+    {% if withEvidence is empty %}
+        <p class="light">{{ "None of the checks recorded any evidence."|t('web-doctor') }}</p>
+    {% endif %}
+</div>
+
+<div class="pane" id="plan">
+    <h2>{{ "Why these checks"|t('web-doctor') }}</h2>
+    <p class="light">{{ "The plan as it was decided when the investigation started, from Web Doctor’s fixed list of what is related to what."|t('web-doctor') }}</p>
+    {% include "web-doctor/_investigations/_plan" with { plan: investigation.plan } only %}
+</div>
+
+<div class="pane" id="timeline">
+    <h2>{{ "Timeline"|t('web-doctor') }}</h2>
+
+    <ol class="wd-timeline">
+        {% for step in steps %}
+            <li class="wd-timeline__step wd-timeline__step--{{ step.type.value }}">
+                <div class="wd-timeline__when">{{ step.occurredAt|datetime('short') }}</div>
+                <div class="wd-timeline__what">
+                    <strong>{{ step.type.label() }}</strong>
+                    {% if step.type.value == 'checked' or step.type.value == 'relatedIssue' %}
+                        — {{ shared.text(step.diagnosticName ?? step.diagnosticId) }}
+                        {% if step.status %}<span class="wd-pill wd-pill--{{ step.status.value }}">{{ step.status.label() }}</span>{% endif %}
+                    {% endif %}
+                </div>
+                {% if step.summary and step.type.value != 'finished' %}
+                    <div class="wd-timeline__detail">{{ inv.issueLink(step, step.summary) }}</div>
+                {% endif %}
+                {% if step.note and step.type.value != 'checked' %}
+                    <div class="wd-timeline__detail light">{{ shared.text(step.note) }}</div>
+                {% endif %}
+            </li>
+        {% endfor %}
+    </ol>
+</div>

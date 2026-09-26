@@ -1,0 +1,76 @@
+{#
+    A table of error groups, shared by the error list and the issue page. Everybody who may read
+    issues sees what kind of error each is, how often and when it happened, which checks ran into
+    it and which issues it is related to. What it said needs “View evidence”.
+
+    Expects: groups (list of ErrorGroup), issues (issue ID → Issue), canViewEvidence, and
+    optionally currentIssueId, which is marked rather than linked.
+#}
+
+{% import "web-doctor/_macros" as shared %}
+
+<div class="wd-table-scroll">
+<table class="data fullwidth wd-errors">
+    <thead>
+        <tr>
+            <th scope="col">{{ "Error"|t('web-doctor') }}</th>
+            <th scope="col" class="wd-col-narrow">{{ "Seen"|t('web-doctor') }}</th>
+            <th scope="col" class="wd-col-narrow">{{ "First seen"|t('web-doctor') }}</th>
+            <th scope="col" class="wd-col-narrow">{{ "Last seen"|t('web-doctor') }}</th>
+            <th scope="col">{{ "Checks affected"|t('web-doctor') }}</th>
+            <th scope="col">{{ "Related issues"|t('web-doctor') }}</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for group in groups %}
+            <tr>
+                <td class="wd-col-detail">
+                    <div class="wd-result__name">
+                        <a href="{{ cpUrl('web-doctor/errors/' ~ group.id) }}"><code>{{ group.shortClass() }}</code></a>
+                        {% if group.isRepeated() %}<span class="wd-mark wd-mark--repeated">{{ "Repeated"|t('web-doctor') }}</span>{% endif %}
+                    </div>
+                    {% if canViewEvidence and group.normalizedMessage %}
+                        <div class="wd-error__message">{{ shared.text(group.normalizedMessage) }}</div>
+                    {% endif %}
+                    <div class="wd-result__id">{{ group.environment }} &middot; {{ group.siteLabel() }}</div>
+                </td>
+                <td class="wd-col-narrow">{{ group.occurrences }}</td>
+                <td class="wd-col-narrow">{{ group.firstSeen|datetime('short') }}</td>
+                <td class="wd-col-narrow">{{ group.lastSeen|datetime('short') }}</td>
+                <td>
+                    <ul class="wd-error__list">
+                        {% for source in group.sources %}
+                            <li>
+                                {{ shared.text(source.diagnosticName) }}
+                                <span class="light"><code>{{ source.diagnosticId }}</code> &middot; {{ "{count, plural, =1{once} other{# times}}"|t('web-doctor', { count: source.occurrences }) }}</span>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                </td>
+                <td>
+                    {% set related = group.issueIds() %}
+                    {% if related|length %}
+                        <ul class="wd-error__list">
+                            {% for issueId in related %}
+                                {% set relatedIssue = issues[issueId] ?? null %}
+                                <li>
+                                    {% if currentIssueId is defined and currentIssueId == issueId %}
+                                        <span class="wd-mark wd-mark--origin">{{ "This issue"|t('web-doctor') }}</span>
+                                    {% elseif relatedIssue %}
+                                        <a href="{{ cpUrl('web-doctor/issues/' ~ issueId) }}">{{ shared.text(relatedIssue.title) }}</a>
+                                        <span class="wd-pill wd-pill--issue-{{ relatedIssue.status.value }}">{{ relatedIssue.status.label() }}</span>
+                                    {% else %}
+                                        <a href="{{ cpUrl('web-doctor/issues/' ~ issueId) }}">{{ 'Issue #{id}'|t('web-doctor', { id: issueId }) }}</a>
+                                    {% endif %}
+                                </li>
+                            {% endfor %}
+                        </ul>
+                    {% else %}
+                        <span class="light">{{ "None"|t('web-doctor') }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>

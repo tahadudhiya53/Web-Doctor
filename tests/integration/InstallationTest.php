@@ -3,7 +3,6 @@
 namespace Tahadudhiya\WebDoctor\Tests\integration;
 
 use Craft;
-use craft\console\Application as ConsoleApplication;
 use craft\elements\User;
 use craft\web\View;
 use PHPUnit\Framework\TestCase;
@@ -66,19 +65,13 @@ class InstallationTest extends TestCase
         return $user;
     }
 
-    public function testCraftIsRunning(): void
+    public function testEveryComponentResolvesToItsService(): void
     {
-        self::assertInstanceOf(ConsoleApplication::class, Craft::$app);
-    }
-
-    public function testThePluginBootstrapsWithoutError(): void
-    {
-        self::assertSame('web-doctor', $this->plugin->id);
-    }
-
-    public function testComponentsResolveToTheirServices(): void
-    {
-        self::assertInstanceOf(Permissions::class, $this->plugin->getPermissions());
+        foreach (WebDoctor::config()['components'] as $id => $definition) {
+            if (class_exists($definition['class'])) {
+                self::assertInstanceOf($definition['class'], $this->plugin->get($id), $id);
+            }
+        }
     }
 
     public function testSettingsResolveAndValidate(): void
@@ -134,10 +127,41 @@ class InstallationTest extends TestCase
         $view->setTemplateMode(View::TEMPLATE_MODE_CP);
 
         // Loading compiles the template and everything it extends, so a broken tag or an
-        // unknown filter fails here rather than in front of a user.
-        self::assertSame('web-doctor/_index', $view->getTwig()->load('web-doctor/_index')->getTemplateName());
-        self::assertSame('web-doctor/_dashboard', $view->getTwig()->load('web-doctor/_dashboard')->getTemplateName());
-        self::assertSame('web-doctor/_settings', $view->getTwig()->load('web-doctor/_settings')->getTemplateName());
+        // unknown filter fails here rather than in front of a user. Every template, so one added
+        // later is held to this without anybody having to remember to list it.
+        $root = dirname(__DIR__, 2) . '/src/templates/';
+        $templates = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS));
+        $loaded = 0;
+
+        /** @var \SplFileInfo $file */
+        foreach ($templates as $file) {
+            if ($file->getExtension() !== 'twig') {
+                continue;
+            }
+
+            $name = 'web-doctor/' . substr($file->getPathname(), strlen($root), -5);
+            self::assertSame($name, $view->getTwig()->load($name)->getTemplateName());
+            $loaded++;
+        }
+
+        self::assertGreaterThanOrEqual(13, $loaded);
+    }
+
+    public function testNoTemplateInterpolatesWhereItMeantToTranslate(): void
+    {
+        // Twig reads `#{…}` inside a double-quoted string as interpolation, so a phrase such as
+        // "Issue #{id}" handed to |t fails for want of a variable called id — or, where variables
+        // are not strict, renders a phrase with a hole in it. Single quotes are literal.
+        $root = dirname(__DIR__, 2) . '/src/templates/';
+        $offenders = [];
+
+        foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS)) as $file) {
+            if (preg_match_all('/"[^"\n]*#\{[^"\n]*"\s*\|\s*t\(/', (string)file_get_contents($file->getPathname()), $matches) > 0) {
+                $offenders[] = substr($file->getPathname(), strlen($root)) . ': ' . implode(', ', $matches[0]);
+            }
+        }
+
+        self::assertSame([], $offenders);
     }
 
     public function testTheSettingsFormRendersItsField(): void
@@ -199,10 +223,27 @@ class InstallationTest extends TestCase
     {
         $this->plugin->getPermissions()->register();
 
-        $permissions = Craft::$app->getUserPermissions()->getAllPermissions();
-        $headings = array_column($permissions, 'heading');
+        $registered = [];
+        $collect = static function(array $permissions) use (&$collect, &$registered): void {
+            foreach ($permissions as $name => $permission) {
+                $registered[] = $name;
+                $collect($permission['nested'] ?? []);
+            }
+        };
 
-        self::assertContains('Web Doctor', $headings);
+        foreach (Craft::$app->getUserPermissions()->getAllPermissions() as $group) {
+            if (($group['heading'] ?? null) === 'Web Doctor') {
+                $collect($group['permissions']);
+            }
+        }
+
+        $expected = [Permissions::VIEW, Permissions::RUN, Permissions::VIEW_ISSUES, Permissions::MANAGE_ISSUES, Permissions::VIEW_EVIDENCE, Permissions::INVESTIGATE_ISSUES];
+        // Every test registers the handler again, so the heading can appear more than once.
+        $registered = array_values(array_unique($registered));
+        sort($expected);
+        sort($registered);
+
+        self::assertSame($expected, $registered);
     }
 
     public function testWebDoctorOwnsExactlyTheTablesItsRecordsDeclare(): void
@@ -219,7 +260,7 @@ class InstallationTest extends TestCase
         // whoever's installation these tests are running in.
         $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
 
-        foreach (['IssueRecord', 'IssueEventRecord', 'EvidenceRecord'] as $record) {
+        foreach (['IssueRecord', 'IssueEventRecord', 'EvidenceRecord', 'InvestigationRecord', 'InvestigationStepRecord', 'RootCauseRecord', 'ErrorGroupRecord', 'ErrorSourceRecord'] as $record) {
             self::assertMatchesRegularExpression(
                 sprintf('/createTable\(\s*%s::TABLE\b/', $record),
                 $source,
@@ -240,7 +281,7 @@ class InstallationTest extends TestCase
         // removed. Read from the migration because deleting a real site is not a test's to do.
         $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
 
-        foreach (['IssueRecord', 'EvidenceRecord'] as $record) {
+        foreach (['IssueRecord', 'EvidenceRecord', 'InvestigationRecord', 'ErrorGroupRecord'] as $record) {
             self::assertMatchesRegularExpression(
                 "/addForeignKey\\([^;]*{$record}::TABLE,\\s*\\['siteId'\\][^;]*'SET NULL'/s",
                 $source,
@@ -279,22 +320,27 @@ class InstallationTest extends TestCase
         ksort($rules);
 
         self::assertSame([
+            // An error's sources say something only about it; an error outlives the issue it
+            // was related to.
+            'webdoctor_error_groups.siteId' => 'SET NULL',
+            'webdoctor_error_sources.errorGroupId' => 'CASCADE',
+            'webdoctor_error_sources.issueId' => 'SET NULL',
             'webdoctor_evidence.issueId' => 'CASCADE',
             'webdoctor_evidence.siteId' => 'SET NULL',
+            // An investigation explains its issue and goes with it; its steps go with it in turn.
+            // A step's reference to some other issue is only a reference.
+            'webdoctor_investigation_steps.investigationId' => 'CASCADE',
+            'webdoctor_investigation_steps.relatedIssueId' => 'SET NULL',
+            'webdoctor_investigations.issueId' => 'CASCADE',
+            'webdoctor_investigations.siteId' => 'SET NULL',
+            'webdoctor_investigations.startedBy' => 'SET NULL',
             'webdoctor_issue_events.issueId' => 'CASCADE',
             'webdoctor_issue_events.userId' => 'SET NULL',
             'webdoctor_issues.siteId' => 'SET NULL',
             'webdoctor_issues.statusChangedBy' => 'SET NULL',
+            // A cause is what an investigation concluded, so it goes with it.
+            'webdoctor_root_causes.investigationId' => 'CASCADE',
         ], $rules);
-    }
-
-    public function testWebDoctorHasOnlyEverHadOneMigration(): void
-    {
-        // The plugin is unreleased, so there is no installed schema anywhere that needs
-        // upgrading: every change is made to the install migration in place.
-        $migrations = glob(dirname(__DIR__, 2) . '/src/migrations/*.php') ?: [];
-
-        self::assertSame(['Install.php'], array_map('basename', $migrations));
     }
 
     /**
@@ -306,7 +352,16 @@ class InstallationTest extends TestCase
     {
         $tables = array_map(
             static fn(string $table): string => trim($table, '{}%'),
-            [IssueRecord::TABLE, IssueEventRecord::TABLE, \Tahadudhiya\WebDoctor\records\EvidenceRecord::TABLE],
+            [
+                IssueRecord::TABLE,
+                IssueEventRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\EvidenceRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\InvestigationRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\InvestigationStepRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\ErrorGroupRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\ErrorSourceRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\RootCauseRecord::TABLE,
+            ],
         );
 
         sort($tables);

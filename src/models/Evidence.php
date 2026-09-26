@@ -174,6 +174,50 @@ final class Evidence implements JsonSerializable
     }
 
     /**
+     * Reads back evidence written down as {@see jsonSerialize()} writes it.
+     *
+     * Rebuilt through the constructor, so what comes back is redacted and bounded by the rules
+     * that apply now even if whatever wrote it applied none. A type this version does not have
+     * falls back to one withheld from clients, so not knowing what a fact is never makes it more
+     * visible.
+     *
+     * @param array<array-key, mixed> $stored
+     */
+    public static function fromArray(array $stored): self
+    {
+        $moment = static function(mixed $value): ?DateTimeImmutable {
+            if (!is_string($value) || $value === '') {
+                return null;
+            }
+
+            try {
+                return new DateTimeImmutable($value);
+            } catch (Throwable) {
+                return null;
+            }
+        };
+
+        $text = static fn(mixed $value): ?string => is_string($value) && $value !== '' ? $value : null;
+
+        return new self(
+            type: EvidenceType::tryFrom((string)($stored['type'] ?? '')) ?? EvidenceType::CONFIGURATION,
+            label: (string)($text($stored['label'] ?? null) ?? ''),
+            source: (string)($text($stored['source'] ?? null) ?? ''),
+            data: is_array($stored['data'] ?? null) ? $stored['data'] : [],
+            observedAt: $moment($stored['observedAt'] ?? null),
+            recordedAt: $moment($stored['recordedAt'] ?? null),
+            metadata: is_array($stored['metadata'] ?? null) ? $stored['metadata'] : [],
+            reference: $text($stored['reference'] ?? null),
+            confidence: Confidence::tryFrom((string)($stored['confidence'] ?? '')),
+            truncated: (bool)($stored['truncated'] ?? false),
+            diagnosticId: $text($stored['diagnosticId'] ?? null),
+            runId: $text($stored['runId'] ?? null),
+            environment: $text($stored['environment'] ?? null),
+            siteId: is_numeric($stored['siteId'] ?? null) ? (int)$stored['siteId'] : null,
+        );
+    }
+
+    /**
      * Records that something is configured, without recording what it is set to. This is how a
      * credential becomes evidence.
      */

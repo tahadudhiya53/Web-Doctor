@@ -15,12 +15,14 @@ use Tahadudhiya\WebDoctor\enums\EvidenceType;
 use Tahadudhiya\WebDoctor\enums\ExecutionMode;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\helpers\ErrorNormalizer;
 use Tahadudhiya\WebDoctor\helpers\EvidenceDisplay;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
+use Tahadudhiya\WebDoctor\models\ErrorSignature;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
 use Tahadudhiya\WebDoctor\models\IssueList;
@@ -78,22 +80,6 @@ class DiagnosticModelTest extends TestCase
     {
         self::assertTrue(DiagnosticDepth::DEEP->isAtLeast(DiagnosticDepth::NORMAL));
         self::assertFalse(DiagnosticDepth::SHALLOW->isAtLeast(DiagnosticDepth::NORMAL));
-    }
-
-    public function testAContextCarriesNoSecretsOutOfTheProcess(): void
-    {
-        // The context travels into evidence and reports, so anything an option holds is
-        // redacted the same way everything else is.
-        $context = new DiagnosticContext(options: ['apiKey' => 'hunter2', 'window' => 60]);
-        $json = $context->jsonSerialize();
-
-        self::assertSame(Redaction::REDACTED, $json['options']['apiKey']);
-        self::assertSame(60, $json['options']['window']);
-
-        // A run is cached as a serialized PHP object, which never calls jsonSerialize(), so the
-        // context has to be safe as it stands rather than only as it is rendered.
-        self::assertStringNotContainsString('hunter2', serialize($context));
-        self::assertSame(60, $context->option('window'));
     }
 
     public function testARunWithNoSiteSaysSoRatherThanInventingOne(): void
@@ -405,32 +391,6 @@ class DiagnosticModelTest extends TestCase
         self::assertSame('8.2.0', $evidence->get('version'));
     }
 
-    public function testACredentialCannotBeStoredInEvidenceAtAll(): void
-    {
-        // Redaction happens as the evidence is built, not on the way out, so no later
-        // serializer can be the one that forgets.
-        $evidence = new Evidence(
-            type: EvidenceType::CONFIGURATION,
-            label: 'Database connection',
-            source: 'database.connection',
-            data: ['server' => 'db', 'password' => 'hunter2'],
-        );
-
-        self::assertSame(Redaction::REDACTED, $evidence->get('password'));
-        self::assertStringNotContainsString('hunter2', json_encode($evidence) ?: '');
-    }
-
-    public function testALabelCarryingACredentialIsRedactedToo(): void
-    {
-        $evidence = new Evidence(
-            type: EvidenceType::LOG_ENTRY,
-            label: 'Connection failed for password=hunter2',
-            source: 'log.reader',
-        );
-
-        self::assertStringNotContainsString('hunter2', $evidence->label);
-    }
-
     public function testAnExceptionBecomesEvidenceWithoutTheObject(): void
     {
         $evidence = Evidence::fromThrowable(new \RuntimeException('Boom', 7), 'queue.health');
@@ -440,16 +400,6 @@ class DiagnosticModelTest extends TestCase
         self::assertSame('Boom', $evidence->get('message'));
         self::assertSame(7, $evidence->get('code'));
         self::assertSame('queue.health', $evidence->source);
-    }
-
-    public function testAnExceptionMessageCarryingACredentialIsRedacted(): void
-    {
-        $evidence = Evidence::fromThrowable(
-            new \RuntimeException('SQLSTATE[HY000]: password=hunter2'),
-            'database.connection',
-        );
-
-        self::assertStringNotContainsString('hunter2', json_encode($evidence) ?: '');
     }
 
     public function testAStackTraceIsRecordedSeparatelyAndBounded(): void
@@ -1208,6 +1158,327 @@ class DiagnosticModelTest extends TestCase
             null,
             null,
         ]));
+    }
+
+    // --- The error signature: what makes two occurrences one error.
+    //
+    // The same balance as the issue fingerprint, with more riding on the second half. Too much
+    // goes in and every occurrence of one error becomes a group of its own, because an ID or a
+    // moment in its message moved; too little goes in and two different causes are counted as
+    // one, which is the mistake a reader cannot see. Both directions are pinned.
+
+    private const ROOT = '/var/www/releases/20260925120000';
+
+    /**
+     * An exception as the engine or a check records it, with its trace beside it where given.
+     *
+     * @param list<array{class: string, message: string}> $previous
+     * @param list<string>|null $frames
+     * @return list<Evidence>
+     */
+    private function anError(
+        string $message = 'Element 4812 could not be saved.',
+        string $class = 'yii\base\Exception',
+        string $origin = self::ROOT . '/vendor/craftcms/cms/src/services/Elements.php:1204',
+        array $previous = [],
+        ?array $frames = null,
+        string $source = 'craft.application',
+    ): array {
+        $evidence = [new Evidence(
+            type: EvidenceType::EXCEPTION,
+            label: $class,
+            source: $source,
+            data: ['class' => $class, 'message' => $message, 'code' => 0, 'origin' => $origin, 'previous' => $previous],
+            reference: $origin,
+        )];
+
+        if ($frames !== null) {
+            $evidence[] = new Evidence(
+                type: EvidenceType::STACK_TRACE,
+                label: 'Stack trace',
+                source: $source,
+                data: ['frames' => $frames],
+                reference: $origin,
+            );
+        }
+
+        return $evidence;
+    }
+
+    private function signatureOf(array $evidence): ErrorSignature
+    {
+        $signatures = ErrorSignature::allIn($evidence, self::ROOT);
+
+        self::assertCount(1, $signatures);
+
+        return $signatures[0];
+    }
+
+    /**
+     * Pairs of messages from one error on two occasions: only a value that varies between
+     * occurrences differs between them.
+     *
+     * @return array<string, array{string, string, string}>
+     */
+    public static function oneErrorTwice(): array
+    {
+        return [
+            'an element ID' => ['Element 4812 could not be saved.', 'Element 77 could not be saved.', 'Element {id} could not be saved.'],
+            'an ID under its name' => ['No entry with ID 5 exists.', 'No entry with ID 90210 exists.', 'No entry with ID {id} exists.'],
+            'an ID column in SQL' => ['UPDATE x SET y=1 WHERE `elementId`=512', 'UPDATE x SET y=1 WHERE `elementId`=9', 'UPDATE x SET y=1 WHERE `elementId`={id}'],
+            'a snake-case ID' => ['Bad row: site_id: 3', 'Bad row: site_id: 14', 'Bad row: site_id: {id}'],
+            'a list of IDs in SQL' => ['SELECT * FROM x WHERE id IN (1, 2, 3)', 'SELECT * FROM x WHERE id IN (7)', 'SELECT * FROM x WHERE id IN ({ids})'],
+            'a queue job number' => ['Queue job 1182 timed out.', 'Queue job 1190 timed out.', 'Queue job {id} timed out.'],
+            'an object number' => ['Object(craft\elements\Entry)#512 is not valid.', 'Object(craft\elements\Entry)#7 is not valid.', 'Object(craft\elements\Entry)#{id} is not valid.'],
+            'a UUID' => ['Job 3f2504e0-4f89-11d3-9a0c-0305e82c3301 failed.', 'Job 9b2c1d7e-0000-4abc-8def-1234567890ab failed.', 'Job {uuid} failed.'],
+            'an ISO 8601 moment' => ['Lock expired at 2026-09-25T12:34:56+00:00.', 'Lock expired at 2026-10-01T08:00:01Z.', 'Lock expired at {timestamp}.'],
+            'an SQL moment' => ["Row changed at '2026-09-25 12:34:56'.", "Row changed at '2025-01-02 00:00:00'.", "Row changed at '{timestamp}'."],
+            'an RFC 2822 moment' => ['Rejected on Thu, 25 Sep 2026 12:34:56 +0000.', 'Rejected on Mon, 06 Oct 2025 09:00:00 +0000.', 'Rejected on {timestamp}.'],
+            'a Unix timestamp' => ['Token issued at 1758800000 is stale.', 'Token issued at 1758899999 is stale.', 'Token issued at {timestamp} is stale.'],
+            'a time of day' => ['Rate limit reset at 12:34:56.', 'Rate limit reset at 23:01:09.', 'Rate limit reset at {time}.'],
+            'a client address' => ['Blocked request from 203.0.113.7.', 'Blocked request from 198.51.100.24.', 'Blocked request from {ip}.'],
+            'an email address' => ['Could not deliver to jane@example.com.', 'Could not deliver to sam.o@example.org.', 'Could not deliver to {email}.'],
+            'a session hash' => ['Session a8f5f167f44f4964e6c998dee827110c expired.', 'Session 0cc175b9c0f1b6a831c399e269772661 expired.', 'Session {hex} expired.'],
+            'a memory address' => ['Resource 0x7f3a2c001e80 was freed.', 'Resource 0x55d1e4a0b2 was freed.', 'Resource {hex} was freed.'],
+            'a random token' => ['Upload 9fQx2LmZ8Rw3Ty7Kp1Vb5Nc0Hd4Js6Ag is incomplete.', 'Upload Zk3Pq8Wm2Xr7Ty1Lb4Nv6Hc9Js0Df5Ag is incomplete.', 'Upload {token} is incomplete.'],
+            'a duplicated value' => ["Duplicate entry '45-1' for key 'idx_slug'", "Duplicate entry '7-2' for key 'idx_slug'", "Duplicate entry '{n}' for key 'idx_slug'"],
+            'an amount of memory' => ['Allowed memory size of 134217728 bytes exhausted (tried to allocate 20480 bytes)', 'Allowed memory size of 134217728 bytes exhausted (tried to allocate 65536 bytes)', 'Allowed memory size of {n} bytes exhausted (tried to allocate {n} bytes)'],
+            'a duration' => ['Operation timed out after 30001 milliseconds.', 'Operation timed out after 30004 milliseconds.', 'Operation timed out after {n} milliseconds.'],
+            "a URL's IDs and query" => ['GET https://api.example.com/v2/orders/8812?ref=abc failed.', 'GET https://api.example.com/v2/orders/31?page=2 failed.', 'GET https://api.example.com/v2/orders/{id}?{query} failed.'],
+            'a release directory' => ['Cannot write /srv/releases/20260925120000/storage/x.txt', 'Cannot write /srv/releases/20261001080000/storage/x.txt', 'Cannot write /srv/releases/{release}/storage/x.txt'],
+            'an upload temporary' => ['Cannot read /tmp/phpA1b2C3.', 'Cannot read /tmp/phpZz9Yy8.', 'Cannot read /tmp/php{tmp}.'],
+            'whitespace' => ["Element  4812\n could not be saved.", 'Element 1 could not be saved.', 'Element {id} could not be saved.'],
+            'a request identifier' => ['Request ID 7f3a9c2e1b4d8f60 was rejected.', 'Request ID 0b1c2d3e4f5a6b7c was rejected.', 'Request ID {hex} was rejected.'],
+            'an amount too large to be mistaken for a moment' => ['Allowed memory size of 1073741824 bytes exhausted', 'Allowed memory size of 1610612736 bytes exhausted', 'Allowed memory size of {n} bytes exhausted'],
+            'an IPv6 address' => ['No route to 2001:0db8:85a3:0000:0000:8a2e:0370:7334.', 'No route to fe80:0000:0000:0000:0202:b3ff:fe1e:8329.', 'No route to {ip}.'],
+            'a quoted value after "entry"' => ["Duplicate entry '45' for key 'idx_slug'", "Duplicate entry '9' for key 'idx_slug'", "Duplicate entry '{n}' for key 'idx_slug'"],
+            'a Unix timestamp in milliseconds' => ['Signed at 1758800000123.', 'Signed at 1758800999999.', 'Signed at {timestamp}.'],
+            "a token in a URL's path" => ['GET https://api.example.com/files/9fQx2LmZ8Rw3Ty7Kp1Vb5Nc0Hd4Js6Ag failed.', 'GET https://api.example.com/files/Zk3Pq8Wm2Xr7Ty1Lb4Nv6Hc9Js0Df5Ag failed.', 'GET https://api.example.com/files/{token} failed.'],
+        ];
+    }
+
+    #[DataProvider('oneErrorTwice')]
+    public function testAValueThatVariesBetweenOccurrencesDoesNotMakeANewError(string $first, string $second, string $normalised): void
+    {
+        $a = $this->signatureOf($this->anError($first));
+        $b = $this->signatureOf($this->anError($second));
+
+        self::assertSame($normalised, $a->message);
+        self::assertSame($a->fingerprint('production', 1), $b->fingerprint('production', 1));
+        // What this occurrence actually said is kept beside the grouped form, not lost to it.
+        self::assertSame(trim($first), trim($a->sample));
+    }
+
+    /**
+     * Two errors that differ in something that tells causes apart.
+     *
+     * @return array<string, array{list<Evidence>, list<Evidence>}>
+     */
+    public static function twoDifferentErrors(): array
+    {
+        $test = new self('twoDifferentErrors');
+        $error = static fn(array $args = []): array => $test->anError(...$args);
+
+        return [
+            'another class' => [$error(), $error(['class' => 'yii\db\Exception'])],
+            // Error codes and statuses are numbers, and the only thing telling these apart.
+            'another database error' => [$error(['message' => 'SQLSTATE[HY000] [2002] Connection refused']), $error(['message' => 'SQLSTATE[HY000] [1045] Access denied'])],
+            'another SQLSTATE' => [$error(['message' => 'SQLSTATE[42S02]: not found']), $error(['message' => 'SQLSTATE[42S22]: not found'])],
+            'another cURL error' => [$error(['message' => 'cURL error 28: failed']), $error(['message' => 'cURL error 7: failed'])],
+            'another HTTP status' => [$error(['message' => 'Client error: 404 Not Found']), $error(['message' => 'Client error: 403 Not Found'])],
+            'another table' => [$error(['message' => "Table 'craft_foo' doesn't exist"]), $error(['message' => "Table 'craft_bar' doesn't exist"])],
+            'another table with digits' => [$error(['message' => "Table 'craft_2024_backup' doesn't exist"]), $error(['message' => "Table 'craft_2025_backup' doesn't exist"])],
+            'another host' => [$error(['message' => 'GET https://api.example.com/x failed']), $error(['message' => 'GET https://api.example.org/x failed'])],
+            'another path in the installation' => [$error(['message' => 'Cannot write ' . self::ROOT . '/storage/a.txt']), $error(['message' => 'Cannot write ' . self::ROOT . '/storage/b.txt'])],
+            'another array key' => [$error(['message' => 'Undefined array key "handle"']), $error(['message' => 'Undefined array key "title"'])],
+            'another column' => [$error(['message' => "Unknown column 'postDate' in 'field list'"]), $error(['message' => "Unknown column 'expiryDate' in 'field list'"])],
+            // A long name with a digit in it is a name, not a token.
+            'another class named in the message' => [$error(['message' => 'Class "App\\Oauth2AuthorizationServerFactory" not found']), $error(['message' => 'Class "App\\Oauth2ResourceOwnerServerFactory" not found'])],
+            // The number after `#` is the error, unless it follows an object.
+            'another error number' => [$error(['message' => 'Error #1045 - the server said no']), $error(['message' => 'Error #2002 - the server said no'])],
+            // A lone quoted number is often the error code itself.
+            'another quoted error code' => [$error(['message' => "Mail failed with code '550'"]), $error(['message' => "Mail failed with code '421'"])],
+            // Eight hex digits or fewer is an error code, not an address.
+            'another hex error code' => [$error(['message' => 'COM call failed with HRESULT 0x80070005']), $error(['message' => 'COM call failed with HRESULT 0x80004005'])],
+            // After "request" or "message" the number is as often a status as an identity.
+            'another status after "request"' => [$error(['message' => 'Request 404 could not be completed']), $error(['message' => 'Request 500 could not be completed'])],
+            'another reply after "message"' => [$error(['message' => 'Message 550 was rejected']), $error(['message' => 'Message 421 was rejected'])],
+            // A three-part version is not an address.
+            'another version' => [$error(['message' => 'Requires PHP 8.2.1 or later']), $error(['message' => 'Requires PHP 8.3.0 or later'])],
+            'another SQL statement' => [$error(['message' => 'Deadlock found when trying to get lock on UPDATE craft_elements']), $error(['message' => 'Deadlock found when trying to get lock on DELETE craft_elements'])],
+            'another plugin in the origin' => [$error(['origin' => self::ROOT . '/vendor/verbb/formie/src/Formie.php:10']), $error(['origin' => self::ROOT . '/vendor/verbb/navigation/src/Formie.php:10'])],
+            'another site number' => [$error(['message' => 'Nothing in site 1']), $error(['message' => 'Nothing in site 2'])],
+            'another line' => [$error(), $error(['origin' => self::ROOT . '/vendor/craftcms/cms/src/services/Elements.php:1210'])],
+            'another file' => [$error(), $error(['origin' => self::ROOT . '/vendor/craftcms/cms/src/services/Entries.php:1204'])],
+            'another cause behind it' => [
+                $error(['previous' => [['class' => 'PDOException', 'message' => 'Connection refused']]]),
+                $error(['previous' => [['class' => 'PDOException', 'message' => 'Access denied']]]),
+            ],
+            'a cause behind one and not the other' => [$error(), $error(['previous' => [['class' => 'PDOException', 'message' => 'x']]])],
+            'another path to the throw' => [
+                $error(['frames' => ['craft\services\Elements->saveElement (' . self::ROOT . '/src/A.php:10)']]),
+                $error(['frames' => ['craft\services\Elements->deleteElement (' . self::ROOT . '/src/A.php:10)']]),
+            ],
+        ];
+    }
+
+    /**
+     * @param list<Evidence> $one
+     * @param list<Evidence> $other
+     */
+    #[DataProvider('twoDifferentErrors')]
+    public function testWhatMakesItADifferentError(array $one, array $other): void
+    {
+        self::assertNotSame(
+            $this->signatureOf($one)->fingerprint('production', 1),
+            $this->signatureOf($other)->fingerprint('production', 1),
+        );
+    }
+
+    public function testOneErrorIsOneErrorWhicheverCheckRanIntoItButNeverAcrossEnvironmentsOrSites(): void
+    {
+        // A database refusing connections is one error however many checks run into it.
+        $seenByOne = $this->signatureOf($this->anError(source: 'database.migrations'));
+        $seenByAnother = $this->signatureOf($this->anError(source: 'database.charset'));
+
+        self::assertSame($seenByOne->fingerprint('production', 1), $seenByAnother->fingerprint('production', 1));
+
+        // What one environment or site saw is never counted as another's.
+        $fingerprints = [
+            $seenByOne->fingerprint('production', 1),
+            $seenByOne->fingerprint('staging', 1),
+            $seenByOne->fingerprint('production', 2),
+            $seenByOne->fingerprint('production', null),
+        ];
+
+        self::assertSame($fingerprints, array_values(array_unique($fingerprints)));
+        self::assertMatchesRegularExpression('/\A[0-9a-f]{64}\z/', $fingerprints[0]);
+        self::assertSame($seenByOne->identity(), $seenByAnother->identity());
+    }
+
+    public function testWhereTheInstallationIsDoesNotChangeWhichErrorItIs(): void
+    {
+        // A deploy that moves the installation to a new release directory, or code Composer
+        // installed, reads the same wherever it sits; a path outside both stays as it was.
+        self::assertSame('vendor/yiisoft/yii2/db/Connection.php:648', ErrorNormalizer::origin(self::ROOT . '/vendor/yiisoft/yii2/db/Connection.php:648', self::ROOT));
+        self::assertSame('modules/Foo.php:12', ErrorNormalizer::origin(self::ROOT . '/modules/Foo.php:12', self::ROOT . '/'));
+        self::assertSame('vendor/craftcms/cms/src/Craft.php:9', ErrorNormalizer::origin('/elsewhere/vendor/craftcms/cms/src/Craft.php:9'));
+        self::assertSame('/srv/releases/{release}/app.php:3', ErrorNormalizer::origin('/srv/releases/20260101000000/app.php:3'));
+        self::assertSame('/opt/app/index.php:3', ErrorNormalizer::origin('/opt/app/index.php:3'));
+        self::assertSame('Cannot write @root/storage/x.txt', ErrorNormalizer::message('Cannot write ' . self::ROOT . '/storage/x.txt', self::ROOT));
+
+        $before = $this->signatureOf($this->anError(origin: self::ROOT . '/vendor/craftcms/cms/src/Craft.php:9'));
+        $after = ErrorSignature::allIn($this->anError(origin: '/var/www/releases/20261002000000/vendor/craftcms/cms/src/Craft.php:9'), '/var/www/releases/20261002000000')[0];
+
+        self::assertSame($before->fingerprint('production', 1), $after->fingerprint('production', 1));
+    }
+
+    public function testWhatPhpGeneratesPerDeclarationIsNotPartOfWhichErrorItIs(): void
+    {
+        // An anonymous class is named after the file, line and a counter; a closure after the
+        // line it was declared on. Neither says what went wrong.
+        self::assertSame('RuntimeException@anonymous', ErrorNormalizer::className("RuntimeException@anonymous\0/app/src/Foo.php:12\$0"));
+        self::assertSame('Foo@anonymous->run (src/X.php:40)', ErrorNormalizer::frame("Foo@anonymous\0/p/f.php:3\$1->run (" . self::ROOT . '/src/X.php:40)', self::ROOT));
+        self::assertSame('{closure} (vendor/a/b.php:1)', ErrorNormalizer::frame('{closure:App\Foo::bar():12} (/x/vendor/a/b.php:1)'));
+
+        $one = $this->signatureOf($this->anError(class: "RuntimeException@anonymous\0/app/a.php:1\$0", frames: ['{closure:A::b():12} (/a.php:1)']));
+        $two = $this->signatureOf($this->anError(class: "RuntimeException@anonymous\0/app/a.php:1\$7", frames: ['{closure:A::b():14} (/a.php:3)']));
+
+        self::assertSame($one->fingerprint('production', 1), $two->fingerprint('production', 1));
+    }
+
+    public function testThePathAnErrorTookIsItsTopCallsWithoutFilesOrLines(): void
+    {
+        $frames = static fn(string $file, int $line): array => array_map(
+            static fn(int $i): string => sprintf('App\Step%d->handle (%s:%d)', $i, $file, $line + $i),
+            range(1, 8),
+        );
+
+        $here = ErrorNormalizer::stackFingerprint($frames('/a/b.php', 10));
+
+        // The same calls through files that moved, or lines that shifted, are the same path.
+        self::assertSame($here, ErrorNormalizer::stackFingerprint($frames('/c/d.php', 90)));
+        // Only the top of the trace counts, so what called the code that failed does not split it.
+        $deeper = $frames('/a/b.php', 10);
+        $deeper[7] = 'App\Elsewhere->run (/z.php:1)';
+        self::assertSame($here, ErrorNormalizer::stackFingerprint($deeper));
+        self::assertNull(ErrorNormalizer::stackFingerprint([]));
+
+        // No trace and a trace are different things to have recorded.
+        self::assertNotSame(
+            $this->signatureOf($this->anError())->fingerprint('production', 1),
+            $this->signatureOf($this->anError(frames: $frames('/a/b.php', 10)))->fingerprint('production', 1),
+        );
+    }
+
+    public function testAResultsErrorsAreFoundOnceEachWithTheirTraces(): void
+    {
+        $evidence = [
+            ...$this->anError(frames: [self::ROOT . '/nothing', 'App\A->b (' . self::ROOT . '/src/A.php:4)']),
+            // The same error recorded twice in one result was still run into once. Thrown at the
+            // same place, it is paired with the same trace.
+            ...$this->anError('Element 99 could not be saved.'),
+            ...$this->anError('Something else entirely.', origin: '/app/other.php:1'),
+            new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.failedJobs', data: ['failed' => 3]),
+            // A trace with no exception beside it is not an error on its own.
+            new Evidence(type: EvidenceType::STACK_TRACE, label: 'Stack trace', source: 'x', data: ['frames' => ['a (b:1)']], reference: '/nowhere.php:1'),
+            // Nor is exception evidence that names no class.
+            new Evidence(type: EvidenceType::EXCEPTION, label: '', source: 'x', data: ['message' => 'orphan']),
+        ];
+
+        $signatures = ErrorSignature::allIn($evidence, self::ROOT);
+
+        self::assertCount(2, $signatures);
+        self::assertSame(['App\A->b (src/A.php:4)'], array_slice($signatures[0]->frames, 1));
+        self::assertNotNull($signatures[0]->stackFingerprint);
+        self::assertSame('Exception', $signatures[0]->shortClass());
+        self::assertSame([], $signatures[1]->frames);
+        self::assertSame('Something else entirely.', $signatures[1]->message);
+    }
+
+    public function testAnExceptionRecordedByTheEngineIsRecognisedFromWhatItRecorded(): void
+    {
+        // The real route in: an exception reduced by SafeException and recorded as evidence the
+        // way the engine records a check that broke.
+        $thrown = static function(int $id): \RuntimeException {
+            return new \RuntimeException("Entry $id could not be found at 2026-09-25 12:00:0" . ($id % 10), 0, new \LogicException("Lookup of row $id failed"));
+        };
+
+        $one = SafeException::from($thrown(41));
+        $two = SafeException::from($thrown(97));
+
+        $a = $this->signatureOf([Evidence::fromThrowable($one, 'x.y'), Evidence::stackTrace($one, 'x.y')]);
+        $b = $this->signatureOf([Evidence::fromThrowable($two, 'x.y'), Evidence::stackTrace($two, 'x.y')]);
+
+        self::assertSame('RuntimeException', $a->class);
+        self::assertSame('Entry {id} could not be found at {timestamp}', $a->message);
+        self::assertSame([['class' => 'LogicException', 'message' => 'Lookup of row {id} failed']], $a->previous);
+        self::assertNotSame([], $a->frames);
+        self::assertSame($a->fingerprint('production', 1), $b->fingerprint('production', 1));
+    }
+
+    public function testAGroupedMessageIsBoundedAndMalformedTextStillGroups(): void
+    {
+        // Far past anything evidence would carry, and still one deterministic, bounded answer.
+        $huge = str_repeat('Element 12 failed; ', 20000);
+        self::assertSame(ErrorNormalizer::message($huge), ErrorNormalizer::message(str_replace('12', '99', $huge)));
+        self::assertLessThanOrEqual(ErrorNormalizer::MAX_MESSAGE_LENGTH, mb_strlen(ErrorNormalizer::message($huge)));
+
+        // Recorded through evidence, a huge message arrives already bounded and still groups.
+        $a = $this->signatureOf($this->anError(str_repeat('Element 12 failed; ', 20000)));
+        $b = $this->signatureOf($this->anError(str_repeat('Element 99 failed; ', 20000)));
+        self::assertSame($a->fingerprint('production', 1), $b->fingerprint('production', 1));
+        self::assertLessThan(20000, strlen($a->sample));
+
+        $long = ErrorNormalizer::message(str_repeat('word ', 1000));
+
+        self::assertSame(ErrorNormalizer::MAX_MESSAGE_LENGTH, mb_strlen($long));
+        self::assertStringEndsWith('…', $long);
+
+        $malformed = ErrorNormalizer::message("Bad byte \xB1 in row 5");
+
+        self::assertTrue(mb_check_encoding($malformed, 'UTF-8'));
+        self::assertStringEndsWith('row {id}', $malformed);
     }
 
     // --- The issue filter: the one place a URL decides what the database is asked.

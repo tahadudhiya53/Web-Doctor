@@ -40,7 +40,7 @@
                         </td>
                     {% endif %}
                     <td class="wd-col-detail">
-                        <div class="wd-result__name">{{ row.name }}</div>
+                        <div class="wd-result__name">{{ shared.text(row.name) }}</div>
                         <div class="wd-result__id"><code>{{ row.id }}</code></div>
                         {% if result %}
                             <p class="wd-result__summary">{{ shared.text(result.summary) }}</p>

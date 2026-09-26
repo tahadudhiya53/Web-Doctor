@@ -12,9 +12,12 @@ use Tahadudhiya\WebDoctor\console\controllers\WebDoctorController;
 use Tahadudhiya\WebDoctor\models\Settings;
 use Tahadudhiya\WebDoctor\services\DiagnosticEngine;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
+use Tahadudhiya\WebDoctor\services\Errors;
 use Tahadudhiya\WebDoctor\services\EvidenceStore;
+use Tahadudhiya\WebDoctor\services\Investigations;
 use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
+use Tahadudhiya\WebDoctor\services\RootCauses;
 use Tahadudhiya\WebDoctor\services\Runs;
 use yii\base\Event;
 
@@ -23,9 +26,12 @@ use yii\base\Event;
  *
  * @property-read DiagnosticEngine $diagnosticEngine
  * @property-read Diagnostics $diagnostics
+ * @property-read Errors $errors
  * @property-read EvidenceStore $evidence
+ * @property-read Investigations $investigations
  * @property-read Issues $issues
  * @property-read Permissions $permissions
+ * @property-read RootCauses $rootCauses
  * @property-read Runs $runs
  * @property-read Settings $settings
  */
@@ -56,9 +62,12 @@ class WebDoctor extends Plugin
                     'includeCoreDiagnostics' => true,
                 ],
                 'diagnosticEngine' => ['class' => DiagnosticEngine::class],
+                'errors' => ['class' => Errors::class],
                 'evidence' => ['class' => EvidenceStore::class],
+                'investigations' => ['class' => Investigations::class],
                 'issues' => ['class' => Issues::class],
                 'permissions' => ['class' => Permissions::class],
+                'rootCauses' => ['class' => RootCauses::class],
                 'runs' => ['class' => Runs::class],
             ],
         ];
@@ -91,6 +100,7 @@ class WebDoctor extends Plugin
 
         if ($this->getPermissions()->canViewIssues()) {
             $subnav['issues'] = ['label' => Craft::t('web-doctor', 'Issues'), 'url' => 'web-doctor/issues'];
+            $subnav['errors'] = ['label' => Craft::t('web-doctor', 'Errors'), 'url' => 'web-doctor/errors'];
         }
 
         // A single-entry sub-navigation is noise: it repeats the section's own name underneath
@@ -138,6 +148,48 @@ class WebDoctor extends Plugin
         $issues->evidence ??= $this->getEvidence();
 
         return $issues;
+    }
+
+    /**
+     * Looks into an issue by running the checks related to it.
+     */
+    public function getInvestigations(): Investigations
+    {
+        /** @var Investigations $investigations */
+        $investigations = $this->get('investigations');
+
+        // Tied to this plugin instance's registry, engine and Issue Center, for the reason the
+        // engine is tied to its registry.
+        $investigations->registry ??= $this->getDiagnostics();
+        $investigations->engine ??= $this->getDiagnosticEngine();
+        $investigations->issues ??= $this->getIssues();
+        $investigations->errors ??= $this->getErrors();
+        $investigations->rootCauses ??= $this->getRootCauses();
+
+        return $investigations;
+    }
+
+    /**
+     * Weighs what an investigation found against the known causes, and keeps what it concluded.
+     */
+    public function getRootCauses(): RootCauses
+    {
+        return $this->get('rootCauses');
+    }
+
+    /**
+     * The errors diagnostic runs have recorded, grouped so the same error is counted rather than
+     * listed again.
+     */
+    public function getErrors(): Errors
+    {
+        /** @var Errors $errors */
+        $errors = $this->get('errors');
+
+        // Tied to this plugin instance's Issue Center, for the reason the engine is tied to its registry.
+        $errors->issues ??= $this->getIssues();
+
+        return $errors;
     }
 
     /**
@@ -191,9 +243,12 @@ class WebDoctor extends Plugin
         Event::on(UrlManager::class, UrlManager::EVENT_REGISTER_CP_URL_RULES, function(RegisterUrlRulesEvent $event) {
             $event->rules['web-doctor'] = 'web-doctor/overview/index';
             $event->rules['web-doctor/issues'] = 'web-doctor/issues/index';
+            $event->rules['web-doctor/issues/<issueId:\d+>/investigations/<investigationId:\d+>'] = 'web-doctor/investigations/detail';
             // Numeric only, so the route cannot be reached with something that is not an ID and
             // the controller never has to decide what a non-numeric issue means.
             $event->rules['web-doctor/issues/<issueId:\d+>'] = 'web-doctor/issues/detail';
+            $event->rules['web-doctor/errors'] = 'web-doctor/errors/index';
+            $event->rules['web-doctor/errors/<groupId:\d+>'] = 'web-doctor/errors/detail';
         });
     }
 

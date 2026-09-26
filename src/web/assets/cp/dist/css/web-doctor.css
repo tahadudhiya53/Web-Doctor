@@ -562,3 +562,216 @@
         padding-left: 6px;
     }
 }
+
+/* Investigations. Its status says whether it got its answers, not what they were, so the palette
+   is the neutral one: a partly completed investigation is a gap to know about, not a failure of
+   the site. */
+.wd-pill--investigation-running { background: #1553b6; }
+.wd-pill--investigation-completed { background: #1f6b30; }
+.wd-pill--investigation-partial { background: #5b3bb0; }
+.wd-pill--investigation-failed { background: #7a0014; }
+
+.wd-mark--origin { background: transparent; color: #1553b6; border: 1px solid #1553b6; }
+
+.wd-investigation__summary p {
+    margin: 0 0 8px;
+}
+
+.wd-plan__heading {
+    margin: 16px 0 6px;
+    font-size: 14px;
+}
+
+.wd-plan__list,
+.wd-signals {
+    margin: 0 0 8px;
+    padding-left: 18px;
+    list-style: disc;
+}
+
+.wd-plan__list li,
+.wd-signals li {
+    margin: 0 0 6px;
+}
+
+.wd-signals .wd-pill {
+    margin-right: 4px;
+}
+
+.wd-timeline {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-left: 2px solid var(--hairline-color, rgba(51, 64, 77, 0.2));
+}
+
+.wd-timeline__step {
+    position: relative;
+    margin: 0 0 12px;
+    padding-left: 16px;
+}
+
+.wd-timeline__step::before {
+    content: '';
+    position: absolute;
+    top: 5px;
+    left: -6px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--light-text-color, #596673);
+}
+
+.wd-timeline__step--failed::before { background: #7a0014; }
+.wd-timeline__step--finished::before { background: #1f6b30; }
+.wd-timeline__step--relatedIssue::before { background: #ffb020; }
+.wd-timeline__step--diagnosed::before { background: #1553b6; }
+
+.wd-timeline__when {
+    font-size: 12px;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-timeline__what .wd-pill {
+    margin-left: 4px;
+}
+
+.wd-timeline__detail {
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+}
+
+/* Error groups */
+
+.wd-mark--repeated { background: transparent; color: #8a5200; border: 1px solid #8a5200; }
+
+.wd-error__message {
+    margin: 2px 0;
+    font-family: var(--code-font, SFMono-Regular, Consolas, monospace);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.wd-errors .wd-result__name,
+.wd-error__list,
+.wd-error__frames {
+    overflow-wrap: anywhere;
+}
+
+.wd-error__list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.wd-error__list li {
+    margin: 0 0 4px;
+}
+
+.wd-error__list .wd-pill {
+    margin-left: 4px;
+}
+
+.wd-error__frames {
+    margin: 0;
+    padding-left: 24px;
+    font-size: 12px;
+}
+
+.wd-error__frames li {
+    margin: 0 0 2px;
+}
+
+.wd-errors .wd-col-detail {
+    width: 40%;
+    min-width: 220px;
+}
+
+/* In a table the message identifies the row; the error's own page shows it whole. */
+.wd-errors .wd-error__message {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+/* Possible causes. Confidence says how firmly a cause is held, not how much the problem matters,
+   so it has a palette of its own rather than borrowing severity's: only a confirmed cause is shown
+   solid, and a possible one is barely more than an outline. */
+.wd-pill--confidence-possible {
+    color: var(--text-color, #1d2a35);
+    background: transparent;
+    border: 1px dashed var(--hairline-color, rgba(51, 64, 77, 0.5));
+}
+.wd-pill--confidence-likely { color: #1553b6; background: transparent; border: 1px solid #1553b6; }
+.wd-pill--confidence-high { background: #1553b6; }
+.wd-pill--confidence-confirmed { background: #1f6b30; }
+
+.wd-mark--role-required { background: transparent; color: var(--text-color, #1d2a35); border: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.3)); }
+.wd-mark--role-supporting { background: transparent; color: #1f6b30; border: 1px solid #1f6b30; }
+.wd-mark--role-confirming { background: #1f6b30; color: #fff; border: 1px solid #1f6b30; }
+.wd-mark--role-contradicting { background: transparent; color: #b00020; border: 1px solid #b00020; }
+
+.wd-cause {
+    margin: 16px 0 0;
+    padding: 16px 0 0;
+    border-top: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.15));
+}
+
+.wd-cause__title {
+    margin: 0 0 8px;
+    font-size: 16px;
+    overflow-wrap: anywhere;
+}
+
+.wd-cause__title .wd-pill {
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.wd-cause__heading {
+    margin: 14px 0 4px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-cause p {
+    margin: 0 0 6px;
+}
+
+.wd-cause__conditions,
+.wd-cause__observations {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.wd-cause__condition {
+    margin: 0 0 10px;
+}
+
+.wd-cause__observations {
+    margin: 4px 0 0 12px;
+    padding-left: 10px;
+    border-left: 2px solid var(--hairline-color, rgba(51, 64, 77, 0.2));
+}
+
+.wd-cause__observation {
+    margin: 0 0 4px;
+    overflow-wrap: anywhere;
+}
+
+.wd-cause__kind {
+    display: inline-block;
+    min-width: 7em;
+    font-size: 11px;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-cause__detail code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}

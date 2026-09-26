@@ -9,12 +9,14 @@ use DateTimeImmutable;
 use DateTimeInterface;
 use DateTimeZone;
 use RuntimeException;
+use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\IssueEventType;
 use Tahadudhiya\WebDoctor\enums\IssueResolution;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\Savepoint;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
@@ -30,7 +32,6 @@ use Throwable;
 use yii\base\Component;
 use yii\base\InvalidArgumentException;
 use yii\db\Expression;
-use yii\db\IntegrityException;
 
 /**
  * The problems Web Doctor has found, as they stand across runs. Three rules do the work.
@@ -49,7 +50,7 @@ use yii\db\IntegrityException;
 class Issues extends Component
 {
     /** @var int The most history the detail page asks for at once. */
-    public const EVENT_LIMIT = 100;
+    public const EVENT_LIMIT = 50;
 
     /**
      * @var EvidenceStore|null Where the evidence behind a finding is kept. Settable so a caller —
@@ -140,11 +141,8 @@ class Issues extends Component
 
             // Another request inserted this fingerprint between the lookup and the insert. Its
             // row is the issue now, so this detection is recorded against that one.
-            $record = $this->findByFingerprint($fingerprint);
-
-            if ($record === null) {
-                throw new RuntimeException(sprintf('The issue for fingerprint %s could not be created or found.', $fingerprint));
-            }
+            $record = Savepoint::committed(IssueRecord::find()->where(['fingerprint' => $fingerprint]))[0]
+                ?? throw new RuntimeException(sprintf('The issue for fingerprint %s could not be created or found.', $fingerprint));
         }
 
         $previousStatus = IssueStatus::tryFrom((string)$record->status) ?? IssueStatus::NEW;
@@ -187,40 +185,21 @@ class Issues extends Component
     /**
      * Inserts a new issue, or reports that somebody else already has.
      *
-     * The insert runs in a nested transaction so a unique-key collision rolls back only itself.
-     * PostgreSQL abandons an entire transaction after a failed statement, so without the
-     * savepoint a lost race would take the whole reconciliation down with it.
-     *
      * @return IssueRecord|null Null when the fingerprint was taken while this was being built.
      */
     private function create(string $fingerprint, DiagnosticResult $result, DiagnosticRun $run, string $detectedAt): ?IssueRecord
     {
-        $savepoint = Craft::$app->getDb()->beginTransaction();
+        $record = new IssueRecord();
+        $record->fingerprint = $fingerprint;
+        $record->status = IssueStatus::NEW->value;
+        $record->resolution = IssueResolution::NONE->value;
+        $record->occurrences = 1;
+        $record->firstDetected = $detectedAt;
+        $record->firstRunId = $run->id();
 
-        try {
-            $record = new IssueRecord();
-            $record->fingerprint = $fingerprint;
-            $record->status = IssueStatus::NEW->value;
-            $record->resolution = IssueResolution::NONE->value;
-            $record->occurrences = 1;
-            $record->firstDetected = $detectedAt;
-            $record->firstRunId = $run->id();
+        $this->applyFinding($record, $result, $run, $detectedAt);
 
-            $this->applyFinding($record, $result, $run, $detectedAt);
-            $this->save($record);
-
-            $savepoint->commit();
-
-            return $record;
-        } catch (IntegrityException) {
-            $savepoint->rollBack();
-
-            return null;
-        } catch (Throwable $e) {
-            $savepoint->rollBack();
-
-            throw $e;
-        }
+        return Savepoint::insert(fn() => $this->save($record)) ? $record : null;
     }
 
     /**
@@ -252,9 +231,12 @@ class Issues extends Component
             ->where([
                 'diagnosticId' => $conclusiveDiagnostics,
                 'environment' => $run->context->environment,
-                'siteId' => $run->context->siteId,
                 'status' => array_map(static fn(IssueStatus $s): string => $s->value, IssueStatus::open()),
-            ]);
+            ])
+            // A run about no particular site speaks only for issues that never had one. A deleted
+            // site's issues have a null siteId too, and a run that never looked at that site must
+            // not close them.
+            ->andWhere($this->place($run->context->siteId));
 
         if ($foundFingerprints !== []) {
             $query->andWhere(['not in', 'fingerprint', $foundFingerprints]);
@@ -274,6 +256,9 @@ class Issues extends Component
             $record->resolution = IssueResolution::OBSERVED_CLEAR->value;
             $record->resolvedAt = $resolvedAt;
             $record->resolvedByRunId = $run->id();
+            // A reason given for an earlier status no longer describes where the issue stands, as
+            // on recurrence. It stays in the history, where it was recorded with that status.
+            $record->statusNote = null;
 
             $this->save($record);
             $this->logEvent($record, IssueEventType::RESOLVED, from: $from, to: IssueStatus::RESOLVED, runId: $run->id());
@@ -298,30 +283,33 @@ class Issues extends Component
     public function transition(int $issueId, IssueStatus $to, ?string $note = null, ?int $userId = null): Issue
     {
         if (!$to->isSettableByHand()) {
-            throw new InvalidArgumentException(sprintf(
-                'An issue cannot be moved to "%s" by hand. That state is established by what Web Doctor observes, not by a request.',
-                $to->value,
-            ));
+            throw new InvalidArgumentException(Craft::t('web-doctor', 'An issue cannot be moved to “{status}” by hand. That state is established by what Web Doctor observes, not by a request.', [
+                'status' => $to->label(),
+            ]));
         }
 
         $note = $note === null ? null : trim($note);
 
         if ($to->requiresReason() && ($note === null || $note === '')) {
-            throw new InvalidArgumentException(sprintf(
-                'Setting an issue to "%s" is a decision rather than an outcome, so it needs a reason.',
-                $to->value,
-            ));
+            throw new InvalidArgumentException(Craft::t('web-doctor', 'Setting an issue to “{status}” is a decision rather than an outcome, so it needs a reason.', [
+                'status' => $to->label(),
+            ]));
         }
 
         $record = IssueRecord::findOne(['id' => $issueId]);
 
         if ($record === null) {
-            throw new InvalidArgumentException(sprintf('No issue exists with the ID %d.', $issueId));
+            throw new InvalidArgumentException(Craft::t('web-doctor', 'No issue exists with the ID {id}.', ['id' => $issueId]));
         }
 
         $from = IssueStatus::tryFrom((string)$record->status) ?? IssueStatus::NEW;
+        // Redacted as the history entry beside it is: a reason is typed by a person, and a person
+        // pasting a failing connection string into it is not a hypothetical.
+        $storedNote = $note === null || $note === '' ? null : Redaction::redactString($note);
 
-        if ($from === $to) {
+        // The same status again changes nothing unless it comes with a different reason, which is
+        // a person restating their decision and is recorded as one.
+        if ($from === $to && ($storedNote === null || $storedNote === $record->statusNote)) {
             return Issue::fromRecord($record);
         }
 
@@ -336,9 +324,7 @@ class Issues extends Component
             $record->resolution = IssueResolution::NONE->value;
             $record->resolvedAt = null;
             $record->resolvedByRunId = null;
-            // Redacted as the history entry beside it is: a reason is typed by a person, and a
-            // person pasting a failing connection string into it is not a hypothetical.
-            $record->statusNote = $note === null || $note === '' ? null : Redaction::redactString($note);
+            $record->statusNote = $storedNote;
             $record->statusChangedAt = $this->forDb(new DateTimeImmutable());
             $record->statusChangedBy = $userId;
 
@@ -363,6 +349,14 @@ class Issues extends Component
         $query = $this->filtered($filter);
         $total = (int)$query->count();
 
+        // A page past the end — a bookmark, or a run that resolved what was on it — shows the last
+        // page rather than claiming nothing matches.
+        $pages = max(1, (int)ceil($total / max(1, $filter->perPage)));
+
+        if ($filter->page > $pages) {
+            $filter = $filter->onPage($pages);
+        }
+
         $issues = [];
 
         foreach ($query->orderBy($this->order($filter))->offset($filter->offset())->limit($filter->perPage)->all() as $record) {
@@ -386,6 +380,50 @@ class Issues extends Component
         $record = IssueRecord::findOne(['fingerprint' => $fingerprint]);
 
         return $record === null ? null : Issue::fromRecord($record);
+    }
+
+    /**
+     * Which of these fingerprints have an issue, in one query.
+     *
+     * @param list<string> $fingerprints
+     * @return array<string, int> Fingerprint to issue ID.
+     */
+    public function idsByFingerprint(array $fingerprints): array
+    {
+        if ($fingerprints === []) {
+            return [];
+        }
+
+        $out = [];
+
+        foreach (IssueRecord::find()->select(['id', 'fingerprint'])->where(['fingerprint' => $fingerprints])->asArray()->all() as $row) {
+            $out[(string)$row['fingerprint']] = (int)$row['id'];
+        }
+
+        return $out;
+    }
+
+    /**
+     * These issues, in one query, keyed by ID. An ID with no issue behind it is left out.
+     *
+     * @param list<int> $ids
+     * @return array<int, Issue>
+     */
+    public function getMany(array $ids): array
+    {
+        if ($ids === []) {
+            return [];
+        }
+
+        $out = [];
+
+        foreach (IssueRecord::find()->where(['id' => $ids])->all() as $record) {
+            if ($record instanceof IssueRecord) {
+                $out[(int)$record->id] = Issue::fromRecord($record);
+            }
+        }
+
+        return $out;
     }
 
     /**
@@ -451,10 +489,12 @@ class Issues extends Component
      */
     public function knownDiagnostics(): array
     {
+        // Oldest name first, so a check renamed since it first raised something ends up under the
+        // name it most recently reported.
         $rows = IssueRecord::find()
-            ->select(['diagnosticId', 'diagnosticName'])
-            ->distinct()
-            ->orderBy(['diagnosticId' => SORT_ASC])
+            ->select(['diagnosticId', 'diagnosticName', 'seen' => new Expression('MAX(' . Craft::$app->getDb()->quoteColumnName('lastDetected') . ')')])
+            ->groupBy(['diagnosticId', 'diagnosticName'])
+            ->orderBy(['diagnosticId' => SORT_ASC, 'seen' => SORT_ASC])
             ->asArray()
             ->all();
 
@@ -488,6 +528,74 @@ class Issues extends Component
     }
 
     /**
+     * Other issues still open near this one: in the same environment and site, and either in
+     * one of the given categories or naming the same plugin. Worst first, then most recently seen.
+     *
+     * Never across environments or sites. An open problem somewhere else is not a signal about
+     * this one, and presenting it as one would mix evidence the Issue Center keeps apart.
+     *
+     * @param list<DiagnosticCategory> $categories
+     * @param string|null $exceptRunId Leaves out issues this run last updated, which a caller
+     * that ran the run already knows about.
+     * @return list<Issue>
+     */
+    public function related(Issue $issue, array $categories, ?string $exceptRunId = null, int $limit = 20): array
+    {
+        $near = ['or', ['category' => array_map(static fn(DiagnosticCategory $c): string => $c->value, $categories)]];
+
+        if ($issue->affectedPlugin !== null && $issue->affectedPlugin !== '') {
+            $near[] = ['affectedPlugin' => $issue->affectedPlugin];
+        }
+
+        $query = IssueRecord::find()
+            ->where([
+                'environment' => $issue->environment,
+                'status' => array_map(static fn(IssueStatus $s): string => $s->value, IssueStatus::open()),
+            ])
+            ->andWhere(['not', ['id' => $issue->id]])
+            ->andWhere($near);
+
+        // "No particular site" is its own place, as it is in the filter.
+        $query->andWhere($this->place($issue->siteId));
+
+        if ($exceptRunId !== null) {
+            $query->andWhere(['or', ['latestRunId' => null], ['not', ['latestRunId' => $exceptRunId]]]);
+        }
+
+        $db = Craft::$app->getDb();
+        $issues = [];
+
+        $records = $query
+            ->orderBy([
+                $this->rankOrder('severity', Severity::cases(), static fn(Severity $s): int => $s->rank(), false),
+                new Expression($db->quoteColumnName('lastDetected') . ' DESC'),
+                new Expression($db->quoteColumnName('id') . ' DESC'),
+            ])
+            ->limit(max(1, $limit))
+            ->all();
+
+        foreach ($records as $record) {
+            if ($record instanceof IssueRecord) {
+                $issues[] = Issue::fromRecord($record);
+            }
+        }
+
+        return $issues;
+    }
+
+    /**
+     * The issues recorded about one site, or about no particular site. The second means never
+     * associated with one: a deleted site's issues also have a null siteId, and the siteName they
+     * kept is what tells the two apart.
+     *
+     * @return array<string, int|null>
+     */
+    private function place(?int $siteId): array
+    {
+        return $siteId === null ? ['siteId' => null, 'siteName' => null] : ['siteId' => $siteId];
+    }
+
+    /**
      * Applies a filter to a query. Every value arrives already checked against something that
      * knows the answers, so nothing here has to guess what it was handed.
      */
@@ -507,12 +615,8 @@ class Issues extends Component
             $query->andWhere(['diagnosticId' => $filter->diagnosticId]);
         }
 
-        // "No particular site" means never associated with one. A deleted site's issues also
-        // have a null siteId, so the retained siteName is what tells the two apart.
-        if ($filter->withoutSite) {
-            $query->andWhere(['siteId' => null, 'siteName' => null]);
-        } elseif ($filter->siteId !== null) {
-            $query->andWhere(['siteId' => $filter->siteId]);
+        if ($filter->withoutSite || $filter->siteId !== null) {
+            $query->andWhere($this->place($filter->withoutSite ? null : $filter->siteId));
         }
 
         if ($filter->environment !== null) {
@@ -744,7 +848,7 @@ class Issues extends Component
     {
         try {
             $moment = new DateTimeImmutable("$date $time", new DateTimeZone(Craft::$app->getTimeZone()));
-        } catch (\Throwable) {
+        } catch (Throwable) {
             $moment = new DateTimeImmutable("$date $time", new DateTimeZone('UTC'));
         }
 

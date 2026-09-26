@@ -50,7 +50,7 @@
                     <select id="wd-filter-diagnostic" name="diagnostic">
                         <option value="">{{ "Any check"|t('web-doctor') }}</option>
                         {% for id, name in diagnostics %}
-                            <option value="{{ id }}"{{ filter.diagnosticId == id ? ' selected' : '' }}>{{ name }} ({{ id }})</option>
+                            <option value="{{ id }}"{{ filter.diagnosticId == id ? ' selected' : '' }}>{{ shared.plainText(name) }} ({{ id }})</option>
                         {% endfor %}
                     </select>
                 </div>
@@ -138,7 +138,7 @@
                                     <code>{{ issue.diagnosticId }}</code>
                                     &middot; {{ issue.category.label() }}
                                     &middot; {{ issue.environment }}
-                                    {%- if issue.affectedPlugin %} &middot; {{ issue.affectedPlugin }}{% endif %}
+                                    {%- if issue.affectedPlugin %} &middot; {{ shared.text(issue.affectedPlugin) }}{% endif %}
                                 </div>
                             </td>
                             <td class="wd-col-narrow">

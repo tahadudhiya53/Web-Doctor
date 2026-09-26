@@ -15,3 +15,8 @@
         {{ part }}{% if not loop.last %}{{ m.redacted() }}{% endif %}
     {%- endfor -%}
 {%- endmacro %}
+
+{# The same for places that can only hold text, such as an <option>: the mark becomes its word. #}
+{% macro plainText(value) -%}
+    {{- (value ?? '')|replace({ (constant('Tahadudhiya\\WebDoctor\\helpers\\Redaction::REDACTED')): '(' ~ 'Redacted'|t('web-doctor') ~ ')' }) -}}
+{%- endmacro %}

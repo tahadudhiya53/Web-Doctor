@@ -7,7 +7,10 @@ use craft\web\Controller;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\models\Dashboard;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
+use Tahadudhiya\WebDoctor\models\DiagnosticRun;
+use Tahadudhiya\WebDoctor\models\ErrorRecording;
 use Tahadudhiya\WebDoctor\models\HealthSummary;
+use Tahadudhiya\WebDoctor\models\IssueReconciliation;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
@@ -47,7 +50,7 @@ class OverviewController extends Controller
     public function actionIndex(): Response
     {
         $plugin = $this->plugin();
-        $siteId = $this->currentSiteId();
+        $siteId = DiagnosticContext::currentSiteId();
         $failure = null;
 
         try {
@@ -58,7 +61,7 @@ class OverviewController extends Controller
         } catch (Throwable $e) {
             // The registry is partly other people's code and the stored run is partly the
             // cache's. Either can fail, and the reader is owed a page that says so.
-            $this->logFailure('The health dashboard could not be assembled', $e);
+            SafeException::log('The health dashboard could not be assembled', $e);
             $dashboard = Dashboard::build([], null);
             $failure = Craft::t('web-doctor', 'Web Doctor could not read the last diagnostic run. The details are in Craft’s logs.');
         }
@@ -115,44 +118,81 @@ class OverviewController extends Controller
         } catch (Throwable $e) {
             // The engine contains a diagnostic that throws; nothing contains the engine itself,
             // the registry that hands it the checks, or the context that identifies the run.
-            $this->logFailure('A diagnostic run could not be completed', $e);
+            SafeException::log('A diagnostic run could not be completed', $e);
             $this->setFailFlash(Craft::t('web-doctor', 'The checks could not be run. The details are in Craft’s logs.'));
 
             return $this->redirectToPostedUrl();
         }
 
-        // A run that cannot be stored is still a run that happened, and its results are already
-        // in hand — so the failure is reported rather than turned into a failed request.
+        // What follows keeps the run in three places, and each is independent of the others: a
+        // run that cannot be cached is still a run that happened, and the issues and errors it
+        // found are still worth keeping. So each failure is reported, and none stops the rest.
+        $problems = [];
+
         if (!$plugin->getRuns()->remember($run)) {
-            $this->setFailFlash(Craft::t('web-doctor', 'The checks ran, but the results could not be stored. Check that Craft’s cache is writable.'));
-
-            return $this->redirectToPostedUrl();
+            $problems[] = Craft::t('web-doctor', 'The results could not be stored, so the dashboard still shows the previous run. Check that Craft’s cache is writable.');
         }
 
-        // The run is stored before this, so a reconciliation that fails costs the Issue Center
-        // an update rather than costing the reader the results they asked for. It is reported
-        // rather than swallowed: an Issue Center silently one run out of date is worse than one
-        // that says it could not be brought up to date.
+        // Reported rather than swallowed: an Issue Center silently one run out of date is worse
+        // than one that says it could not be brought up to date.
         try {
-            $reconciliation = $this->plugin()->getIssues()->reconcile($run);
+            $reconciliation = $plugin->getIssues()->reconcile($run);
         } catch (Throwable $e) {
-            $this->logFailure('The Issue Center could not be brought up to date after a diagnostic run', $e);
-            $this->setFailFlash(Craft::t('web-doctor', 'The checks ran, but the issue list could not be updated. The details are in Craft’s logs.'));
+            $reconciliation = null;
+            SafeException::log('The Issue Center could not be brought up to date after a diagnostic run', $e);
+            $problems[] = Craft::t('web-doctor', 'The issue list could not be updated.');
+        }
+
+        // After the issues, so the errors are related to issues as this run left them.
+        try {
+            $errors = $plugin->getErrors()->record($run);
+        } catch (Throwable $e) {
+            $errors = null;
+            SafeException::log('The errors a diagnostic run recorded could not be grouped', $e);
+            $problems[] = Craft::t('web-doctor', 'The errors the checks ran into could not be recorded.');
+        }
+
+        $summary = $this->summary($run, $reconciliation, $errors);
+
+        if ($problems !== []) {
+            $this->setFailFlash(Craft::t('web-doctor', 'The checks ran, but not everything could be kept.') . ' ' . implode(' ', $problems) . ' ' . Craft::t('web-doctor', 'The details are in Craft’s logs.') . ' ' . $summary);
 
             return $this->redirectToPostedUrl();
         }
 
-        $this->setSuccessFlash(Craft::t(
-            'web-doctor',
-            '{count, plural, =1{1 check ran.} other{# checks ran.}} {opened, plural, =0{No new issues.} =1{1 new issue.} other{# new issues.}} {resolved, plural, =0{} =1{1 issue resolved.} other{# issues resolved.}}',
-            [
-                'count' => $run->count(),
-                'opened' => $reconciliation->opened + $reconciliation->recurred,
-                'resolved' => $reconciliation->resolved,
-            ],
-        ));
+        $this->setSuccessFlash($summary);
 
         return $this->redirectToPostedUrl();
+    }
+
+    /**
+     * What a run found, in a sentence or two, saying only what there is to say.
+     */
+    private function summary(DiagnosticRun $run, ?IssueReconciliation $reconciliation, ?ErrorRecording $errors): string
+    {
+        $parts = [Craft::t('web-doctor', '{count, plural, =1{1 check ran.} other{# checks ran.}}', ['count' => $run->count()])];
+
+        if ($reconciliation !== null) {
+            $parts[] = Craft::t('web-doctor', '{opened, plural, =0{No new issues.} =1{1 new issue.} other{# new issues.}}', ['opened' => $reconciliation->opened]);
+
+            if ($reconciliation->recurred > 0) {
+                $parts[] = Craft::t('web-doctor', '{count, plural, =1{1 resolved issue came back.} other{# resolved issues came back.}}', ['count' => $reconciliation->recurred]);
+            }
+
+            if ($reconciliation->resolved > 0) {
+                $parts[] = Craft::t('web-doctor', '{count, plural, =1{1 issue resolved.} other{# issues resolved.}}', ['count' => $reconciliation->resolved]);
+            }
+        }
+
+        if ($errors !== null && $errors->groups > 0) {
+            $parts[] = Craft::t('web-doctor', '{count, plural, =1{1 error recorded.} other{# errors recorded.}}', ['count' => $errors->groups]);
+        }
+
+        if ($errors !== null && $errors->omitted > 0) {
+            $parts[] = Craft::t('web-doctor', '{omitted, plural, =1{1 more distinct error was not recorded, because as many are kept as the limit allows.} other{# more distinct errors were not recorded, because as many are kept as the limit allows.}}', ['omitted' => $errors->omitted]);
+        }
+
+        return implode(' ', $parts);
     }
 
     /**
@@ -191,19 +231,6 @@ class OverviewController extends Controller
     }
 
     /**
-     * The site being looked at, where Craft can say. A run is remembered against it, so a
-     * multi-site installation never shows one site's findings under another's name.
-     */
-    private function currentSiteId(): ?int
-    {
-        try {
-            return Craft::$app->getSites()->getCurrentSite()->id;
-        } catch (Throwable) {
-            return null;
-        }
-    }
-
-    /**
      * What to call the site a run belongs to.
      *
      * A run with no site and a run whose site has since been deleted are different facts. Naming
@@ -223,17 +250,6 @@ class OverviewController extends Controller
         }
 
         return $name ?? Craft::t('web-doctor', 'Site #{id} (no longer available)', ['id' => $siteId]);
-    }
-
-    /**
-     * Records a failure of Web Doctor's own through the same sanitised representation everything
-     * else goes through, so the log cannot become the boundary that leaks what the page does not.
-     */
-    private function logFailure(string $what, Throwable $exception): void
-    {
-        $safe = SafeException::from($exception);
-
-        Craft::error(sprintf('%s. %s at %s', $what, $safe->summary(), $safe->origin), WebDoctor::LOG_CATEGORY);
     }
 
     /**
