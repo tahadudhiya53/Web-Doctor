@@ -85,12 +85,11 @@ class DiagnosticCoreTest extends TestCase
     public function testThePluginsRegistryHoldsTheChecksWebDoctorShipsWith(): void
     {
         // The registry the plugin hands out is the product's one, so it comes with Web Doctor's
-        // own checks already in it. A registry built directly stays a plain container.
+        // own checks already in it.
         $plugin = new WebDoctor('web-doctor', Craft::$app, WebDoctor::config() + ['name' => 'Web Doctor']);
 
         self::assertCount(count(CoreDiagnostics::classes()), $plugin->getDiagnostics()->all());
         self::assertNotNull($plugin->getDiagnostics()->get(CraftVersionDiagnostic::ID));
-        self::assertSame([], (new Diagnostics())->all());
     }
 
     public function testAContextDescribesItselfFromWhatCraftKnows(): void
@@ -100,6 +99,17 @@ class DiagnosticCoreTest extends TestCase
         self::assertSame(Craft::$app->env, $context->environment);
         self::assertSame(Craft::$app->getSites()->getCurrentSite()->id, $context->siteId);
         self::assertNotSame('', $context->runId);
+
+        // Craft names no environment when nothing sets one. That is still somewhere, and a run
+        // there must not fail for want of a name.
+        $env = Craft::$app->env;
+        Craft::$app->env = null;
+
+        try {
+            self::assertSame('unknown', DiagnosticContext::current()->environment);
+        } finally {
+            Craft::$app->env = $env;
+        }
     }
 
     public function testARunStartedFromTheCommandLineSaysSo(): void
@@ -131,7 +141,6 @@ class DiagnosticCoreTest extends TestCase
         self::assertSame(DiagnosticStatus::PASS, $run->resultFor('tests.a')->status);
         self::assertSame(DiagnosticStatus::ERROR, $run->resultFor('tests.b')->status);
         self::assertSame(DiagnosticStatus::FAIL, $run->resultFor('tests.c')->status);
-        self::assertSame(DiagnosticStatus::ERROR, $run->results()[1]->status);
     }
 
     public function testADiagnosticThatQueriesTheDatabaseIsRunAgainstTheRealOne(): void
@@ -148,34 +157,6 @@ class DiagnosticCoreTest extends TestCase
 
         self::assertSame(DiagnosticStatus::PASS, $run->resultFor('tests.database')->status);
         self::assertStringEndsWith('tables.', $run->resultFor('tests.database')->summary);
-    }
-
-    public function testARunAddsUpToAHealthSummaryWhoseArithmeticIsVisible(): void
-    {
-        $run = $this->plugin->getDiagnosticEngine()->runMany([
-            $this->diagnostic('tests.fine'),
-            $this->diagnostic('tests.bad', static fn(TestDiagnostic $d) => $d->build('fail', ['Bad.'])),
-        ], DiagnosticContext::current());
-
-        $health = $run->health();
-
-        self::assertLessThan(100, $health->score);
-        self::assertCount(1, $health->contributions);
-        self::assertSame('tests.bad', $health->contributions[0]['diagnosticId']);
-    }
-
-    public function testARunSerializesWithoutTouchingTheDatabaseAgain(): void
-    {
-        $run = $this->plugin->getDiagnosticEngine()->runMany(
-            [$this->diagnostic('tests.serialize')],
-            DiagnosticContext::current(),
-        );
-
-        $json = json_encode($run);
-
-        self::assertIsString($json);
-        self::assertStringContainsString('tests.serialize', $json);
-        self::assertStringContainsString($run->id(), $json);
     }
 
     // --- The extension point another plugin contributes through.

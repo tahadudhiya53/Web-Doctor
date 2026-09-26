@@ -73,7 +73,7 @@ final class DiagnosticContext implements JsonSerializable
 
         return new self(
             siteId: $siteId ?? self::currentSiteId(),
-            environment: $app->env,
+            environment: self::currentEnvironment(),
             mode: $mode ?? ($app instanceof ConsoleApplication ? ExecutionMode::CONSOLE : ExecutionMode::MANUAL),
             depth: $depth,
             options: $options,
@@ -88,13 +88,23 @@ final class DiagnosticContext implements JsonSerializable
      * null, which is a fact a diagnostic can act on; inventing a site ID would produce findings
      * attributed to a site nobody was looking at.
      */
-    private static function currentSiteId(): ?int
+    public static function currentSiteId(): ?int
     {
         try {
             return Craft::$app->getSites()->getCurrentSite()->id;
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    /**
+     * The environment being diagnosed, by Craft's name for it. Craft names none when nothing sets
+     * CRAFT_ENVIRONMENT, ENVIRONMENT or a server name — a bare command line — and that is still
+     * one place, so it is recorded under a name that says the environment was not known.
+     */
+    public static function currentEnvironment(): string
+    {
+        return Craft::$app->env ?? 'unknown';
     }
 
     public function option(string $key, mixed $default = null): mixed

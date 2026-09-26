@@ -3,6 +3,7 @@
 namespace Tahadudhiya\WebDoctor\services;
 
 use Craft;
+use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\WebDoctor;
@@ -95,7 +96,7 @@ class Runs extends Component
 
     private function environment(): string
     {
-        return $this->environment ??= Craft::$app->env;
+        return $this->environment ??= DiagnosticContext::currentEnvironment();
     }
 
     private function cache(): CacheInterface

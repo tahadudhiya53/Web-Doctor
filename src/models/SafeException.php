@@ -2,8 +2,10 @@
 
 namespace Tahadudhiya\WebDoctor\models;
 
+use Craft;
 use JsonSerializable;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
 
 /**
@@ -60,6 +62,17 @@ final class SafeException implements JsonSerializable
             previous: self::chain($exception),
             frames: self::frames($exception, $frames),
         );
+    }
+
+    /**
+     * Writes a failure to Craft's log through the sanitised form, never the raw exception: a
+     * driver's error can quote its own DSN. One sentence saying what failed, then what happened.
+     */
+    public static function log(string $what, Throwable|self $exception): void
+    {
+        $safe = $exception instanceof self ? $exception : self::from($exception);
+
+        Craft::error(sprintf('%s. %s at %s', $what, $safe->summary(), $safe->origin), WebDoctor::LOG_CATEGORY);
     }
 
     /**

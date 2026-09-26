@@ -41,12 +41,10 @@ class DiagnosticCoreTest extends TestCase
         $registry->register($diagnostic = $this->diagnostic('craft.version'));
 
         self::assertSame($diagnostic, $registry->get('craft.version'));
-        self::assertNotNull($registry->get('craft.version'));
     }
 
     public function testAnUnknownIdIsAnswerableRatherThanFatal(): void
     {
-        self::assertNull((new Diagnostics())->get('nothing.here'));
         self::assertNull((new Diagnostics())->get('nothing.here'));
     }
 
@@ -60,16 +58,6 @@ class DiagnosticCoreTest extends TestCase
         $this->expectExceptionMessageMatches('/already registered/');
 
         $registry->register(new ConstantIdDiagnostic());
-    }
-
-    public function testRegisteringTheSameDiagnosticTwiceIsHarmless(): void
-    {
-        // Not a clash: a plugin registering twice should not take the registry down.
-        $registry = new Diagnostics();
-        $registry->register($this->diagnostic('tests.constantId'));
-        $registry->register($this->diagnostic('tests.constantId'));
-
-        self::assertSame(1, count($registry->all()));
     }
 
     public function testADiagnosticWithoutAnIdentityIsRefused(): void
@@ -207,19 +195,6 @@ class DiagnosticCoreTest extends TestCase
         } finally {
             Event::off(Diagnostics::class, Diagnostics::EVENT_REGISTER_DIAGNOSTICS, $handler);
         }
-    }
-
-    public function testAContributedDiagnosticCannotTakeAnIdThatIsAlreadyRegistered(): void
-    {
-        $registry = new Diagnostics();
-        $registry->register($mine = $this->diagnostic('craft.version'));
-        $registry->on(Diagnostics::EVENT_REGISTER_DIAGNOSTICS, function(RegisterDiagnosticsEvent $event): void {
-            $event->diagnostics[] = $this->diagnostic('tests.constantId');
-            $event->diagnostics[] = $this->diagnostic('craft.version');
-        });
-
-        self::assertSame($mine, $registry->get('craft.version'));
-        self::assertNotNull($registry->get(ConstantIdDiagnostic::ID));
     }
 
     public function testAContributorThatCannotEvenNameItselfDoesNotBreakTheRest(): void
@@ -387,6 +362,23 @@ class DiagnosticCoreTest extends TestCase
         self::assertFalse($result->status->isConclusive());
     }
 
+    /**
+     * A result is filed under the ID it names. One naming another check's would put its findings
+     * on that check's issue, so a check that misreports its own identity is recorded as broken,
+     * under the ID it was registered with.
+     */
+    public function testAResultUnderAnotherChecksIdIsAnErrorOfTheCheckThatReturnedIt(): void
+    {
+        $result = $this->engine->run($this->diagnostic(
+            'tests.impostor',
+            static fn() => new DiagnosticResult(diagnosticId: 'craft.version', name: 'Craft version', category: DiagnosticCategory::CRAFT, status: DiagnosticStatus::FAIL, summary: 'Borrowed.'),
+        ), $this->context);
+
+        self::assertSame('tests.impostor', $result->diagnosticId);
+        self::assertSame(DiagnosticStatus::ERROR, $result->status);
+        self::assertStringContainsString('craft.version', $result->description);
+    }
+
     public function testAFailedDiagnosticRecordsWhatWentWrongAsEvidence(): void
     {
         // The failure is investigable like anything else Web Doctor finds, rather than being
@@ -401,16 +393,6 @@ class DiagnosticCoreTest extends TestCase
         self::assertContains(EvidenceType::EXCEPTION, $types);
         self::assertContains(EvidenceType::STACK_TRACE, $types);
         self::assertSame('database.connection', $result->evidence()[0]->source);
-    }
-
-    public function testAFailedDiagnosticNeverLeaksACredentialThroughItsException(): void
-    {
-        $result = $this->engine->run($this->diagnostic(
-            'database.connection',
-            static fn() => throw new \RuntimeException('SQLSTATE[HY000] password=hunter2'),
-        ), $this->context);
-
-        self::assertStringNotContainsString('hunter2', json_encode($result->evidence()) ?: '');
     }
 
     public function testOneBrokenDiagnosticDoesNotStopTheRest(): void

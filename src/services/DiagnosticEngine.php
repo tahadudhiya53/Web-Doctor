@@ -16,6 +16,7 @@ use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
+use UnexpectedValueException;
 use yii\base\Component;
 use yii\base\InvalidArgumentException;
 
@@ -58,6 +59,13 @@ class DiagnosticEngine extends Component
             $result = $diagnostic->isApplicable($context)
                 ? $diagnostic->run($context)
                 : $this->skippedResult($diagnostic);
+
+            // A result is filed under the ID it names, so one naming another check's would land
+            // that check's issue and evidence — and leave its own row with no result at all. A
+            // check that misreports its own identity is broken, and is recorded as broken.
+            if ($result->diagnosticId !== $this->identify($diagnostic)) {
+                throw new UnexpectedValueException(sprintf('The check returned a result under the ID "%s" instead of its own.', $result->diagnosticId));
+            }
         } catch (Throwable $e) {
             $result = $this->errorResult($diagnostic, $e);
         }
@@ -116,7 +124,7 @@ class DiagnosticEngine extends Component
         } catch (Throwable $e) {
             $id = $this->identify($diagnostic);
             $safe = SafeException::from($e);
-            $this->logFailure($id, $safe);
+            SafeException::log(sprintf('The diagnostic "%s" failed', $id), $safe);
 
             $now = new DateTimeImmutable();
 
@@ -189,7 +197,7 @@ class DiagnosticEngine extends Component
         // Reduced once, here, and never handled as a raw exception again: the description, the
         // evidence and the log line all read from the same sanitised representation.
         $safe = SafeException::from($exception);
-        $this->logFailure($id, $safe);
+        SafeException::log(sprintf('The diagnostic "%s" failed', $id), $safe);
 
         return new DiagnosticResult(
             diagnosticId: $id,
@@ -204,18 +212,6 @@ class DiagnosticEngine extends Component
             ],
             recommendation: Craft::t('web-doctor', 'The check itself failed, so nothing is known about what it inspects. Investigate the error and run it again.'),
             confidence: Confidence::INFORMATIONAL,
-        );
-    }
-
-    /**
-     * Logs a diagnostic failure. Takes the sanitised exception rather than the raw one, so the
-     * log cannot become the boundary that leaks what the other three do not.
-     */
-    private function logFailure(string $id, SafeException $exception): void
-    {
-        Craft::error(
-            sprintf('The diagnostic "%s" failed. %s at %s', $id, $exception->summary(), $exception->origin),
-            WebDoctor::LOG_CATEGORY,
         );
     }
 }

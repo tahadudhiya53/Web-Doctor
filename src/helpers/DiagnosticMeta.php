@@ -28,6 +28,11 @@ final class DiagnosticMeta
         return $id !== '' ? $id : $diagnostic::class;
     }
 
+    /**
+     * A check's name, redacted. Redacted here because this is where every name that is not already
+     * part of a result is read — a check shown before it has run, on the dashboard or in an
+     * investigation's plan — and a name is whatever the contributing plugin wrote.
+     */
     public static function name(DiagnosticInterface $diagnostic, ?string $fallback = null): string
     {
         $fallback ??= $diagnostic::class;
@@ -38,7 +43,7 @@ final class DiagnosticMeta
             return $fallback;
         }
 
-        return $name !== '' ? $name : $fallback;
+        return $name !== '' ? Redaction::redactString($name) : $fallback;
     }
 
     public static function category(DiagnosticInterface $diagnostic): DiagnosticCategory

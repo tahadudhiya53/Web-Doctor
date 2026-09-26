@@ -41,6 +41,9 @@ final class Redaction
         'password', 'passwd', 'pwd', 'passphrase', 'secret', 'secrets', 'token', 'credential',
         'credentials', 'authorization', 'signature', 'salt', 'dsn', 'cipher', 'cookie',
         'bearer', 'certificate', 'apikey', 'accesskey', 'privatekey', 'securitykey', 'pw',
+        'passwords', 'passcode', 'pgpassword',
+        // Session identifiers as the cookies that carry them are named, in one word.
+        'phpsessid', 'sessid', 'sessionid',
         // `auth` on its own holds a login far more often than anything else — an HTTP client's
         // `auth` option, a Redis `auth`. `author` is a different word and is left alone.
         'auth',
@@ -107,6 +110,16 @@ final class Redaction
     /** @var list<string>|null The environment's credentials, longest first, once read. */
     private static ?array $knownSecrets = null;
 
+    /**
+     * @var string[] The variables a shell keeps its working directory in. `PWD` reads as a
+     * credential by name, but its value is the directory a command was started from — usually the
+     * installation itself — and treating it as a secret would redact the start of every path Web
+     * Doctor records from the command line, so the same file would read differently there and in
+     * a web request. Only the search for known values passes over them; a key called `pwd` in
+     * recorded data is still redacted.
+     */
+    private const SHELL_DIRECTORIES = ['PWD', 'OLDPWD'];
+
     /** How deep a structure is walked before the rest is dropped rather than explored. */
     private const MAX_DEPTH = 6;
 
@@ -148,7 +161,8 @@ final class Redaction
         }
 
         foreach ($words as $i => $word) {
-            if (in_array($word, self::SENSITIVE_WORDS, true)) {
+            // `password2` is a password: a number on the end of a word does not change what it is.
+            if (in_array($word, self::SENSITIVE_WORDS, true) || in_array(rtrim($word, '0123456789'), self::SENSITIVE_WORDS, true)) {
                 return true;
             }
 
@@ -279,11 +293,26 @@ final class Redaction
             $value = (string)preg_replace($pattern, '$1' . self::REDACTED, $value);
         }
 
-        // Credentials in a URL's userinfo, as a database DSN or a webhook URL carries them.
-        $value = (string)preg_replace('#([a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]*@#i', '$1' . self::REDACTED . '@', $value);
+        // Credentials in a URL's userinfo, as a database DSN or a webhook URL carries them. The
+        // user may be empty — `redis://:password@host` is the ordinary Redis form — and the
+        // password may itself contain an `@`, so everything up to the last one before the host
+        // is taken.
+        $value = (string)preg_replace('#([a-z][a-z0-9+.\-]*://)[^/\s:@]*:[^/\s]*@#i', '$1' . self::REDACTED . '@', $value);
 
-        // An `Authorization: Bearer …` header, which carries its credential with no key beside
-        // it. Exception messages from HTTP clients quote these in full.
+        // An authorization header is a credential whatever scheme it names and however short it
+        // is, so everything after the header's name goes: to its closing quote where it is quoted,
+        // as JSON quotes it, and otherwise to the end of the line.
+        $value = (string)preg_replace(
+            [
+                '/\b((?:proxy-)?authorization\\\\?"\s*:\s*\\\\?")(?:\\\\.|[^"\\\\])*/i',
+                '/\b((?:proxy-)?authorization\s*:\s*)(?!\\\\?")[^\r\n]+/i',
+            ],
+            '$1' . self::REDACTED,
+            $value,
+        );
+
+        // A bearer or basic credential quoted with no header beside it, as an HTTP client's
+        // exception message often has it.
         $value = (string)preg_replace('/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+\/=-]{8,}/i', '$1 ' . self::REDACTED, $value);
 
         // `password=…`, `api_key: …` and their kin, wherever they appear in free text.
@@ -327,6 +356,7 @@ final class Redaction
                     && strlen($value) >= self::MIN_KNOWN_SECRET_LENGTH
                     && !ctype_alpha($value)
                     && !self::isPresence($value)
+                    && !in_array($name, self::SHELL_DIRECTORIES, true)
                     && self::isSensitiveKey($name)
                 ) {
                     $secrets[$value] = true;
@@ -375,6 +405,9 @@ final class Redaction
         return $marks;
     }
 
+    /** A file of source code, as a stack frame or an exception's origin names one. */
+    private const SOURCE_FILE = '/\.(?:php|phtml|inc|twig|js|mjs|ts)$/i';
+
     /**
      * @var int How far a value is re-examined for a credential nested inside it. Each level
      * works on a strictly shorter string, so this only bounds pathological input.
@@ -384,7 +417,9 @@ final class Redaction
     /**
      * Removes `key=value` credentials from free text — including `"key": "value"`, the shape an
      * API's JSON error body takes when an HTTP client quotes it in an exception, with or without
-     * the quotes escaped.
+     * the quotes escaped, and `'key' => 'value'`, the shape of a PHP configuration array quoted
+     * in one. Without `=>` as a separator of its own, the `>` is taken for the value and the
+     * credential after it survives.
      *
      * The subtlety is what happens when the key is *not* a credential. An exception message
      * reads `SMTP refused: password=hunter2`, and a pattern matching any `key: value` pair
@@ -403,10 +438,24 @@ final class Redaction
         }
 
         return (string)preg_replace_callback(
-            '/([A-Za-z_][A-Za-z0-9_.\-]*)((?:\\\\?["\'])?\s*[=:]\s*)(\\\\"(?:(?!\\\\").)*\\\\"|"[^"]*"|\'[^\']*\'|[^\s,;&]+)/',
+            // A key may carry brackets, as form and array parameters do. A colon inside `::` is
+            // not a separator: `Cookie::__construct` names a method, not a cookie's value.
+            '/([A-Za-z_][A-Za-z0-9_.\-\[\]]*)((?:\\\\?["\'])?\s*(?:=>|=|(?<!:):(?!:))\s*)(\\\\"(?:(?!\\\\").)*\\\\"|"[^"]*"|\'[^\']*\'|[^\s,;&]+)/',
             static function(array $m) use ($depth): string {
                 if (!self::isSensitiveKey($m[1])) {
                     return $m[1] . $m[2] . self::redactPairs($m[3], $depth + 1);
+                }
+
+                // What only looks like a credential pair: a line in a file whose name holds a
+                // credential word (`Auth.php:120`) — where an exception was thrown, which is how
+                // two errors are told apart — and MySQL's own `using password: YES`, which says
+                // whether a password was sent, not what it was.
+                if (
+                    (trim($m[2]) === ':' && preg_match(self::SOURCE_FILE, $m[1]) === 1 && preg_match('/^\d+\)?$/', $m[3]) === 1)
+                    || preg_match('/^(?:YES|NO)\)?$/', $m[3]) === 1
+                    || self::isPresence($m[3])
+                ) {
+                    return $m[0];
                 }
 
                 // A quoted value keeps its quotes, so JSON with a credential removed still reads

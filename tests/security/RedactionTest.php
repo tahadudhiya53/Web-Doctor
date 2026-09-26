@@ -6,6 +6,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\WebDoctor\enums\EvidenceType;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\Evidence;
 
 /**
@@ -247,6 +248,11 @@ class RedactionTest extends TestCase
                 ['fake-single-quoted'],
                 [],
             ],
+            'a PHP array quoted in a message' => [
+                "Config ['host' => 'smtp.example.com', 'password' => 'fake-arrow-pw'] rejected",
+                ['fake-arrow-pw'],
+                ["'host' => 'smtp.example.com'", 'rejected'],
+            ],
             'an auth option' => [
                 'Redis refused auth=fake-redis-auth on connect',
                 ['fake-redis-auth'],
@@ -257,7 +263,55 @@ class RedactionTest extends TestCase
                 ['fake-query-token'],
                 ['api.example.com', 'page=2'],
             ],
+            'a URL whose login has no user name, as Redis URLs do' => [
+                'Connecting to redis://:fake-redis-pw@cache:6379 failed',
+                ['fake-redis-pw'],
+                ['cache:6379'],
+            ],
+            'a URL password that itself contains an @' => [
+                'Connecting to mysql://root:fake@db@pw@db:3306/craft failed',
+                ['fake@db@pw', 'db@pw'],
+                ['db:3306/craft'],
+            ],
+            'form and array keys, as an HTTP client quotes its parameters' => [
+                'POST failed: config[password]=fake-form-pw&password[0]=fake-list-pw&api_key[]=fake-bracket-key&page=2',
+                ['fake-form-pw', 'fake-list-pw', 'fake-bracket-key'],
+                ['page=2'],
+            ],
+            'credentials spelt as one word' => [
+                'PHPSESSID=fake-php-session sessionid=fake-session-id PGPASSWORD=fake-pg-password passcode=fake-passcode password2=fake-second-pw',
+                ['fake-php-session', 'fake-session-id', 'fake-pg-password', 'fake-passcode', 'fake-second-pw'],
+                [],
+            ],
+            'an authorization header with any scheme, or a short token' => [
+                "Authorization: Apikey fake-apikey-scheme\nProxy-Authorization: Bearer shorty\nAccept: */*",
+                ['fake-apikey-scheme', 'shorty'],
+                ['Accept: */*'],
+            ],
+            'an authorization header quoted in JSON' => [
+                '{"Authorization": "Digest username=\"x\", response=\"fake-digest\"", "status": 401}',
+                ['fake-digest'],
+                ['"status": 401'],
+            ],
         ];
+    }
+
+    /**
+     * What looks like a pair but is not one, and has to come through whole: where an exception was
+     * thrown is how two errors are told apart, and MySQL's own "using password" flag is the
+     * difference between no password configured and a wrong one.
+     */
+    public function testWhatOnlyLooksLikeACredentialPairSurvives(): void
+    {
+        foreach ([
+            '/var/www/html/vendor/craftcms/cms/src/services/Auth.php:120',
+            'yii\web\Cookie::__construct (/app/vendor/yiisoft/yii2/web/CookieCollection.php:88)',
+            'craft\services\Tokens::createToken() at src/services/Tokens.php:61',
+            "Access denied for user 'root'@'localhost' (using password: NO)",
+            "Access denied for user 'root'@'localhost' (using password: YES)",
+        ] as $text) {
+            self::assertSame($text, Redaction::redactString($text));
+        }
     }
 
     /**
@@ -478,6 +532,27 @@ class RedactionTest extends TestCase
         }
     }
 
+    public function testTheShellsWorkingDirectoryIsNotMistakenForACredential(): void
+    {
+        // `PWD` reads as a password by name, but it holds the directory a command started in —
+        // usually the installation — so treating its value as secret would cut the start off
+        // every path recorded from the command line. A key named `pwd` is still redacted.
+        $original = getenv('PWD');
+        $this->forgetKnownSecrets();
+        putenv('PWD=/srv/craft-install-7731');
+
+        try {
+            self::assertSame(
+                'Failed to open /srv/craft-install-7731/storage/x.txt',
+                Redaction::redactString('Failed to open /srv/craft-install-7731/storage/x.txt'),
+            );
+            self::assertSame(Redaction::REDACTED, Redaction::redact(['pwd' => '/srv/craft-install-7731'])['pwd']);
+        } finally {
+            putenv($original === false ? 'PWD' : "PWD=$original");
+            $this->forgetKnownSecrets();
+        }
+    }
+
     public function testWhatRedactionLeftBehindCanBeCounted(): void
     {
         $marks = Redaction::marks(Redaction::redact([
@@ -500,21 +575,26 @@ class RedactionTest extends TestCase
         // redacted where the result is built rather than wherever it happens to be shown.
         $result = new \Tahadudhiya\WebDoctor\models\DiagnosticResult(
             diagnosticId: 'tests.prose',
-            name: 'Prose',
+            // A name, a component and a plugin are the diagnostic's to write too, and each reaches
+            // an issue's columns.
+            name: 'Prose password=hunter2-name',
             category: \Tahadudhiya\WebDoctor\enums\DiagnosticCategory::EMAIL,
             status: \Tahadudhiya\WebDoctor\enums\DiagnosticStatus::FAIL,
             summary: 'SMTP refused: password=hunter2-summary',
             description: 'Connecting to smtp://mailer:hunter2-description@mail.example.com failed.',
             recommendation: 'Rotate api_key=hunter2-recommendation and try again.',
+            affectedComponent: 'mailer token=hunter2-component',
+            affectedPlugin: 'smtp secret=hunter2-plugin',
         );
 
         $json = (string)json_encode($result);
 
-        foreach (['hunter2-summary', 'hunter2-description', 'hunter2-recommendation'] as $secret) {
+        foreach (['hunter2-summary', 'hunter2-description', 'hunter2-recommendation', 'hunter2-name', 'hunter2-component', 'hunter2-plugin'] as $secret) {
             self::assertStringNotContainsString($secret, $json);
         }
 
         self::assertStringContainsString('SMTP refused', $result->summary);
+        self::assertStringStartsWith('Prose', $result->name);
         self::assertStringContainsString('mail.example.com', $result->description);
     }
 
@@ -527,6 +607,24 @@ class RedactionTest extends TestCase
         (new \ReflectionProperty(Redaction::class, 'knownSecrets'))->setValue(null, null);
     }
 
+    public function testACheckNamedAfterACredentialIsRedactedEvenBeforeItHasRun(): void
+    {
+        // A name is whatever the contributing plugin wrote, and two places show it before any
+        // result exists to have redacted it: an investigation's plan on the issue page, and a check
+        // added since the dashboard's last run.
+        $check = new \Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic();
+        $check->diagnosticId = 'tests.named';
+        $check->diagnosticName = 'Mailer token=planSecret99';
+
+        $plan = \Tahadudhiya\WebDoctor\models\InvestigationPlan::build('tests.named', \Tahadudhiya\WebDoctor\enums\DiagnosticCategory::EMAIL, null, [$check]);
+        $dashboard = \Tahadudhiya\WebDoctor\models\Dashboard::build([$check], null);
+
+        foreach (['the plan' => json_encode($plan), 'the dashboard' => json_encode($dashboard->rows)] as $surface => $output) {
+            self::assertStringNotContainsString('planSecret99', (string)$output, "A credential in a check's name reached {$surface}.");
+            self::assertStringContainsString('Mailer', (string)$output);
+        }
+    }
+
     public function testMalformedTextIsRepairedRatherThanCarriedIntoStorage(): void
     {
         // One bad byte in an exception message must not become a value that cannot be encoded or
@@ -536,6 +634,22 @@ class RedactionTest extends TestCase
         self::assertTrue(mb_check_encoding($redacted, 'UTF-8'));
         self::assertIsString(json_encode($redacted));
         self::assertStringNotContainsString('hunter2', $redacted);
+    }
+
+    public function testAContextCarriesNoSecretsOutOfTheProcess(): void
+    {
+        // The context travels into evidence and reports, so anything an option holds is
+        // redacted the same way everything else is.
+        $context = new DiagnosticContext(options: ['apiKey' => 'hunter2', 'window' => 60]);
+        $json = $context->jsonSerialize();
+
+        self::assertSame(Redaction::REDACTED, $json['options']['apiKey']);
+        self::assertSame(60, $json['options']['window']);
+
+        // A run is cached as a serialized PHP object, which never calls jsonSerialize(), so the
+        // context has to be safe as it stands rather than only as it is rendered.
+        self::assertStringNotContainsString('hunter2', serialize($context));
+        self::assertSame(60, $context->option('window'));
     }
 
     /**

@@ -2,13 +2,11 @@
 
 namespace Tahadudhiya\WebDoctor\services;
 
-use Craft;
 use Tahadudhiya\WebDoctor\base\DiagnosticInterface;
 use Tahadudhiya\WebDoctor\diagnostics\CoreDiagnostics;
 use Tahadudhiya\WebDoctor\events\RegisterDiagnosticsEvent;
 use Tahadudhiya\WebDoctor\helpers\DiagnosticMeta;
-use Tahadudhiya\WebDoctor\helpers\Redaction;
-use Tahadudhiya\WebDoctor\WebDoctor;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Throwable;
 use yii\base\Component;
 use yii\base\InvalidArgumentException;
@@ -147,7 +145,7 @@ class Diagnostics extends Component
             try {
                 $this->register($diagnostic);
             } catch (Throwable $e) {
-                Craft::error(Redaction::redactString($e->getMessage()), WebDoctor::LOG_CATEGORY);
+                SafeException::log('A diagnostic Web Doctor ships with could not be registered', $e);
             }
         }
     }
@@ -231,9 +229,9 @@ class Diagnostics extends Component
 
                 $this->register($diagnostic);
             } catch (Throwable $e) {
-                // Through the same redaction as everything else Web Doctor writes down: the
-                // message quotes an ID that came from another plugin.
-                Craft::error(Redaction::redactString($e->getMessage()), WebDoctor::LOG_CATEGORY);
+                // Through the one sanitised form of an exception: the message quotes an ID that
+                // came from another plugin.
+                SafeException::log('A contributed diagnostic could not be registered', $e);
             }
         }
     }

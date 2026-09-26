@@ -22,13 +22,23 @@ use Tahadudhiya\WebDoctor\helpers\Redaction;
  * has finished, so a diagnostic cannot claim a run it was not part of or a duration it did not
  * take.
  *
- * The prose a result carries is redacted as the result is built, for the reason evidence is: it
+ * The text a result carries — its prose, and the name and affected component and plugin a
+ * diagnostic gives it — is redacted as the result is built, for the reason evidence is: it
  * is written by diagnostics, including other plugins', about installations whose failures quote
  * credentials — and it travels into the dashboard, the cache, the issue it raises and every report
  * after that. Redacting it once here means none of those has to remember to.
  */
 final class DiagnosticResult implements JsonSerializable
 {
+    /** @var string The diagnostic's name, as a reader sees it. */
+    public readonly string $name;
+
+    /** @var string|null What is affected, named in Web Doctor's own terms. */
+    public readonly ?string $affectedComponent;
+
+    /** @var string|null The handle of the plugin at fault, where one is. */
+    public readonly ?string $affectedPlugin;
+
     /** @var string One line, for a person. */
     public readonly string $summary;
 
@@ -59,7 +69,7 @@ final class DiagnosticResult implements JsonSerializable
      */
     public function __construct(
         public readonly string $diagnosticId,
-        public readonly string $name,
+        string $name,
         public readonly DiagnosticCategory $category,
         public readonly DiagnosticStatus $status,
         string $summary = '',
@@ -68,8 +78,8 @@ final class DiagnosticResult implements JsonSerializable
         public readonly array $evidence = [],
         ?string $recommendation = null,
         public readonly Confidence $confidence = Confidence::INFORMATIONAL,
-        public readonly ?string $affectedComponent = null,
-        public readonly ?string $affectedPlugin = null,
+        ?string $affectedComponent = null,
+        ?string $affectedPlugin = null,
         public readonly bool $repairAvailable = false,
         public readonly bool $verificationAvailable = false,
         public readonly ?string $environment = null,
@@ -78,6 +88,9 @@ final class DiagnosticResult implements JsonSerializable
         public readonly ?DateTimeImmutable $finishedAt = null,
         public readonly ?float $durationMs = null,
     ) {
+        $this->name = Redaction::redactString($name);
+        $this->affectedComponent = $affectedComponent === null ? null : Redaction::redactString($affectedComponent);
+        $this->affectedPlugin = $affectedPlugin === null ? null : Redaction::redactString($affectedPlugin);
         $this->summary = Redaction::redactString($summary);
         $this->description = Redaction::redactString($description);
         $this->recommendation = $recommendation === null ? null : Redaction::redactString($recommendation);
