@@ -16,6 +16,7 @@ use Tahadudhiya\WebDoctor\models\EvidencePage;
 use Tahadudhiya\WebDoctor\models\StoredEvidence;
 use Tahadudhiya\WebDoctor\records\EvidenceRecord;
 use yii\base\Component;
+use yii\base\InvalidConfigException;
 use yii\db\Expression;
 
 /**
@@ -51,7 +52,7 @@ class EvidenceStore extends Component
      */
     public function record(int $issueId, DiagnosticResult $result, DiagnosticRun $run): int
     {
-        $limit = max(1, $this->maxPerIssue);
+        $limit = $this->limit();
         $incoming = [];
 
         foreach ($result->evidence() as $evidence) {
@@ -130,7 +131,7 @@ class EvidenceStore extends Component
             EvidenceRecord::find()
                 ->where(['issueId' => $issueId, 'lastRunId' => $latestRunId])
                 ->orderBy(['id' => SORT_ASC])
-                ->limit(max(1, $this->maxPerIssue)),
+                ->limit($this->limit()),
         );
     }
 
@@ -275,5 +276,20 @@ class EvidenceStore extends Component
     private function forDb(DateTimeInterface $when): string
     {
         return Db::prepareDateForDb($when) ?? gmdate('Y-m-d H:i:s');
+    }
+
+    /**
+     * The configured bound, refused before anything is read or kept when it cannot be met, as
+     * {@see Errors} refuses its own.
+     *
+     * @throws InvalidConfigException
+     */
+    private function limit(): int
+    {
+        if ($this->maxPerIssue < 1) {
+            throw new InvalidConfigException(sprintf('Web Doctor\'s evidence component needs a maxPerIssue of at least 1; %d was configured.', $this->maxPerIssue));
+        }
+
+        return $this->maxPerIssue;
     }
 }

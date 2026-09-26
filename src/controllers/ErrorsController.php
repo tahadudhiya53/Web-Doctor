@@ -4,11 +4,13 @@ namespace Tahadudhiya\WebDoctor\controllers;
 
 use Craft;
 use craft\web\Controller;
+use Tahadudhiya\WebDoctor\helpers\RequestInput;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
+use yii\web\BadRequestHttpException;
 use yii\web\NotFoundHttpException;
 use yii\web\Response;
 
@@ -41,10 +43,17 @@ class ErrorsController extends Controller
     public function actionIndex(): Response
     {
         $plugin = $this->plugin();
-        $page = $this->request->getQueryParam('page');
+        $page = RequestInput::page($this->request->getQueryParam('page'));
         $environment = $this->request->getQueryParam('environment');
-        // Only an environment errors have been recorded in, so the query string cannot ask the
-        // database for anything else.
+
+        // Any environment when none is named. One that is named is looked for as it was written,
+        // so an environment nothing has been recorded in shows nothing rather than everything.
+        if ($environment === '') {
+            $environment = null;
+        } elseif ($environment !== null && !is_string($environment)) {
+            throw new BadRequestHttpException(Craft::t('web-doctor', 'That is not an environment.'));
+        }
+
         $environments = [];
         $failure = null;
         $groups = null;
@@ -52,8 +61,7 @@ class ErrorsController extends Controller
 
         try {
             $environments = $plugin->getErrors()->knownEnvironments();
-            $environment = is_string($environment) && in_array($environment, $environments, true) ? $environment : null;
-            $groups = $plugin->getErrors()->find(is_numeric($page) ? (int)$page : 1, $environment);
+            $groups = $plugin->getErrors()->find($page, $environment);
             $issues = $plugin->getIssues()->getMany($groups->issueIds());
         } catch (Throwable $e) {
             SafeException::log('The error list could not be read', $e);

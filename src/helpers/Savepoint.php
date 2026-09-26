@@ -53,7 +53,8 @@ final class Savepoint
     }
 
     /**
-     * The rows a query matches as last committed, for finding the winner after losing a race.
+     * The rows a query matches as last committed, for finding the winner after losing a race or
+     * for changing rows another request may have changed since this transaction first read.
      *
      * An ordinary read will not do. Under REPEATABLE READ — MySQL's default, which Craft keeps —
      * a transaction reads from the snapshot its first read fixed, and the winner committed after

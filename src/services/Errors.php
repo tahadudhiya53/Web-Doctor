@@ -19,6 +19,7 @@ use Tahadudhiya\WebDoctor\models\ErrorRecording;
 use Tahadudhiya\WebDoctor\models\ErrorSignature;
 use Tahadudhiya\WebDoctor\models\ErrorSource;
 use Tahadudhiya\WebDoctor\models\Evidence;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\records\ErrorGroupRecord;
 use Tahadudhiya\WebDoctor\records\ErrorSourceRecord;
 use Tahadudhiya\WebDoctor\WebDoctor;
@@ -238,9 +239,14 @@ class Errors extends Component
      * first.
      *
      * @return list<ErrorGroup>
+     * @throws \InvalidArgumentException for a limit below one.
      */
     public function forIssue(int $issueId, int $limit = 20): array
     {
+        if ($limit < 1) {
+            throw new \InvalidArgumentException(sprintf('A limit of at least 1 is needed; %d was given.', $limit));
+        }
+
         $groupIds = ErrorSourceRecord::find()
             ->select(['errorGroupId'])
             ->distinct()
@@ -255,7 +261,7 @@ class Errors extends Component
             ErrorGroupRecord::find()
                 ->where(['id' => $groupIds])
                 ->orderBy(['lastSeen' => SORT_DESC, 'id' => SORT_DESC])
-                ->limit(max(1, $limit))
+                ->limit($limit)
                 ->all(),
         );
     }
@@ -540,7 +546,9 @@ class Errors extends Component
 
         try {
             return $this->fit(Craft::$app->getSites()->getSiteById($siteId, true)?->getName(), 255);
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            SafeException::log('A site\'s name could not be read for an error group', $e);
+
             return null;
         }
     }

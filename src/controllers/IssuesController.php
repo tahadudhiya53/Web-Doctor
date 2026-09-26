@@ -7,6 +7,8 @@ use craft\web\Controller;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\errors\Refusal;
+use Tahadudhiya\WebDoctor\helpers\RequestInput;
 use Tahadudhiya\WebDoctor\models\ErrorGroup;
 use Tahadudhiya\WebDoctor\models\Investigation;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
@@ -17,7 +19,7 @@ use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
-use yii\base\InvalidArgumentException;
+use yii\web\BadRequestHttpException;
 use yii\web\NotFoundHttpException;
 use yii\web\Response;
 
@@ -57,9 +59,15 @@ class IssuesController extends Controller
         // A request with nothing to say opens on what is outstanding. That default is stated
         // rather than left to an empty filter, because a list that quietly hides closed issues
         // without saying so is a list a reader will eventually be misled by.
-        $filter = $params === [] || !$this->hasFilterParams($params)
-            ? IssueFilter::outstanding()
-            : IssueFilter::fromParams($params);
+        // Every parameter is read, so one that is not a value is refused even on the default view,
+        // and one that is — a sort, a page — is applied to it rather than ignored.
+        try {
+            $filter = IssueFilter::fromParams($params);
+            $filter = $this->hasFilterParams($params) ? $filter : IssueFilter::outstandingAs($filter);
+        } catch (\InvalidArgumentException $e) {
+            // The filter names only the parameter it refused, never a value.
+            throw new BadRequestHttpException(Craft::t('web-doctor', 'The Issue Center cannot filter by that “{name}”.', ['name' => $e->getMessage()]));
+        }
 
         $failure = null;
 
@@ -125,15 +133,16 @@ class IssuesController extends Controller
         }
 
         // Read on its own, so evidence that cannot be read costs the page its evidence rather
-        // than costing the reader the issue.
+        // than costing the reader the issue. The page asked for is read first: a malformed one
+        // is refused, not shown as the first.
+        $page = RequestInput::page($this->request->getQueryParam('evidencePage'));
         $evidenceFailure = null;
         $latestEvidence = [];
         $earlierEvidence = null;
 
         try {
-            $page = $this->request->getQueryParam('evidencePage');
             $latestEvidence = $plugin->getEvidence()->latest($issue->id, $issue->latestRunId);
-            $earlierEvidence = $plugin->getEvidence()->earlier($issue->id, $issue->latestRunId, is_numeric($page) ? (int)$page : 1);
+            $earlierEvidence = $plugin->getEvidence()->earlier($issue->id, $issue->latestRunId, $page);
         } catch (Throwable $e) {
             SafeException::log('An issue\'s evidence could not be read', $e);
             $evidenceFailure = Craft::t('web-doctor', 'Web Doctor could not read the evidence behind this issue. The details are in Craft’s logs.');
@@ -222,7 +231,7 @@ class IssuesController extends Controller
         $this->requirePostRequest();
         $this->requirePermission(Permissions::MANAGE_ISSUES);
 
-        $issueId = (int)$this->request->getRequiredBodyParam('issueId');
+        $issueId = RequestInput::id($this->request->getRequiredBodyParam('issueId'));
         $requested = $this->request->getBodyParam('status');
         $status = is_string($requested) ? IssueStatus::tryFrom($requested) : null;
 
@@ -233,12 +242,15 @@ class IssuesController extends Controller
         }
 
         $note = $this->request->getBodyParam('note');
-        $note = is_string($note) ? $note : null;
+
+        if ($note !== null && !is_string($note)) {
+            throw new BadRequestHttpException(Craft::t('web-doctor', 'A reason is text.'));
+        }
 
         try {
             $before = $this->plugin()->getIssues()->get($issueId);
             $issue = $this->plugin()->getIssues()->transition($issueId, $status, $note, $this->userId());
-        } catch (InvalidArgumentException $e) {
+        } catch (Refusal $e) {
             // Refusals are the service stating its rules — a status nobody may set by hand, a
             // dismissal with no reason — and the reader is the person who needs to hear them.
             $this->setFailFlash($e->getMessage());

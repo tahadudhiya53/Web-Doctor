@@ -14,6 +14,7 @@ use Tahadudhiya\WebDoctor\enums\IssueEventType;
 use Tahadudhiya\WebDoctor\enums\IssueResolution;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\helpers\Savepoint;
@@ -25,6 +26,7 @@ use Tahadudhiya\WebDoctor\models\IssueEvent;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
 use Tahadudhiya\WebDoctor\models\IssueList;
 use Tahadudhiya\WebDoctor\models\IssueReconciliation;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\records\IssueEventRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\WebDoctor;
@@ -149,7 +151,9 @@ class Issues extends Component
         $previousSeverity = Severity::tryFrom((string)$record->severity);
         $previousTitle = (string)$record->title;
 
-        $record->occurrences = (int)$record->occurrences + 1;
+        // Counted in the database, `occurrences + 1`, not from what this request read: two runs
+        // reconciling the same issue at once would otherwise each write the same number and lose one.
+        $record->updateCounters(['occurrences' => 1]);
         $this->applyFinding($record, $result, $run, $detectedAt);
 
         // A resolved issue found again was not resolved. It returns as something nobody has
@@ -245,7 +249,10 @@ class Issues extends Component
         $resolvedAt = $this->forDb($run->finishedAt);
         $count = 0;
 
-        foreach ($query->all() as $record) {
+        // A locking read of what is committed now, not the snapshot this transaction began with:
+        // an issue somebody set to Ignored while the run was reconciling is no longer open, and
+        // an ordinary read would resolve it anyway and write over their reason.
+        foreach (Savepoint::committed($query) as $record) {
             if (!$record instanceof IssueRecord) {
                 continue;
             }
@@ -283,15 +290,17 @@ class Issues extends Component
     public function transition(int $issueId, IssueStatus $to, ?string $note = null, ?int $userId = null): Issue
     {
         if (!$to->isSettableByHand()) {
-            throw new InvalidArgumentException(Craft::t('web-doctor', 'An issue cannot be moved to “{status}” by hand. That state is established by what Web Doctor observes, not by a request.', [
+            throw new Refusal(Craft::t('web-doctor', 'An issue cannot be moved to “{status}” by hand. That state is established by what Web Doctor observes, not by a request.', [
                 'status' => $to->label(),
             ]));
         }
 
-        $note = $note === null ? null : trim($note);
+        // Every kind of space, the invisible ones included: a reason that is only a no-break
+        // space or a zero-width one reads as none, and a dismissal needs one.
+        $note = $note === null ? null : (string)preg_replace('/\A[\s\p{Z}\x{200B}-\x{200D}\x{2060}\x{FEFF}]+|[\s\p{Z}\x{200B}-\x{200D}\x{2060}\x{FEFF}]+\z/u', '', mb_scrub($note, 'UTF-8'));
 
         if ($to->requiresReason() && ($note === null || $note === '')) {
-            throw new InvalidArgumentException(Craft::t('web-doctor', 'Setting an issue to “{status}” is a decision rather than an outcome, so it needs a reason.', [
+            throw new Refusal(Craft::t('web-doctor', 'Setting an issue to “{status}” is a decision rather than an outcome, so it needs a reason.', [
                 'status' => $to->label(),
             ]));
         }
@@ -299,7 +308,7 @@ class Issues extends Component
         $record = IssueRecord::findOne(['id' => $issueId]);
 
         if ($record === null) {
-            throw new InvalidArgumentException(Craft::t('web-doctor', 'No issue exists with the ID {id}.', ['id' => $issueId]));
+            throw new Refusal(Craft::t('web-doctor', 'No issue exists with the ID {id}.', ['id' => $issueId]));
         }
 
         $from = IssueStatus::tryFrom((string)$record->status) ?? IssueStatus::NEW;
@@ -430,13 +439,18 @@ class Issues extends Component
      * An issue's history, most recent first.
      *
      * @return list<IssueEvent>
+     * @throws InvalidArgumentException for a limit below one.
      */
     public function events(int $issueId, int $limit = self::EVENT_LIMIT): array
     {
+        if ($limit < 1) {
+            throw new InvalidArgumentException(sprintf('A limit of at least 1 is needed; %d was given.', $limit));
+        }
+
         $records = IssueEventRecord::find()
             ->where(['issueId' => $issueId])
             ->orderBy(['dateCreated' => SORT_DESC, 'id' => SORT_DESC])
-            ->limit(max(1, $limit))
+            ->limit($limit)
             ->all();
 
         $events = [];
@@ -541,22 +555,51 @@ class Issues extends Component
      */
     public function related(Issue $issue, array $categories, ?string $exceptRunId = null, int $limit = 20): array
     {
+        return $this->nearby($issue->environment, $issue->siteId, $categories, $issue->affectedPlugin, $issue->id, $exceptRunId, $limit);
+    }
+
+    /**
+     * Issues still open in a place — an environment and a site, or no particular site — in one of
+     * the given categories or naming the plugin. What {@see self::related()} answers for an issue,
+     * asked for an investigation that has no issue of its own.
+     *
+     * @param list<DiagnosticCategory> $categories
+     * @param int|null $exceptIssueId The issue being investigated, which is not nearby itself.
+     * @return list<Issue>
+     * @throws InvalidArgumentException for a limit below one.
+     */
+    public function nearby(
+        string $environment,
+        ?int $siteId,
+        array $categories,
+        ?string $plugin = null,
+        ?int $exceptIssueId = null,
+        ?string $exceptRunId = null,
+        int $limit = 20,
+    ): array {
+        if ($limit < 1) {
+            throw new InvalidArgumentException(sprintf('A limit of at least 1 is needed; %d was given.', $limit));
+        }
+
         $near = ['or', ['category' => array_map(static fn(DiagnosticCategory $c): string => $c->value, $categories)]];
 
-        if ($issue->affectedPlugin !== null && $issue->affectedPlugin !== '') {
-            $near[] = ['affectedPlugin' => $issue->affectedPlugin];
+        if ($plugin !== null && $plugin !== '') {
+            $near[] = ['affectedPlugin' => $plugin];
         }
 
         $query = IssueRecord::find()
             ->where([
-                'environment' => $issue->environment,
+                'environment' => $environment,
                 'status' => array_map(static fn(IssueStatus $s): string => $s->value, IssueStatus::open()),
             ])
-            ->andWhere(['not', ['id' => $issue->id]])
             ->andWhere($near);
 
+        if ($exceptIssueId !== null) {
+            $query->andWhere(['not', ['id' => $exceptIssueId]]);
+        }
+
         // "No particular site" is its own place, as it is in the filter.
-        $query->andWhere($this->place($issue->siteId));
+        $query->andWhere($this->place($siteId));
 
         if ($exceptRunId !== null) {
             $query->andWhere(['or', ['latestRunId' => null], ['not', ['latestRunId' => $exceptRunId]]]);
@@ -571,7 +614,7 @@ class Issues extends Component
                 new Expression($db->quoteColumnName('lastDetected') . ' DESC'),
                 new Expression($db->quoteColumnName('id') . ' DESC'),
             ])
-            ->limit(max(1, $limit))
+            ->limit($limit)
             ->all();
 
         foreach ($records as $record) {
@@ -720,7 +763,9 @@ class Issues extends Component
 
         try {
             return $this->fit(Craft::$app->getSites()->getSiteById($siteId)?->getName(), 255);
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            SafeException::log('A site\'s name could not be read for an issue', $e);
+
             return null;
         }
     }

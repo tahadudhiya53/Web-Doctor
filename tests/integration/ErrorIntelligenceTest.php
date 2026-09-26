@@ -271,6 +271,10 @@ class ErrorIntelligenceTest extends TestCase
         $this->errors->record($later);
 
         self::assertCount(2, $this->errors->forIssue((int)$issue->id));
+
+        // A limit that cannot be met is the caller's mistake, refused rather than read as one.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->errors->forIssue((int)$issue->id, 0);
     }
 
     public function testAnErrorOutlivesItsIssueAndItsSourcesGoWithIt(): void
@@ -829,19 +833,29 @@ class ErrorIntelligenceTest extends TestCase
         }
     }
 
-    public function testAMalformedOrStaleRequestShowsTheListRatherThanFailing(): void
+    public function testAStaleRequestIsAnsweredTruthfullyAndAMalformedOneIsRefused(): void
     {
         $this->seedGroup();
         $this->signIn(admin: true);
         $this->request('GET');
 
-        // A page past the end, a page that is not a number, and an environment nothing was
-        // recorded in: the list, on a page that exists, with no filter the database never knew.
-        foreach ([['page' => '9999'], ['page' => 'abc'], ['page' => '-3'], ['environment' => "x' OR 1=1 --"]] as $query) {
-            $html = $this->render('index', 'web-doctor/_errors/_list', [], $query);
+        // A page past the end is the last page there is.
+        $html = $this->render('index', 'web-doctor/_errors/_list', [], ['page' => '9999']);
+        self::assertStringContainsString('Page 1 of', $html);
+        self::assertStringContainsString('RuntimeException', $html);
 
-            self::assertStringContainsString('Page 1 of', $html);
-            self::assertStringContainsString('RuntimeException', $html);
+        // An environment nothing was recorded in shows nothing from it, not everything from the
+        // others, and reaches the query only as a bound value.
+        $html = $this->render('index', 'web-doctor/_errors/_list', [], ['environment' => "x' OR 1=1 --"]);
+        self::assertStringNotContainsString('RuntimeException', $html);
+
+        // A page that is not a number, and an environment that is not text, are refused.
+        foreach ([['page' => 'abc'], ['page' => '-3'], ['page' => '1.5'], ['environment' => ['a']]] as $query) {
+            try {
+                $this->render('index', 'web-doctor/_errors/_list', [], $query);
+                self::fail('A malformed ' . array_key_first($query) . ' was served.');
+            } catch (BadRequestHttpException) {
+            }
         }
 
         // A path segment that is not an ID never reaches the controller: the route only matches

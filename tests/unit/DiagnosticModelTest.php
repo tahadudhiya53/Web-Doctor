@@ -1507,58 +1507,61 @@ class DiagnosticModelTest extends TestCase
         self::assertTrue($filter->hasSeverity(Severity::CRITICAL));
     }
 
-    public function testTheFilterDropsWhatItDoesNotRecogniseRatherThanRefusingIt(): void
+    /**
+     * @return array<string, array{array<string, mixed>, string}>
+     */
+    public static function refusedFilters(): array
     {
-        // A stale bookmark naming something that no longer exists should show the list, not an
-        // error page — but it must not reach the query either.
-        $filter = IssueFilter::fromParams([
-            'status' => ['new', 'nonsense', 'DROP TABLE', ['nested'], 7, null, 'new'],
-            'severity' => ['made-up'],
-        ]);
-
-        self::assertSame([IssueStatus::NEW], $filter->statuses);
-        self::assertSame([], $filter->severities);
+        return [
+            'a status nobody has' => [['status' => ['new', 'nonsense']], 'status'],
+            'a status in the wrong case' => [['status' => 'Ignored'], 'status'],
+            'a status that is a list inside a list' => [['status' => [['new']]], 'status'],
+            'a severity nobody has' => [['severity' => ['made-up']], 'severity'],
+            'a column that cannot be sorted on' => [['sort' => 'id; DROP TABLE'], 'sort'],
+            'a direction that is neither' => [['dir' => 'up'], 'dir'],
+            'a date that is not one' => [['from' => '2026-02-30'], 'from'],
+            'a date with a time' => [['to' => '2026-01-01 10:00'], 'to'],
+            'a site that is not a number' => [['siteId' => 'None'], 'siteId'],
+            'a check name longer than an ID' => [['diagnostic' => str_repeat('a', 101)], 'diagnostic'],
+            'an environment that is a list' => [['environment' => ['production']], 'environment'],
+            'page zero' => [['page' => '0'], 'page'],
+            'a fractional page' => [['page' => '1.5'], 'page'],
+            'a page with a trailing newline' => [['page' => "2\n"], 'page'],
+            'a page in words' => [['page' => 'seven'], 'page'],
+            'more per page than a page may hold' => [['perPage' => (string)(IssueFilter::MAX_PER_PAGE + 1)], 'perPage'],
+        ];
     }
 
-    public function testOnlyAKnownColumnCanBeSortedOn(): void
+    /**
+     * A value sent is taken exactly or refused, naming the parameter. Dropped, a status nobody has
+     * would have widened the list to every status, closed ones included.
+     *
+     * @param array<string, mixed> $params
+     */
+    #[DataProvider('refusedFilters')]
+    public function testAFilterValueThatIsNotOneIsRefusedRatherThanDropped(array $params, string $name): void
     {
-        foreach (['id; DROP TABLE', 'fingerprint', 'latestResult'] as $refused) {
-            self::assertSame('lastDetected', IssueFilter::fromParams(['sort' => $refused])->sort, $refused);
-        }
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage($name);
+
+        IssueFilter::fromParams($params);
+    }
+
+    public function testWhatAFormSendsForAnyKeepsTheDefault(): void
+    {
+        $filter = IssueFilter::fromParams(['status' => '', 'severity' => [], 'siteId' => '', 'from' => '', 'sort' => '', 'page' => '']);
+
+        self::assertEquals(new IssueFilter(), $filter);
+        self::assertSame('queue.backlog', IssueFilter::fromParams(['diagnostic' => '  queue.backlog  '])->diagnosticId);
+        self::assertSame('2026-01-31', IssueFilter::fromParams(['from' => '2026-01-31'])->detectedFrom);
+        self::assertSame(9, IssueFilter::fromParams(['page' => '9'])->page);
+        self::assertSame(IssueFilter::MAX_PER_PAGE, IssueFilter::fromParams(['perPage' => (string)IssueFilter::MAX_PER_PAGE])->perPage);
+        self::assertSame(100, (new IssueFilter(page: 3, perPage: 50))->offset());
 
         foreach (IssueFilter::SORTABLE as $name => $column) {
             self::assertSame($name, IssueFilter::fromParams(['sort' => $name])->sort);
             self::assertMatchesRegularExpression('/\A[A-Za-z]+\z/', $column);
         }
-    }
-
-    public function testADateThatIsNotOneIsDropped(): void
-    {
-        foreach (['yesterday', '2026-13-45', '2026-02-30', '12/01/2026', '2026-01-01 10:00'] as $bad) {
-            self::assertNull(IssueFilter::fromParams(['from' => $bad])->detectedFrom, $bad);
-        }
-
-        self::assertSame('2026-01-31', IssueFilter::fromParams(['from' => '2026-01-31'])->detectedFrom);
-    }
-
-    public function testFreeTextIsTrimmedAndBounded(): void
-    {
-        self::assertSame('queue.backlog', IssueFilter::fromParams(['diagnostic' => '  queue.backlog  '])->diagnosticId);
-        self::assertNull(IssueFilter::fromParams(['diagnostic' => '   '])->diagnosticId);
-        self::assertSame(100, mb_strlen((string)IssueFilter::fromParams(['diagnostic' => str_repeat('a', 500)])->diagnosticId));
-        self::assertSame(255, mb_strlen((string)IssueFilter::fromParams(['environment' => str_repeat('b', 500)])->environment));
-    }
-
-    public function testPagingIsClampedToSomethingASiteCanServe(): void
-    {
-        foreach (['0', '-4', 'seven'] as $nonsense) {
-            self::assertSame(1, IssueFilter::fromParams(['page' => $nonsense])->page, $nonsense);
-        }
-
-        self::assertSame(9, IssueFilter::fromParams(['page' => '9'])->page);
-        self::assertSame(IssueFilter::MAX_PER_PAGE, IssueFilter::fromParams(['perPage' => '100000'])->perPage);
-        self::assertSame(IssueFilter::PER_PAGE, IssueFilter::fromParams([])->perPage);
-        self::assertSame(100, (new IssueFilter(page: 3, perPage: 50))->offset());
     }
 
     public function testIssuesBelongingToNoParticularSiteCanBeAskedFor(): void

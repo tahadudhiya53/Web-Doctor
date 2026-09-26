@@ -8,6 +8,7 @@ use craft\web\Request as WebRequest;
 use craft\web\Response as WebResponse;
 use craft\web\TemplateResponseBehavior;
 use craft\web\View;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
@@ -28,6 +29,7 @@ use Tahadudhiya\WebDoctor\Tests\_support\FailingCache;
 use Tahadudhiya\WebDoctor\Tests\_support\RecordingOverviewController;
 use Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic;
 use Tahadudhiya\WebDoctor\Tests\_support\TestUser;
+use Tahadudhiya\WebDoctor\Tests\_support\WebDoctorTables;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use yii\base\Component;
 use yii\caching\ArrayCache;
@@ -47,6 +49,9 @@ class HealthDashboardTest extends TestCase
 {
     /** @var string The permission Craft itself demands of anyone reaching the control panel. */
     private const ACCESS_CP = 'accessCp';
+
+    /** @var string A parameter left out of the request, as against one sent empty. */
+    private const MISSING = '(missing)';
 
     private WebDoctor $plugin;
     private TestDiagnostic $diagnostic;
@@ -361,14 +366,91 @@ class HealthDashboardTest extends TestCase
         self::assertSame('deep', $this->plugin->getRuns()->latest($this->siteId())?->context->depth->value);
     }
 
-    public function testADepthWebDoctorDoesNotHaveFallsBackToTheNormalOne(): void
+    /**
+     * @return array<string, array{mixed, string|null}>
+     */
+    public static function requestedDepths(): array
+    {
+        return [
+            'shallow' => ['shallow', 'shallow'],
+            'normal' => ['normal', 'normal'],
+            'deep' => ['deep', 'deep'],
+            'missing' => [self::MISSING, 'normal'],
+            'a depth Web Doctor does not have' => ['exhaustive', null],
+            'empty' => ['', null],
+            'the wrong case' => ['Deep', null],
+            'a list' => [['deep'], null],
+        ];
+    }
+
+    /**
+     * Missing, a run is at normal depth, as the form states. Anything that is not one of the three
+     * depths is refused before anything runs, is remembered or is written.
+     */
+    #[DataProvider('requestedDepths')]
+    public function testARunIsAtExactlyTheDepthAskedForOrNotAtAll(mixed $requested, ?string $expected): void
     {
         $this->signIn(admin: true);
-        $this->post(['all' => '1', 'depth' => 'exhaustive']);
+        $this->post($requested === self::MISSING ? ['all' => '1'] : ['all' => '1', 'depth' => $requested]);
+
+        if ($expected === null) {
+            $before = WebDoctorTables::snapshot();
+
+            try {
+                $this->controller()->runAction('run');
+                self::fail('A run was started at a depth Web Doctor does not have.');
+            } catch (BadRequestHttpException) {
+            }
+
+            self::assertSame(0, $this->diagnostic->runs);
+            self::assertNull($this->plugin->getRuns()->latest($this->siteId()));
+            self::assertSame($before, WebDoctorTables::snapshot());
+
+            return;
+        }
 
         $this->controller()->runAction('run');
 
-        self::assertSame('normal', $this->plugin->getRuns()->latest($this->siteId())?->context->depth->value);
+        self::assertSame($expected, $this->plugin->getRuns()->latest($this->siteId())?->context->depth->value);
+    }
+
+    /**
+     * @return array<string, array{array<string, mixed>}>
+     */
+    public static function malformedChoices(): array
+    {
+        return [
+            'all as a word' => [['all' => 'yes']],
+            'all as zero' => [['all' => '0']],
+            'all as a list' => [['all' => ['1']]],
+            'one check, not a list' => [['diagnostics' => 'tests.dashboard']],
+            'checks keyed by name' => [['diagnostics' => ['a' => 'tests.dashboard']]],
+            'a check that is a list' => [['diagnostics' => [['tests.dashboard']]]],
+        ];
+    }
+
+    /**
+     * What to run is stated in the form's own shape or refused: `all=yes` does not run
+     * everything, and a malformed selection does not run whatever part of it could be read.
+     *
+     * @param array<string, mixed> $params
+     */
+    #[DataProvider('malformedChoices')]
+    public function testARunWhoseChoiceIsMalformedIsRefusedWithNothingRun(array $params): void
+    {
+        $this->signIn(admin: true);
+        $this->post($params);
+        $before = WebDoctorTables::snapshot();
+
+        try {
+            $this->controller()->runAction('run');
+            self::fail('A malformed choice of checks was run.');
+        } catch (BadRequestHttpException) {
+        }
+
+        self::assertSame(0, $this->diagnostic->runs);
+        self::assertNull($this->plugin->getRuns()->latest($this->siteId()));
+        self::assertSame($before, WebDoctorTables::snapshot());
     }
 
     // Access ---------------------------------------------------------------

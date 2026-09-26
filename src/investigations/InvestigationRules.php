@@ -48,7 +48,7 @@ final class InvestigationRules
                 related: [
                     RelatedArea::category(Category::ENVIRONMENT, Craft::t('web-doctor', 'Mailer settings usually come from environment variables.')),
                     RelatedArea::check('queue.failedJobs', Craft::t('web-doctor', 'Mail sent from a queue job records the transport’s error when it fails.')),
-                    RelatedArea::check('queue.backlog', Craft::t('web-doctor', 'Mail waiting behind a stalled queue is never sent.')),
+                    RelatedArea::check('queue.backlog', Craft::t('web-doctor', 'Mail a plugin queued waits behind a stalled queue until it runs again.')),
                 ],
                 leads: [$logs, Craft::t('web-doctor', 'The mail provider’s own delivery log.')],
             ),

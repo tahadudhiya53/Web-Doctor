@@ -35,6 +35,7 @@ use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\Tests\_support\RecordingIssuesController;
 use Tahadudhiya\WebDoctor\Tests\_support\TestUser;
+use Tahadudhiya\WebDoctor\Tests\_support\WebDoctorTables;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use yii\base\Component;
 use yii\base\InvalidArgumentException;
@@ -403,6 +404,88 @@ class IssueCenterTest extends TestCase
 
         self::assertSame(2, $issue->occurrences);
         self::assertSame([], $this->eventTypes($issue));
+    }
+
+    /**
+     * Somebody ignores an issue while a run that no longer reports it is reconciling. Their
+     * decision commits after the run's transaction first read, so a snapshot read would still see
+     * the issue open, resolve it and write over their reason.
+     */
+    public function testADecisionMadeWhileARunReconcilesIsNotOverturnedByIt(): void
+    {
+        $this->issues->reconcile($this->diagnosticRun([$this->finding(affectedComponent: 'a')]));
+        $decided = $this->only();
+
+        $run = new class() extends Issues {
+            /** @var callable|null */
+            public $decide;
+
+            protected function findByFingerprint(string $fingerprint): ?IssueRecord
+            {
+                $found = parent::findByFingerprint($fingerprint);
+
+                if ($this->decide !== null) {
+                    ($this->decide)();
+                    $this->decide = null;
+                }
+
+                return $found;
+            }
+        };
+        $run->decide = static function() use ($decided): void {
+            $other = clone Craft::$app->getDb();
+            $other->open();
+            $other->createCommand()->update(IssueRecord::TABLE, [
+                'status' => IssueStatus::IGNORED->value,
+                'statusNote' => 'Known and accepted.',
+            ], ['id' => $decided->id])->execute();
+            $other->close();
+        };
+
+        $outcome = $run->reconcile($this->diagnosticRun([$this->finding(affectedComponent: 'b')]));
+
+        self::assertSame(0, $outcome->resolved);
+
+        $row = IssueRecord::findOne($decided->id);
+        self::assertInstanceOf(IssueRecord::class, $row);
+        self::assertSame(IssueStatus::IGNORED->value, $row->status);
+        self::assertSame('Known and accepted.', $row->statusNote);
+    }
+
+    /**
+     * Another run records a sighting of the same issue after this one read it. Both are counted.
+     */
+    public function testTwoRunsSeeingOneIssueAtOnceAreBothCounted(): void
+    {
+        $this->issues->reconcile($this->diagnosticRun([$this->finding()]));
+        $issue = $this->only();
+
+        $run = new class() extends Issues {
+            /** @var callable|null */
+            public $meanwhile;
+
+            protected function findByFingerprint(string $fingerprint): ?IssueRecord
+            {
+                $found = parent::findByFingerprint($fingerprint);
+
+                if ($this->meanwhile !== null) {
+                    ($this->meanwhile)();
+                    $this->meanwhile = null;
+                }
+
+                return $found;
+            }
+        };
+        $run->meanwhile = static function() use ($issue): void {
+            $other = clone Craft::$app->getDb();
+            $other->open();
+            $other->createCommand()->update(IssueRecord::TABLE, ['occurrences' => new \yii\db\Expression('[[occurrences]] + 1')], ['id' => $issue->id])->execute();
+            $other->close();
+        };
+
+        $run->reconcile($this->diagnosticRun([$this->finding()]));
+
+        self::assertSame(3, $this->only()->occurrences);
     }
 
     public function testTheDatabaseItselfRefusesASecondIssueForOneFingerprint(): void
@@ -1705,12 +1788,132 @@ class IssueCenterTest extends TestCase
         self::assertSame(IssueStatus::NEW, $this->reread($issue)->status);
         self::assertSame('fail', $this->flash($controller)['level']);
         self::assertStringContainsString('reason', $this->flash($controller)['message']);
+
+        // Space a reader cannot see is not a reason either.
+        foreach (["\u{00A0}", "\u{200B}\u{3000}", " \u{FEFF}\t"] as $invisible) {
+            $this->post(['issueId' => $issue->id, 'status' => IssueStatus::IGNORED->value, 'note' => $invisible]);
+            $controller = $this->controller();
+            $controller->runAction('update-status');
+
+            self::assertSame(IssueStatus::NEW, $this->reread($issue)->status, json_encode($invisible));
+            self::assertStringContainsString('reason', $this->flash($controller)['message']);
+        }
+
+        // A reason that is not text is refused, not read as none.
+        $this->post(['issueId' => $issue->id, 'status' => IssueStatus::CONFIRMED->value, 'note' => ['a reason']]);
+        $this->expectException(BadRequestHttpException::class);
+        $this->controller()->runAction('update-status');
+    }
+
+    /**
+     * A list asked for with a value that is not one is refused, not shown some other way: a status
+     * nobody has would have listed every status, closed ones included.
+     */
+    public function testAListAskedForWithAMalformedValueIsRefused(): void
+    {
+        $issue = $this->seedIssue();
+        $this->signIn(admin: true);
+
+        foreach ([
+            ['index', ['status' => 'Ignored']],
+            ['index', ['page' => '1.5']],
+            ['detail', ['evidencePage' => '1.5']],
+        ] as [$action, $query]) {
+            $this->request('GET')->setQueryParams($query);
+
+            try {
+                $this->controller()->runAction($action, $action === 'detail' ? ['issueId' => $issue->id] : []);
+                self::fail('A malformed ' . array_key_first($query) . ' was served.');
+            } catch (BadRequestHttpException) {
+            }
+        }
+
+        // Written as the form writes it, the same request is served.
+        $this->request('GET')->setQueryParams(['status' => ['ignored'], 'page' => '1']);
+        self::assertSame([IssueStatus::IGNORED], $this->variables('index')['filter']->statuses);
+    }
+
+    /**
+     * Only Web Doctor's own refusals are shown as they were written. Yii and Craft raise the same
+     * base exception with messages that can quote internals, and those are logged instead.
+     */
+    public function testAnInternalInvalidArgumentIsNotShownToTheReader(): void
+    {
+        $issue = $this->seedIssue();
+        $this->plugin->set('issues', new class() extends Issues {
+            public function transition(int $issueId, IssueStatus $to, ?string $note = null, ?int $userId = null): Issue
+            {
+                throw new \yii\base\InvalidArgumentException('SELECT * FROM `secrets` WHERE password=hunter2');
+            }
+        });
+        $this->signIn(admin: true);
+        $this->post(['issueId' => $issue->id, 'status' => IssueStatus::CONFIRMED->value]);
+
+        $controller = $this->controller();
+        $controller->runAction('update-status');
+
+        self::assertSame('fail', $this->flash($controller)['level']);
+        self::assertStringContainsString('could not be updated', $this->flash($controller)['message']);
+        self::assertStringNotContainsString('SELECT', $this->flash($controller)['message']);
+    }
+
+    /**
+     * An issue ID has to be one: read as a number, `12abc` would change issue 12.
+     */
+    public function testAnIssueIdThatIsNotANumberIsRefusedAndChangesNothing(): void
+    {
+        $issue = $this->seedIssue();
+        $this->signIn(admin: true);
+        $before = WebDoctorTables::snapshot();
+
+        foreach ([$issue->id . 'abc', $issue->id . "\n", 'abc', ['1'], '-1', ''] as $malformed) {
+            $this->post(['issueId' => $malformed, 'status' => IssueStatus::CONFIRMED->value]);
+
+            try {
+                $this->controller()->runAction('update-status');
+                self::fail('A malformed issue ID was accepted: ' . json_encode($malformed));
+            } catch (BadRequestHttpException) {
+            }
+        }
+
+        self::assertSame(IssueStatus::NEW, $this->reread($issue)->status);
+        self::assertSame($before, WebDoctorTables::snapshot());
+    }
+
+    /**
+     * A bound that cannot be met is a misconfiguration, refused before anything is read or kept,
+     * rather than quietly read as a bound of one.
+     */
+    public function testABoundBelowOneIsRefusedRatherThanReadAsOne(): void
+    {
+        $issue = $this->seedIssue();
+        $before = WebDoctorTables::snapshot();
+
+        foreach ([0, -1] as $bound) {
+            $store = new EvidenceStore(['maxPerIssue' => $bound]);
+            $this->issues->evidence = $store;
+
+            foreach ([
+                'keeping evidence' => fn() => $this->issues->reconcile($this->diagnosticRun([$this->finding(evidence: [new Evidence(type: EvidenceType::CONFIGURATION, label: 'Settings', source: 'tests.check', data: ['value' => 1])])])),
+                'reading evidence' => fn() => $store->latest($issue->id, $issue->latestRunId),
+                'reading history' => fn() => $this->issues->events($issue->id, $bound),
+            ] as $what => $call) {
+                try {
+                    $call();
+                    self::fail("$what accepted a bound of $bound.");
+                } catch (\yii\base\InvalidConfigException|InvalidArgumentException) {
+                }
+            }
+        }
+
+        self::assertSame($before, WebDoctorTables::snapshot());
     }
 
     public function testChangingAnIssueThatDoesNotExistFailsWithoutBlowingUp(): void
     {
         $this->signIn(admin: true);
-        $this->post(['issueId' => 0, 'status' => IssueStatus::CONFIRMED->value]);
+        // Well formed, and naming nothing: refused and said so.
+        $this->post(['issueId' => '999999999', 'status' => IssueStatus::CONFIRMED->value]);
 
         $controller = $this->controller();
         $controller->runAction('update-status');

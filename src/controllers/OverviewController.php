@@ -5,6 +5,7 @@ namespace Tahadudhiya\WebDoctor\controllers;
 use Craft;
 use craft\web\Controller;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
+use Tahadudhiya\WebDoctor\helpers\RequestInput;
 use Tahadudhiya\WebDoctor\models\Dashboard;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
@@ -95,12 +96,19 @@ class OverviewController extends Controller
         $this->requirePermission(Permissions::RUN);
 
         $plugin = $this->plugin();
+        // Read before the boundary below, which turns failures into a notice: a malformed depth
+        // is a refused request, not a run at some other depth.
+        $depth = RequestInput::depth($this->request->getBodyParam('depth'));
+        $all = RequestInput::flag($this->request->getBodyParam('all'));
+        $requested = RequestInput::names($this->request->getBodyParam('diagnostics'));
 
         try {
             $selected = [];
 
-            if (!$this->request->getBodyParam('all')) {
-                $selected = $this->selectedIds($plugin->getDiagnostics()->ids());
+            if (!$all) {
+                // Among the checks that exist: a request can choose, but cannot introduce one. A check
+                // removed since the page was drawn is dropped rather than refusing the rest.
+                $selected = array_values(array_intersect($plugin->getDiagnostics()->ids(), $requested));
 
                 if ($selected === []) {
                     $this->setFailFlash(Craft::t('web-doctor', 'No registered checks were selected, so nothing was run.'));
@@ -109,7 +117,7 @@ class OverviewController extends Controller
                 }
             }
 
-            $context = DiagnosticContext::current($this->depth());
+            $context = DiagnosticContext::current($depth);
             $engine = $plugin->getDiagnosticEngine();
 
             $run = $selected === []
@@ -193,41 +201,6 @@ class OverviewController extends Controller
         }
 
         return implode(' ', $parts);
-    }
-
-    /**
-     * Which checks the request asked for, reduced to the ones that exist.
-     *
-     * One field, read explicitly and matched against the registry, so a request can choose among
-     * the checks that exist but cannot introduce one. The registry's order is kept.
-     *
-     * @param string[] $registered
-     * @return string[]
-     */
-    private function selectedIds(array $registered): array
-    {
-        $requested = $this->request->getBodyParam('diagnostics');
-
-        if (!is_array($requested)) {
-            return [];
-        }
-
-        $requested = array_filter($requested, static fn(mixed $id): bool => is_string($id));
-
-        return array_values(array_intersect($registered, $requested));
-    }
-
-    /**
-     * How far the run should go. A depth Web Doctor does not have is the normal one, rather than
-     * a failed request over a query string.
-     */
-    private function depth(): DiagnosticDepth
-    {
-        $requested = $this->request->getBodyParam('depth');
-
-        return is_string($requested)
-            ? DiagnosticDepth::tryFrom($requested) ?? DiagnosticDepth::NORMAL
-            : DiagnosticDepth::NORMAL;
     }
 
     /**
