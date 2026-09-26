@@ -1391,13 +1391,19 @@ class InvestigationTest extends TestCase
         self::assertSame(Evidence::encode($stored), Evidence::encode(RootCause::fromRecord($record)));
 
         // A row claiming more than its rule allows is data saying something the rule never could:
-        // the character-set cause reads back held to its ceiling however the row was altered. A
-        // rule no longer written out has no ceiling to hold it to, and keeps what it concluded.
+        // the character-set cause reads back held to its ceiling however the row was altered.
         self::assertSame(Confidence::LIKELY, RootCauseRules::all()[array_search('database.characterSet', array_map(static fn($r): string => $r->id, RootCauseRules::all()), true)]->ceiling);
         $record->confidence = Confidence::CONFIRMED->value;
         self::assertSame(Confidence::LIKELY, RootCause::fromRecord($record)->confidence);
-        $record->ruleId = 'tests.removedRule';
-        self::assertSame(Confidence::CONFIRMED, RootCause::fromRecord($record)->confidence);
+        // Nor is it confirmed under a rule whose ceiling admits it but which has nothing that can
+        // establish it, nor under a rule removed since, without a stored outcome confirming it.
+        foreach (['database.serverUnreachable', 'tests.removedRule'] as $ruleId) {
+            $record->ruleId = $ruleId;
+            self::assertSame(Confidence::HIGH, RootCause::fromRecord($record)->confidence, $ruleId);
+        }
+        // A removed rule otherwise keeps what it concluded.
+        $record->confidence = Confidence::HIGH->value;
+        self::assertSame(Confidence::HIGH, RootCause::fromRecord($record)->confidence);
 
         // And the page has what it needs to show the requirement as evidence.
         $this->signIn(admin: true);

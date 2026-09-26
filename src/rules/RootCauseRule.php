@@ -44,6 +44,10 @@ final class RootCauseRule
         public readonly array $nextSteps,
         public readonly ?string $limitation = null,
     ) {
+        // Informational is not a way a cause is held, so it cannot be how firmly one may be.
+        if (!in_array($ceiling, RootCause::LADDER, true)) {
+            throw new \InvalidArgumentException(sprintf('The cause "%s" has the ceiling "%s", which is not a confidence a cause can be held at.', $id, $ceiling->value));
+        }
     }
 
     /**

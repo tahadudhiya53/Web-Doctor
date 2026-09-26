@@ -1305,6 +1305,12 @@ class DiagnosticModelTest extends TestCase
             'another reply after "message"' => [$error(['message' => 'Message 550 was rejected']), $error(['message' => 'Message 421 was rejected'])],
             // A three-part version is not an address.
             'another version' => [$error(['message' => 'Requires PHP 8.2.1 or later']), $error(['message' => 'Requires PHP 8.3.0 or later'])],
+            // A login in a URL is followed by the host, and the host tells two services apart.
+            'another host behind a URL login' => [$error(['message' => 'Connection to redis://cache@redis-a.internal:6379 refused']), $error(['message' => 'Connection to redis://cache@redis-b.internal:6379 refused'])],
+            'another package version' => [$error(['message' => 'Package craftcms/cms@5.1.0 not satisfiable']), $error(['message' => 'Package craftcms/cms@5.2.0 not satisfiable'])],
+            // A large number followed by what it counts is a count, not a moment.
+            'another count that looks like a moment' => [$error(['message' => 'Expected 1234567890 rows']), $error(['message' => 'Expected 1987654321 rows'])],
+            'another class with several digits' => [$error(['message' => 'Class Foo2Bar3Baz4QuxQuuxCorgeGrault not found']), $error(['message' => 'Class Foo2Bar3Baz4QuxQuuxCorgeGraulx not found'])],
             'another SQL statement' => [$error(['message' => 'Deadlock found when trying to get lock on UPDATE craft_elements']), $error(['message' => 'Deadlock found when trying to get lock on DELETE craft_elements'])],
             'another plugin in the origin' => [$error(['origin' => self::ROOT . '/vendor/verbb/formie/src/Formie.php:10']), $error(['origin' => self::ROOT . '/vendor/verbb/navigation/src/Formie.php:10'])],
             'another site number' => [$error(['message' => 'Nothing in site 1']), $error(['message' => 'Nothing in site 2'])],
@@ -1364,6 +1370,10 @@ class DiagnosticModelTest extends TestCase
         self::assertSame('modules/Foo.php:12', ErrorNormalizer::origin(self::ROOT . '/modules/Foo.php:12', self::ROOT . '/'));
         self::assertSame('vendor/craftcms/cms/src/Craft.php:9', ErrorNormalizer::origin('/elsewhere/vendor/craftcms/cms/src/Craft.php:9'));
         self::assertSame('/srv/releases/{release}/app.php:3', ErrorNormalizer::origin('/srv/releases/20260101000000/app.php:3'));
+        // Deployer's own numbering, as well as timestamps.
+        self::assertSame('/srv/releases/{release}/app.php:3', ErrorNormalizer::origin('/srv/releases/123/app.php:3'));
+        // An address in text is still one.
+        self::assertSame('Mail to {email} bounced', ErrorNormalizer::message('Mail to jo.bloggs+x@example.co.uk bounced'));
         self::assertSame('/opt/app/index.php:3', ErrorNormalizer::origin('/opt/app/index.php:3'));
         self::assertSame('Cannot write @root/storage/x.txt', ErrorNormalizer::message('Cannot write ' . self::ROOT . '/storage/x.txt', self::ROOT));
 

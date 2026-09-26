@@ -212,7 +212,15 @@ class Diagnostics extends Component
         }
 
         $event = new RegisterDiagnosticsEvent();
-        $this->trigger(self::EVENT_REGISTER_DIAGNOSTICS, $event);
+
+        // A handler that throws costs its own diagnostics and those of the handlers after it,
+        // never the ones already contributed or Web Doctor's own. Uncaught, it would escape this
+        // first read, and every later read would find the registry already loaded without them.
+        try {
+            $this->trigger(self::EVENT_REGISTER_DIAGNOSTICS, $event);
+        } catch (Throwable $e) {
+            SafeException::log('A plugin failed while contributing diagnostics', $e);
+        }
 
         foreach ($event->diagnostics as $diagnostic) {
             // One plugin's mistake must not take the registry down with it. `Throwable` rather

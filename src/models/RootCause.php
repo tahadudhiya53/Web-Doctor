@@ -10,6 +10,7 @@ use Tahadudhiya\WebDoctor\enums\ConditionRole;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\records\RootCauseRecord;
+use Tahadudhiya\WebDoctor\rules\RootCauseRule;
 use Tahadudhiya\WebDoctor\rules\RootCauseRules;
 use Throwable;
 
@@ -140,19 +141,19 @@ final class RootCause implements JsonSerializable
     /**
      * The ceiling of the rule with this ID, where one is still written out.
      */
-    private static function ceilingOf(string $ruleId): ?Confidence
+    private static function ruleOf(string $ruleId): ?RootCauseRule
     {
-        static $ceilings = null;
+        static $rules = null;
 
-        if ($ceilings === null) {
-            $ceilings = [];
+        if ($rules === null) {
+            $rules = [];
 
             foreach (RootCauseRules::all() as $rule) {
-                $ceilings[$rule->id] = $rule->ceiling;
+                $rules[$rule->id] = $rule;
             }
         }
 
-        return $ceilings[$ruleId] ?? null;
+        return $rules[$ruleId] ?? null;
     }
 
     /**
@@ -265,8 +266,19 @@ final class RootCause implements JsonSerializable
         $confidence = $confidence !== null && in_array($confidence, self::LADDER, true) ? $confidence : Confidence::POSSIBLE;
         // A row is data, and data can say anything: a cause read back is held to its rule's
         // ceiling as firmly as one just weighed. A rule removed since has no ceiling to apply.
-        $ceiling = self::ceilingOf((string)$record->ruleId);
-        $confidence = $ceiling === null ? $confidence : self::capped($confidence, $ceiling);
+        $rule = self::ruleOf((string)$record->ruleId);
+        $confidence = $rule === null ? $confidence : self::capped($confidence, $rule->ceiling);
+
+        // And confirmed only as it could have been reached: a rule that can confirm, an outcome
+        // stored as confirming it, and nothing stored against it. Otherwise it was never earned.
+        if ($confidence === Confidence::CONFIRMED) {
+            $confirming = array_filter($conditions, static fn(ConditionOutcome $c): bool => $c->confirms());
+            $against = array_filter($conditions, static fn(ConditionOutcome $c): bool => $c->role === ConditionRole::CONTRADICTING && $c->met());
+
+            if ($rule?->canConfirm() === false || $confirming === [] || $against !== []) {
+                $confidence = Confidence::HIGH;
+            }
+        }
 
         return new self(
             ruleId: (string)$record->ruleId,

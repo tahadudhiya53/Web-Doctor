@@ -182,9 +182,13 @@ final class ErrorNormalizer
             '/\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b/i' => '{ip}',
             '/\b(?:\d{1,3}\.){3}\d{1,3}\b/' => '{ip}',
             '/\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/' => '{time}',
-            // Not when a unit follows: 1073741824 bytes is an amount, handled with the others below.
-            '/\b1\d{9}(?:\d{3}|\.\d+)?\b(?!\s?(?:' . self::UNITS . ')\b)/' => '{timestamp}',
-            '/\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b/' => '{email}',
+            // Not when a unit follows — 1073741824 bytes is an amount, handled with the others
+            // below — nor something counted: "1234567890 rows" is how many, not when.
+            '/\b1\d{9}(?:\d{3}|\.\d+)?\b(?!\s?(?:' . self::UNITS . ')\b)(?!\s+(?:' . self::COUNTED_NOUNS . ')s?\b)/i' => '{timestamp}',
+            // Not straight after `/` or `:`, where `user@host` is a URL's login and `pkg@1.2` a
+            // package version, and only under a name with a top-level domain: the host is what
+            // tells two services apart.
+            '/(?<![\w.+%\/:-])[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b/' => '{email}',
             // Memory addresses and hashes. An address is nine or more hex digits; eight or fewer is
             // an error code — `0x80070005` — and kept. Long random tokens are recognised below.
             '/\b0x[0-9a-f]{9,}\b/i' => '{hex}',
@@ -226,7 +230,11 @@ final class ErrorNormalizer
     {
         return (string)preg_replace_callback(
             '/\b[A-Za-z0-9]{24,}\b/',
-            static fn(array $m): string => preg_match('/[A-Za-z]/', $m[0]) === 1 && preg_match_all('/\d+/', $m[0]) >= 3 ? '{token}' : $m[0],
+            // A name built of capitalised words — `Foo2Bar3Baz4QuxQuux` — is a class, however many
+            // digits it carries, and never a token.
+            static fn(array $m): string => preg_match('/[A-Za-z]/', $m[0]) === 1
+                && preg_match_all('/\d+/', $m[0]) >= 3
+                && preg_match('/\A(?:[A-Z][a-z]{2,}\d*)+\z/', $m[0]) !== 1 ? '{token}' : $m[0],
             $text,
         );
     }
@@ -301,7 +309,7 @@ final class ErrorNormalizer
 
     private static function releaseDirectories(string $text): string
     {
-        return (string)preg_replace('~/releases/\d{6,}(?=/)~', '/releases/{release}', $text);
+        return (string)preg_replace('~/releases/\d+(?=/)~', '/releases/{release}', $text);
     }
 
     /**

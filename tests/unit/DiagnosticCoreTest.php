@@ -211,6 +211,21 @@ class DiagnosticCoreTest extends TestCase
         self::assertSame(1, count($registry->all()));
     }
 
+    public function testAHandlerThatThrowsCostsOnlyWhatItAndLaterHandlersWouldHaveAdded(): void
+    {
+        $registry = new Diagnostics();
+        $registry->on(Diagnostics::EVENT_REGISTER_DIAGNOSTICS, function(RegisterDiagnosticsEvent $event): void {
+            $event->diagnostics[] = $this->diagnostic('goodPlugin.check');
+        });
+        $registry->on(Diagnostics::EVENT_REGISTER_DIAGNOSTICS, static function(): void {
+            throw new \RuntimeException('A contributor broke.');
+        });
+
+        // The first read, where the handler throws, and every read after it.
+        self::assertSame(['goodPlugin.check'], $registry->ids());
+        self::assertSame(['goodPlugin.check'], $registry->ids());
+    }
+
     public function testSomethingThatIsNotADiagnosticAtAllIsRejectedWithoutBreakingTheRest(): void
     {
         $registry = new Diagnostics();

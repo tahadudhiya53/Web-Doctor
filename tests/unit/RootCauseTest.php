@@ -48,6 +48,22 @@ class RootCauseTest extends TestCase
 
     // --- Positive correlation: separate signals, one probable cause.
 
+    public function testInformationalIsNotACeilingACauseCanHave(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        new \Tahadudhiya\WebDoctor\rules\RootCauseRule(
+            id: 'tests.informational',
+            title: 'A cause',
+            statement: 'A cause.',
+            explains: null,
+            conditions: [],
+            ceiling: Confidence::INFORMATIONAL,
+            recommendation: 'Do something.',
+            nextSteps: [],
+        );
+    }
+
     public function testADatabaseErrorACharsetMismatchAndAFailedWriteAreOneProbableCause(): void
     {
         $analysis = (new RootCauses())->analyse(self::case(self::issue('database.charset', Category::DATABASE), [

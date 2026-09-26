@@ -140,7 +140,8 @@ final class Observation implements JsonSerializable
             issueId: is_numeric($stored['issueId'] ?? null) ? (int)$stored['issueId'] : null,
             errorFingerprint: $text($stored['errorFingerprint'] ?? null),
             evidenceDigest: $text($stored['evidenceDigest'] ?? null),
-            confirmed: (bool)($stored['confirmed'] ?? false),
+            // Only a stored true: `"false"` from a malformed row would otherwise read as confirmed.
+            confirmed: ($stored['confirmed'] ?? false) === true,
             at: $at,
         );
     }
