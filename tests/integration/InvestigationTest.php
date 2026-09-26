@@ -39,6 +39,7 @@ use Tahadudhiya\WebDoctor\models\Investigation;
 use Tahadudhiya\WebDoctor\models\InvestigationPlan;
 use Tahadudhiya\WebDoctor\models\InvestigationStep;
 use Tahadudhiya\WebDoctor\models\Issue;
+use Tahadudhiya\WebDoctor\models\RecommendationCase;
 use Tahadudhiya\WebDoctor\models\RootCause;
 use Tahadudhiya\WebDoctor\models\RootCauseAnalysis;
 use Tahadudhiya\WebDoctor\records\ErrorGroupRecord;
@@ -56,6 +57,7 @@ use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\RootCauses;
 use Tahadudhiya\WebDoctor\services\Runs;
+use Tahadudhiya\WebDoctor\Tests\_support\BreakingRuleRecommendations;
 use Tahadudhiya\WebDoctor\Tests\_support\RecordingInvestigationsController;
 use Tahadudhiya\WebDoctor\Tests\_support\RecordingIssuesController;
 use Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic;
@@ -601,6 +603,8 @@ class InvestigationTest extends TestCase
         self::assertCount(2, $origin->evidence);
         self::assertSame(3, $origin->evidenceCount);
         self::assertTrue($origin->evidenceTruncated);
+        // What is left is not a basis for choosing advice.
+        self::assertFalse(RecommendationCase::fromStep($origin)?->evidenceComplete);
         self::assertSame(Redaction::REDACTED, $origin->evidence[1]->get('password'));
         self::assertStringNotContainsString('hunter2', $this->storedRows($investigation));
     }
@@ -1371,6 +1375,138 @@ class InvestigationTest extends TestCase
     }
 
     /**
+     * The causes an investigation held likely or firmer are acted on, first and in their own words,
+     * on its page and on its issue's — and only the newest investigation that weighed anything
+     * speaks for the issue.
+     */
+    public function testRecommendationsActOnTheCausesTheNewestInvestigationWeighed(): void
+    {
+        $this->charsetScenario();
+        $issue = $this->raise('database.charset');
+        $investigation = $this->investigations->investigate($issue->id);
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render($this->investigationsController(), 'detail', 'web-doctor/_investigations/_investigation', ['issueId' => $issue->id, 'investigationId' => $investigation->id]);
+
+        $positions = array_map(static fn(string $title): int|false => strpos($html, $title), [
+            'id="recommendations"',
+            'Convert the database’s character set',
+            'Convert the database to utf8mb4',
+            'Fix what the repeatedly failing job names before retrying it',
+        ]);
+
+        self::assertNotContains(false, $positions);
+        $sorted = $positions;
+        sort($sorted);
+        self::assertSame($sorted, $positions, 'The issue investigated comes first, and advice for its cause before advice for its finding.');
+        self::assertSame(1, substr_count($html, 'href="#cause-0"'), 'Only the problem the cause was weighed for is advised on for it.');
+
+        // The issue page acts on the same cause, linked to where it was weighed.
+        $issuePage = $this->render($this->issuesController(), 'detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+        self::assertStringContainsString('Convert the database’s character set', $issuePage);
+        self::assertMatchesRegularExpression("#investigations/{$investigation->id}(\\?[^\"\\#]*)?\\#cause-0\"#", $issuePage);
+
+        $recommendations = $this->plugin->getRecommendations();
+        $weighed = static fn(): array => array_map(static fn(RootCause $c): array => [$c->ruleId, $c->investigationId], $recommendations->causesFor($issue));
+
+        self::assertSame([['database.characterSet', $investigation->id]], $weighed());
+
+        // A newer investigation that stopped outright weighed nothing, so the earlier answer stands.
+        $later = $this->investigations->investigate($issue->id);
+        InvestigationRecord::updateAll(['status' => InvestigationStatus::FAILED->value], ['id' => $later->id]);
+        RootCauseRecord::deleteAll(['investigationId' => $later->id]);
+        self::assertSame([['database.characterSet', $investigation->id]], $weighed());
+
+        // Nor does one still running.
+        InvestigationRecord::updateAll(['status' => InvestigationStatus::RUNNING->value], ['id' => $later->id]);
+        self::assertSame([['database.characterSet', $investigation->id]], $weighed());
+
+        // Another issue's investigations are never this one's.
+        $this->check('tests.other', DiagnosticCategory::DATABASE, DiagnosticStatus::FAIL);
+        self::assertSame([], $recommendations->causesFor($this->raise('tests.other')));
+
+        // A stored cause whose confidence cannot be read is held at the least there is, and so is
+        // not acted on — however firmly it once was.
+        RootCauseRecord::updateAll(['confidence' => 'certain'], ['investigationId' => $investigation->id]);
+        $causes = $recommendations->causesFor($issue);
+        self::assertSame(Confidence::POSSIBLE, $causes[0]->confidence);
+        self::assertNotContains('database.convertCharacterSet', array_map(
+            static fn($r): string => $r->ruleId,
+            $recommendations->recommend(\Tahadudhiya\WebDoctor\models\RecommendationCase::fromIssue($issue, [self::charsetEvidence()], $causes))->recommendations,
+        ));
+
+        // One that finished and found no cause is the newer answer, and replaces it.
+        InvestigationRecord::updateAll(['status' => InvestigationStatus::COMPLETED->value], ['id' => $later->id]);
+        self::assertSame([], $weighed());
+    }
+
+    /**
+     * Showing recommendations reads; it never writes, runs a check or weighs anything. And the
+     * issue page reads its investigations once, not once for the list and again for the advice.
+     */
+    public function testShowingRecommendationsIsReadOnlyAndReadsInvestigationsOnce(): void
+    {
+        $this->charsetScenario();
+        $issue = $this->raise('database.charset');
+        $investigation = $this->investigations->investigate($issue->id);
+        $runs = array_map(static fn(\Tahadudhiya\WebDoctor\base\DiagnosticInterface $d): int => $d instanceof TestDiagnostic ? $d->runs : -1, $this->registry->all());
+
+        $reader = [self::ACCESS_CP, Permissions::VIEW, Permissions::VIEW_ISSUES];
+        $this->signIn(admin: false, permissions: $reader);
+        $this->request('GET');
+        $before = WebDoctorTables::snapshot();
+
+        $html = '';
+        $statements = $this->statementsDuring(function() use ($issue, $investigation, &$html): void {
+            $html = $this->render($this->investigationsController(), 'detail', 'web-doctor/_investigations/_investigation', ['issueId' => $issue->id, 'investigationId' => $investigation->id]);
+            $this->render($this->issuesController(), 'detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+        });
+
+        self::assertSame($before, WebDoctorTables::snapshot());
+        self::assertSame($runs, array_map(static fn(\Tahadudhiya\WebDoctor\base\DiagnosticInterface $d): int => $d instanceof TestDiagnostic ? $d->runs : -1, $this->registry->all()));
+        self::assertSame([], array_values(array_filter($statements, static fn(string $sql): bool => preg_match('/^\s*(INSERT|UPDATE|DELETE)/i', $sql) === 1)));
+
+        $investigationReads = array_filter($statements, static fn(string $sql): bool => preg_match('/FROM [`"]?[a-z_]*webdoctor_investigations[`"]?\s/i', $sql) === 1);
+        // One on the investigation page (the investigation itself), one on the issue page.
+        self::assertCount(2, $investigationReads, implode("\n", $investigationReads));
+
+        // What a fact contains is evidence, on the investigation page as everywhere else.
+        self::assertStringContainsString('Character set, recorded by Check database.charset', $html);
+        self::assertStringNotContainsString('sampledTableAcceptsMb4: false', $html);
+        $this->signIn(admin: false, permissions: [...$reader, Permissions::VIEW_EVIDENCE]);
+        $html = $this->render($this->investigationsController(), 'detail', 'web-doctor/_investigations/_investigation', ['issueId' => $issue->id, 'investigationId' => $investigation->id]);
+        self::assertStringContainsString('sampledTableAcceptsMb4: false', $html);
+
+        // A step that cannot be read as a check's finding is advised on for nothing, and costs the
+        // page nothing.
+        InvestigationStepRecord::updateAll(['status' => 'broken'], ['investigationId' => $investigation->id, 'diagnosticId' => 'queue.failedJobs']);
+        $html = $this->render($this->investigationsController(), 'detail', 'web-doctor/_investigations/_investigation', ['issueId' => $issue->id, 'investigationId' => $investigation->id]);
+        self::assertStringNotContainsString('Fix what the repeatedly failing job names before retrying it', $html);
+        self::assertStringContainsString('Convert the database to utf8mb4', $html);
+    }
+
+    public function testALeadingCauseThatCannotBeReadIsSaidRatherThanShownAsNone(): void
+    {
+        $this->charsetScenario();
+        $issue = $this->raise('database.charset');
+        $this->investigations->investigate($issue->id);
+        $this->plugin->set('rootCauses', new class() extends RootCauses {
+            public function leading(array $investigationIds): array
+            {
+                throw new RuntimeException('The causes table went away.');
+            }
+        });
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render($this->issuesController(), 'detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+
+        self::assertStringContainsString('Could not be read', $html);
+        self::assertStringNotContainsString('<span class="light">None</span>', $html);
+    }
+
+    /**
      * A request killed outright leaves its investigation `running` for good. Long past any request's
      * time it is said to have stopped, on every page it appears on, and nothing is rewritten.
      */
@@ -1399,6 +1535,26 @@ class InvestigationTest extends TestCase
         }
 
         self::assertSame(InvestigationStatus::RUNNING->value, InvestigationRecord::findOne($investigation->id)?->status);
+    }
+
+    public function testARuleThatBreaksOnTheInvestigationPageIsSaidAndCostsNothingElse(): void
+    {
+        $this->charsetScenario();
+        $issue = $this->raise('database.charset');
+        $investigation = $this->investigations->investigate($issue->id);
+        $this->plugin->set('recommendations', new BreakingRuleRecommendations(['check' => 'database.charset']));
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render($this->investigationsController(), 'detail', 'web-doctor/_investigations/_investigation', ['issueId' => $issue->id, 'investigationId' => $investigation->id]);
+
+        // The charset finding's own advice waits on the rule that broke; the advice for the cause
+        // weighed for it, and for the other checks' findings, does not.
+        self::assertStringNotContainsString('Convert the database to utf8mb4', $html);
+        self::assertStringContainsString('Convert the database’s character set', $html);
+        self::assertStringContainsString('Fix what the repeatedly failing job names before retrying it', $html);
+        self::assertStringContainsString('could not be worked out', $html);
+        self::assertStringNotContainsString('hunter2', $html);
     }
 
     // The finishing transaction --------------------------------------------

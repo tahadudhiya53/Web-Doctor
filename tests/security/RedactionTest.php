@@ -598,6 +598,37 @@ class RedactionTest extends TestCase
         self::assertStringContainsString('mail.example.com', $result->description);
     }
 
+    public function testNothingARecommendationQuotesCanCarryACredential(): void
+    {
+        // A recommendation quotes the finding in the words of whatever wrote it — an issue's title,
+        // a step an investigation kept, another plugin's check — and the values its evidence holds.
+        // Built straight from a case rather than from a result, so no earlier redaction helps.
+        $case = new \Tahadudhiya\WebDoctor\models\RecommendationCase(
+            diagnosticId: 'queue.failedJobs',
+            name: 'Queue token=hunter2-name',
+            status: \Tahadudhiya\WebDoctor\enums\DiagnosticStatus::FAIL,
+            severity: \Tahadudhiya\WebDoctor\enums\Severity::HIGH,
+            problem: 'Jobs failed: password=hunter2-problem',
+            evidence: [new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Sending email', source: 'queue.failedJobs', data: [
+                'occurrences' => 1,
+                'error' => 'SMTP refused AUTH for smtp://mailer:hunter2-error@mail.example.com',
+            ])],
+            issueId: 3,
+        );
+
+        $recommendations = (new \Tahadudhiya\WebDoctor\services\Recommendations())->recommend($case)->recommendations;
+        $json = (string)json_encode($recommendations);
+
+        self::assertNotSame([], $recommendations);
+
+        foreach (['hunter2-name', 'hunter2-problem', 'hunter2-error'] as $secret) {
+            self::assertStringNotContainsString($secret, $json);
+        }
+
+        self::assertStringContainsString('Jobs failed', $json);
+        self::assertStringContainsString('mail.example.com', $json);
+    }
+
     /**
      * The environment's credentials are read once per process; a test that changes the
      * environment has to make the helper read it again, and put it back afterwards.

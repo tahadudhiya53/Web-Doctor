@@ -146,6 +146,26 @@
 
 {% include "web-doctor/_investigations/_causes" %}
 
+<div class="pane" id="recommendations">
+    {% import "web-doctor/_recommendations" as rec %}
+    <h2>{{ "Recommendations"|t('web-doctor') }}</h2>
+    {% if recommendationsFailure %}
+        <p class="error">{{ recommendationsFailure }}</p>
+    {% elseif recommendations|length %}
+        <p class="light">{{ "For each problem the checks reported, chosen from Web Doctor’s fixed list of recommendations by the evidence the check recorded. Advice for a cause is given only for a cause held likely or firmer, and only for the problem it was weighed for. Nothing here is carried out for you."|t('web-doctor') }}</p>
+        {% for entry in recommendations %}
+            <h3 class="wd-plan__heading">
+                {{ shared.text(entry.step.diagnosticName ?? entry.step.diagnosticId) }} — {{ inv.issueLink(entry.step, entry.step.summary) }}
+            </h3>
+            {{ rec.list(entry.recommendations, canViewEvidence, 'investigation', null) }}
+        {% endfor %}
+    {% elseif checks is empty %}
+        <p class="light">{{ "No check’s result was recorded, so there is nothing to recommend."|t('web-doctor') }}</p>
+    {% else %}
+        <p class="light">{{ "None of the checks reported a problem, so there is nothing to recommend."|t('web-doctor') }}</p>
+    {% endif %}
+</div>
+
 <div class="pane" id="checks">
     <h2>{{ "Checks performed"|t('web-doctor') }}</h2>
 

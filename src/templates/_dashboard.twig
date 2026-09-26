@@ -11,8 +11,9 @@
 {% endfor %}
 
 {# `canRun` doubles as "may this row be selected": only somebody who can run needs a checkbox. #}
-{% macro resultRows(rows, canRun, hasRun) %}
+{% macro resultRows(rows, canRun, hasRun, recommendations = {}) %}
     {% import "web-doctor/_macros" as shared %}
+    {% import "web-doctor/_recommendations" as rec %}
     <div class="wd-table-scroll">
     <table class="data fullwidth wd-results">
         <thead>
@@ -47,8 +48,19 @@
                             {% if result.description %}
                                 <p class="wd-result__note light">{{ shared.text(result.description) }}</p>
                             {% endif %}
-                            {% if result.recommendation %}
-                                <p class="wd-result__note"><strong>{{ "Recommended"|t('web-doctor') }}:</strong> {{ shared.text(result.recommendation) }}</p>
+                            {% set advice = recommendations[row.id] ?? null %}
+                            {% if advice and (advice.recommendations|length or advice.failed|length) %}
+                                {# Collapsed: the dashboard is a list of checks, and each recommendation is
+                                   read when somebody decides to act on that one. #}
+                                {% set first = advice.recommendations|first %}
+                                <details class="wd-result__recommendations">
+                                    <summary><strong>{{ "Recommended"|t('web-doctor') }}:</strong>
+                                        {% if first %}{{ shared.text(first.title) }} <span class="wd-pill wd-pill--risk-{{ first.risk.value }}">{{ first.risk.label() }}</span>{% else %}{{ "could not be worked out"|t('web-doctor') }}{% endif %}
+                                    </summary>
+                                    {{ rec.list(advice, false, 'dashboard', null) }}
+                                </details>
+                            {% elseif result.recommendation %}
+                                <p class="wd-result__note"><strong>{{ result.status.isProblem() ? "The check’s own advice"|t('web-doctor') : "Recommended"|t('web-doctor') }}:</strong> {{ shared.text(result.recommendation) }}</p>
                             {% endif %}
                             {% if result.hasEvidence() %}
                                 <div class="wd-result__evidence">
@@ -284,7 +296,7 @@
         {% for group in dashboard.byCategory() %}
             <div class="pane">
                 <h2>{{ group.category.label() }}</h2>
-                {{ wd.resultRows(group.rows, canRun, dashboard.hasRun()) }}
+                {{ wd.resultRows(group.rows, canRun, dashboard.hasRun(), recommendations ?? {}) }}
             </div>
         {% endfor %}
     {% endif %}

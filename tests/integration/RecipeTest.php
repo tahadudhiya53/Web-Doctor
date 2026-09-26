@@ -443,6 +443,23 @@ class RecipeTest extends TestCase
         self::assertSame(Confidence::LIKELY, $causes[0]->confidence);
         // The failed jobs are an issue of their own that the cause would explain too.
         self::assertSame([$this->issueFor('queue.failedJobs')->id], array_column($causes[0]->relatedIssues, 'id'));
+
+        // What it recommends: the cause is acted on for the problem it was weighed for, which comes
+        // first; the failed jobs get the advice their own evidence selects, and not the cause's.
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->renderInvestigation($investigation);
+        $positions = array_map(static fn(string $title): int|false => strpos($html, $title), [
+            'Convert the database’s character set',
+            'Convert the database to utf8mb4',
+            'Fix what the repeatedly failing job names before retrying it',
+        ]);
+
+        self::assertNotContains(false, $positions);
+        $sorted = $positions;
+        sort($sorted);
+        self::assertSame($sorted, $positions);
+        self::assertSame(1, substr_count($html, 'href="#cause-0"'));
     }
 
     public function testARecipeThatFindsNothingSaysThereWasNothingToWeigh(): void

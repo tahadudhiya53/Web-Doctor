@@ -335,6 +335,20 @@ final class Evidence implements JsonSerializable
     }
 
     /**
+     * One recorded value, as a line of text a reader can follow — how a conclusion quotes the
+     * values it rests on.
+     */
+    public static function describe(mixed $value): string
+    {
+        return match (true) {
+            is_bool($value) => $value ? 'true' : 'false',
+            $value === null => 'null',
+            is_scalar($value) => (string)$value,
+            default => self::encode($value),
+        };
+    }
+
+    /**
      * Brings a structure within a byte budget, keeping as much of it as will fit.
      *
      * Entries are kept whole in the order given while they fit, then summarised — a long string

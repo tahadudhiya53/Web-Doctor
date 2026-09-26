@@ -17,10 +17,6 @@
         <p class="wd-issue__description">{{ shared.text(issue.description) }}</p>
     {% endif %}
 
-    {% if issue.recommendation %}
-        <p class="wd-issue__recommendation"><strong>{{ "Recommended"|t('web-doctor') }}:</strong> {{ shared.text(issue.recommendation) }}</p>
-    {% endif %}
-
     {% if issue.status.value == 'resolved' %}
         <div class="wd-issue__resolution">
             <p><strong>{{ issue.resolution.label() }}</strong></p>
@@ -36,6 +32,22 @@
 
     {% if issue.statusNote %}
         <p class="wd-issue__note"><strong>{{ "Reason given"|t('web-doctor') }}:</strong> {{ shared.text(issue.statusNote) }}</p>
+    {% endif %}
+</div>
+
+<div class="pane" id="recommendations">
+    {% import "web-doctor/_recommendations" as rec %}
+    <h2>{{ "Recommendations"|t('web-doctor') }}</h2>
+    {% if recommendationsFailure %}
+        <p class="error">{{ recommendationsFailure }}</p>
+    {% elseif issue.status.value == 'resolved' %}
+        <p class="light">{{ "This issue is resolved, so there is nothing to act on."|t('web-doctor') }}</p>
+    {% else %}
+        <p class="light">{{ "Chosen from Web Doctor’s fixed list of recommendations by the evidence behind the latest finding and, once the issue has been investigated, by the causes the latest investigation held likely or firmer. Nothing here is carried out for you."|t('web-doctor') }}</p>
+        {% if not canViewEvidence %}
+            <p class="light">{{ "You can see what kind of fact each recommendation rests on. What those facts contain needs the “View evidence” permission."|t('web-doctor') }}</p>
+        {% endif %}
+        {{ rec.list(recommendations, canViewEvidence, 'issue', issue.recommendation) }}
     {% endif %}
 </div>
 

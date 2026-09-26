@@ -33,6 +33,7 @@ use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\services\EvidenceStore;
 use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
+use Tahadudhiya\WebDoctor\Tests\_support\BreakingRuleRecommendations;
 use Tahadudhiya\WebDoctor\Tests\_support\RecordingIssuesController;
 use Tahadudhiya\WebDoctor\Tests\_support\TestUser;
 use Tahadudhiya\WebDoctor\Tests\_support\WebDoctorTables;
@@ -2147,6 +2148,202 @@ class IssueCenterTest extends TestCase
         $this->controller()->runAction('detail', ['issueId' => 0]);
     }
 
+    // Recommendations -------------------------------------------------------
+
+    /**
+     * An issue recorded with the evidence a failed-jobs finding leaves, the way the queue check
+     * records it.
+     */
+    private function failedJobsIssue(): Issue
+    {
+        return $this->seedIssue(summary: 'Queue jobs have failed: 2.', diagnosticId: 'queue.failedJobs', evidence: [
+            new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.failedJobs', data: ['failed' => 2, 'examined' => 2]),
+            new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Sending email', source: 'queue.failedJobs', data: ['description' => 'Sending email', 'occurrences' => 1, 'error' => 'zz-job-error-zz']),
+        ]);
+    }
+
+    public function testTheIssuePageRecommendsWhatItsEvidenceSelectsAndHowToVerifyIt(): void
+    {
+        $issue = $this->failedJobsIssue();
+        $reader = [self::ACCESS_CP, Permissions::VIEW, Permissions::VIEW_ISSUES];
+
+        $this->signIn(admin: false, permissions: $reader);
+        $this->request('GET');
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+
+        // Problem, evidence, likely cause, action, risk, verification — in that order.
+        $order = ['id="recommendations"', 'Read each failed job’s error, and retry only when it is safe', '>Problem<', '>Evidence<', '>Likely cause<', '>Recommended action<', '>Before you start<', '>Risk<', '>Verification<', '>Automatic repair<'];
+        $positions = array_map(static fn(string $needle): int|false => strpos($html, $needle), $order);
+
+        self::assertNotContains(false, $positions, 'Part of the recommendation is missing.');
+        self::assertSame($positions, array_values(array_unique($positions)));
+        $sorted = $positions;
+        sort($sorted);
+        self::assertSame($sorted, $positions);
+
+        foreach (['Medium risk', 'Sending email, recorded by Example check', '<code>queue.failedJobs</code>', 'rather than from a weighed cause', 'Not available.', 'safe to run again'] as $expected) {
+            self::assertStringContainsString($expected, $html);
+        }
+
+        // What a fact contains is evidence, here as on the rest of the page.
+        self::assertStringNotContainsString('zz-job-error-zz', $html);
+
+        $this->signIn(admin: false, permissions: [...$reader, Permissions::VIEW_EVIDENCE]);
+        $before = WebDoctorTables::snapshot();
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+        self::assertStringContainsString('error: zz-job-error-zz', $html);
+        // Showing advice writes nothing.
+        self::assertSame($before, WebDoctorTables::snapshot());
+
+        // A resolved issue has nothing left to act on.
+        IssueRecord::updateAll(['status' => IssueStatus::RESOLVED->value], ['id' => $issue->id]);
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+        self::assertStringContainsString('This issue is resolved, so there is nothing to act on.', $html);
+        self::assertStringNotContainsString('retry only when it is safe', $html);
+    }
+
+    public function testNoCredentialAFailedJobQuotesReachesItsRecommendation(): void
+    {
+        $secrets = [
+            'password=hunter2-pw',
+            'passwd=hunter2-passwd',
+            'client_secret=hunter2-client',
+            'api_key=hunter2-apikey',
+            'access_token=hunter2-token',
+            'Authorization: Bearer hunter2-bearer',
+            'mysql://craft:hunter2-dsn@db:3306/craft',
+            'smtp://mailer:hunter2-smtp@mail.example.com',
+            "-----BEGIN PRIVATE KEY-----\nMIIhunter2pemhunter2pemhunter2pem\n-----END PRIVATE KEY-----",
+        ];
+        $issue = $this->seedIssue(summary: 'Queue jobs have failed: 1.', diagnosticId: 'queue.failedJobs', evidence: [
+            new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.failedJobs', data: ['failed' => 1]),
+            new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Syncing', source: 'queue.failedJobs', data: ['occurrences' => 1, 'error' => 'Sync refused. ' . implode(' ', $secrets)]),
+        ]);
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+
+        self::assertStringContainsString('Sync refused.', $html);
+
+        foreach (['hunter2', 'MIIhunter2pem'] as $secret) {
+            self::assertStringNotContainsString($secret, $html);
+        }
+
+        self::assertStringNotContainsString(Redaction::REDACTED, $html);
+        self::assertStringNotContainsString('hunter2', (string)json_encode(IssueRecord::find()->where(['id' => $issue->id])->asArray()->all()) . json_encode(EvidenceRecord::find()->where(['issueId' => $issue->id])->asArray()->all()));
+    }
+
+    public function testAFindingNoRuleAnswersShowsTheChecksOwnAdviceAsTheChecksAndRecommendsNothing(): void
+    {
+        $issue = $this->seedIssue(summary: 'A contributed check found something.', recommendation: 'Its own advice.');
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+
+        self::assertStringContainsString('No recommendation rule covers this finding', $html);
+        self::assertStringContainsString('The check’s own advice', $html);
+        self::assertStringContainsString('Its own advice.', $html);
+        self::assertStringNotContainsString('wd-recommendation"', $html);
+    }
+
+    public function testACauseTheLatestInvestigationHeldLikelyIsActedOnAndLinkedToThatInvestigation(): void
+    {
+        $issue = $this->failedJobsIssue();
+        $cause = new \Tahadudhiya\WebDoctor\models\RootCause(
+            ruleId: 'queue.outOfMemory',
+            title: 'Queue jobs are running out of memory',
+            statement: 'PHP stopped jobs part-way.',
+            problem: $issue->title,
+            confidence: Confidence::HIGH,
+            conditions: [new \Tahadudhiya\WebDoctor\models\ConditionOutcome(
+                id: 'ranOutOfMemory',
+                role: \Tahadudhiya\WebDoctor\enums\ConditionRole::REQUIRED,
+                description: 'A failed queue job recorded PHP running out of memory',
+                observations: [new \Tahadudhiya\WebDoctor\models\Observation(kind: \Tahadudhiya\WebDoctor\models\Observation::EVIDENCE, label: 'Failed job “Sending email”', diagnosticId: 'queue.failedJobs')],
+            )],
+            reasoning: [],
+            relatedIssues: [],
+            recommendation: 'Raise memory_limit for the queue.',
+            nextSteps: [],
+            position: 0,
+            id: 1,
+            investigationId: 4242,
+            recordedAt: new DateTimeImmutable('2026-01-02 03:04:05'),
+        );
+
+        $this->plugin->set('recommendations', new class(['cause' => $cause]) extends \Tahadudhiya\WebDoctor\services\Recommendations {
+            public ?\Tahadudhiya\WebDoctor\models\RootCause $cause = null;
+
+            public function causesFor(Issue $issue, ?array $investigations = null): array
+            {
+                return [$this->cause];
+            }
+        });
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+
+        $forCause = strpos($html, 'Give the queue more memory, then retry its jobs');
+        $forFinding = strpos($html, 'Read each failed job’s error, and retry only when it is safe');
+
+        self::assertIsInt($forCause);
+        self::assertIsInt($forFinding);
+        self::assertLessThan($forFinding, $forCause, 'Advice for the cause comes first.');
+        self::assertStringContainsString('Raise memory_limit for the queue.', $html);
+        self::assertMatchesRegularExpression("#issues/{$issue->id}/investigations/4242(\\?[^\"\\#]*)?\\#cause-0\"#", $html);
+    }
+
+    public function testARuleThatBreaksIsSaidRatherThanReadAsNothingApplying(): void
+    {
+        $answered = $this->failedJobsIssue();
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+
+        // The broken rule is said, and the rule after it is not given in its place: the check's own
+        // order decides which advice applies.
+        $this->plugin->set('recommendations', new BreakingRuleRecommendations(['check' => 'queue.failedJobs']));
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $answered->id]);
+
+        self::assertStringNotContainsString('Read each failed job’s error, and retry only when it is safe', $html);
+        self::assertStringContainsString('Queue jobs have failed: 2.', $html);
+        self::assertStringContainsString('could not be worked out', $html);
+        self::assertStringNotContainsString('hunter2', $html);
+
+        // Where it was the only rule, the page does not claim no rule covers the finding.
+        IssueRecord::deleteAll(['id' => $answered->id]);
+        $unanswered = $this->seedIssue(summary: 'A contributed check found something.', recommendation: 'Its own advice.');
+        $this->plugin->set('recommendations', new BreakingRuleRecommendations(['check' => 'tests.queue']));
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $unanswered->id]);
+
+        self::assertStringContainsString('could not be worked out', $html);
+        self::assertStringNotContainsString('No recommendation rule covers this finding', $html);
+    }
+
+    public function testRecommendationsThatCannotBeChosenCostThePageOnlyItsRecommendations(): void
+    {
+        $issue = $this->failedJobsIssue();
+
+        $this->plugin->set('recommendations', new class() extends \Tahadudhiya\WebDoctor\services\Recommendations {
+            public function causesFor(Issue $issue, ?array $investigations = null): array
+            {
+                throw new RuntimeException('The investigations table went away: password=hunter2');
+            }
+        });
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+
+        self::assertStringContainsString('Queue jobs have failed: 2.', $html);
+        self::assertStringContainsString('could not work out what to recommend', $html);
+        self::assertStringContainsString('Evidence behind the latest finding', $html);
+        self::assertStringNotContainsString('hunter2', $html);
+    }
+
     // Helpers for the control panel ------------------------------------------
 
     /**
@@ -2154,14 +2351,15 @@ class IssueCenterTest extends TestCase
      *
      * @param list<Evidence> $evidence
      */
-    private function seedIssue(string $summary = 'Something is wrong.', array $evidence = []): Issue
+    private function seedIssue(string $summary = 'Something is wrong.', array $evidence = [], string $diagnosticId = 'tests.queue', ?string $recommendation = null): Issue
     {
         $this->issues->reconcile($this->diagnosticRun([
             $this->finding(
-                diagnosticId: 'tests.queue',
+                diagnosticId: $diagnosticId,
                 status: DiagnosticStatus::FAIL,
                 summary: $summary,
                 severity: Severity::HIGH,
+                recommendation: $recommendation,
                 evidence: $evidence,
             ),
         ]));

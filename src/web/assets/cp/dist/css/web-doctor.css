@@ -775,3 +775,66 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
+
+/* Recommendations -------------------------------------------------------- */
+
+/* Risk is the risk of the action, not the seriousness of the problem, so it has a palette of its
+   own rather than borrowing severity's: outlined, and solid only where acting cannot be undone. */
+.wd-pill--risk-low { color: #1f6b30; background: transparent; border: 1px solid #1f6b30; }
+.wd-pill--risk-medium { color: #8a5200; background: transparent; border: 1px solid #8a5200; }
+.wd-pill--risk-high { background: #b00020; }
+
+.wd-recommendation {
+    margin: 16px 0 0;
+    padding: 16px 0 0;
+    border-top: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.15));
+}
+
+.wd-recommendation__title {
+    margin: 0 0 8px;
+    font-size: 16px;
+    overflow-wrap: anywhere;
+}
+
+.wd-recommendation__title .wd-pill {
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.wd-recommendation__heading {
+    margin: 14px 0 4px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-recommendation p {
+    margin: 0 0 6px;
+    overflow-wrap: anywhere;
+}
+
+.wd-recommendation__basis {
+    margin: 0;
+    padding: 0 0 0 10px;
+    list-style: none;
+    border-left: 2px solid var(--hairline-color, rgba(51, 64, 77, 0.2));
+}
+
+.wd-recommendation__basis li {
+    margin: 0 0 4px;
+    overflow-wrap: anywhere;
+}
+
+.wd-result__recommendations {
+    margin: 6px 0 0;
+}
+
+.wd-result__recommendations > summary {
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+
+.wd-result__recommendations .wd-recommendation:first-of-type {
+    margin-top: 8px;
+}

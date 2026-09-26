@@ -79,6 +79,22 @@ class OverviewController extends Controller
             }
         }
 
+        // Chosen from rules, reading what is already on the page. A rule that cannot be applied
+        // costs its row the recommendation, and anything else costs the dashboard its
+        // recommendations rather than the reader the dashboard.
+        $recommendations = [];
+
+        try {
+            foreach ($dashboard->rows as $row) {
+                if ($row['result'] !== null) {
+                    $recommendations[$row['id']] = $plugin->getRecommendations()->forResult($row['result']);
+                }
+            }
+        } catch (Throwable $e) {
+            SafeException::log('The dashboard\'s recommendations could not be chosen', $e);
+            $recommendations = [];
+        }
+
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
 
         return $this->renderTemplate('web-doctor/_index', [
@@ -92,6 +108,7 @@ class OverviewController extends Controller
             'siteLabel' => $this->siteLabel($dashboard->run?->context->siteId ?? $siteId),
             'failure' => $failure,
             'recipes' => $recipes,
+            'recommendations' => $recommendations,
         ]);
     }
 

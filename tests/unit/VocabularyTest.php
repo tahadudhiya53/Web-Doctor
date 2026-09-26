@@ -12,6 +12,7 @@ use Tahadudhiya\WebDoctor\enums\InvestigationStepType;
 use Tahadudhiya\WebDoctor\enums\IssueEventType;
 use Tahadudhiya\WebDoctor\enums\IssueResolution;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
+use Tahadudhiya\WebDoctor\enums\RepairRisk;
 use Tahadudhiya\WebDoctor\enums\Severity;
 
 /**
@@ -140,6 +141,15 @@ class VocabularyTest extends TestCase
         self::assertSame([4, 3, 2, 1, 0], array_map(static fn(Confidence $c): int => $c->rank(), Confidence::cases()));
     }
 
+    public function testRepairRiskIsTheVocabularysThreeLevelsEachExplained(): void
+    {
+        self::assertSame(['low', 'medium', 'high'], array_column(RepairRisk::cases(), 'value'));
+
+        $explanations = array_map(static fn(RepairRisk $r): string => $r->explanation(), RepairRisk::cases());
+        self::assertNotContains('', $explanations);
+        self::assertSame($explanations, array_unique($explanations));
+    }
+
     public function testEveryWordInTheVocabularyIsLabelledAndSpeltOnce(): void
     {
         $vocabularies = [
@@ -153,6 +163,7 @@ class VocabularyTest extends TestCase
             InvestigationStatus::cases(),
             InvestigationStepType::cases(),
             ConditionRole::cases(),
+            RepairRisk::cases(),
         ];
 
         foreach ($vocabularies as $cases) {

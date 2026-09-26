@@ -80,8 +80,9 @@
                             <td>{{ investigation.checksIncomplete }}</td>
                             <td>
                                 {% set cause = leadingCauses[investigation.id] ?? null %}
-                                {% if cause %}
-
+                                {% if causesFailure ?? false %}
+                                    <span class="light">{{ "Could not be read"|t('web-doctor') }}</span>
+                                {% elseif cause %}
                                     <span class="wd-pill wd-pill--confidence-{{ cause.confidence.value }}">{{ cause.confidence.label() }}</span>
                                     <a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '/investigations/' ~ investigation.id) }}#causes">{{ shared.text(cause.title) }}</a>
                                 {% else %}

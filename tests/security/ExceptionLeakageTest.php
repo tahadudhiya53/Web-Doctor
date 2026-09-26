@@ -246,7 +246,29 @@ class ExceptionLeakageTest extends TestCase
 
         $this->engine->run(new TestDiagnostic(['diagnosticId' => 'tests.leaky', 'handler' => static fn() => throw new \RuntimeException(self::MESSAGE)]), $this->context);
 
+        // A recommendation rule that breaks on evidence quoting a credential.
+        $breaking = \Tahadudhiya\WebDoctor\rules\RecommendationRule::forFinding(
+            id: 'tests.leaky',
+            check: 'tests.leaky',
+            title: 'T',
+            explanation: 'E',
+            action: 'A',
+            rationale: 'R',
+            risk: \Tahadudhiya\WebDoctor\enums\RepairRisk::LOW,
+            riskReason: 'RR',
+            verification: 'V',
+            match: static fn(): array => throw new \RuntimeException(self::MESSAGE),
+        );
+        (new \Tahadudhiya\WebDoctor\services\Recommendations())->recommend(new \Tahadudhiya\WebDoctor\models\RecommendationCase(
+            diagnosticId: 'tests.leaky',
+            name: 'Leaky',
+            status: \Tahadudhiya\WebDoctor\enums\DiagnosticStatus::FAIL,
+            severity: \Tahadudhiya\WebDoctor\enums\Severity::HIGH,
+            problem: 'Broken.',
+        ), [$breaking]);
+
         $logged = $this->loggedMessages();
+        self::assertStringContainsString('The recommendation rule tests.leaky could not be applied. RuntimeException: ', $logged);
         self::assertStringContainsString('A contributed diagnostic could not be registered. ', $logged);
         self::assertStringContainsString('The diagnostic "tests.leaky" failed. RuntimeException: ', $logged);
 

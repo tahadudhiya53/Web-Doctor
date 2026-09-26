@@ -32,6 +32,10 @@ history rather than two reports.
 - **Possible causes, with the evidence for and against them** — each investigation weighs what it
   found against a fixed list of known causes, and says for each one that fits how firmly it is
   held, why, and what counts against it.
+- **Recommendations** — every warning and failure a shipped check reports comes with what to do
+  about it, chosen by a fixed rule from the evidence behind it: the problem, the evidence, the
+  likely cause where one was weighed, the action, its risk and why, what to have in place first,
+  and which checks to run again to tell whether it worked.
 - **Errors grouped rather than listed** — every exception a check runs into is recognised by its
   type, its message with the values that change between occurrences taken out, where it was thrown
   and the exceptions behind it, so the same error seen again is counted against one group, with
@@ -476,6 +480,53 @@ investigation that finishes.
 Web Doctor does not read logs or record requests or deployments, so nothing here correlates by
 request, and the deployment cause can use a recorded deployment only when a check contributes one.
 
+### Recommendations
+
+Every warning and failure a Web Doctor check reports gets a recommendation, on the dashboard (under
+the result, collapsed), on the issue's page, and on an investigation's page for each problem its
+checks found. Each is laid out in the order a reader acts on it:
+
+- **Problem** — the finding, and what it means;
+- **Evidence** — the facts that selected the recommendation, each linked to where it was recorded;
+- **Likely cause** — the cause an investigation weighed, where the advice acts on one;
+- **Recommended action**, and why this action rather than another;
+- **Before you start** — what has to be in place first, such as a current backup;
+- **Risk** — low, medium or high, for carrying the action out (not for the problem), with the
+  reason;
+- **Verification** — what shows it worked, and which checks to run again, the one that found the
+  problem first. An issue is still resolved only when that check runs again and no longer reports
+  it;
+- **Automatic repair** — always "not available": Web Doctor does not carry anything out.
+
+Nothing is composed on the spot. Each recommendation is written out in one list, selected by the
+evidence the check records, and where a check can report more than one kind of problem, the check's
+own order decides which advice is given. A finding no rule covers — a check contributed by another
+plugin, say — gets no recommendation: the page says so and shows the check's own advice, labelled
+as the check's. Pass, info, error, unknown and skipped results get none: they establish nothing to
+act on.
+
+Once an investigation holds a cause as Likely or firmer, the advice for that cause comes first, in
+the cause's own words, with the risk and verification written for it; a cause held only as Possible
+is a lead to look into, not something to act on. On an issue's page the causes are the ones weighed
+by its newest investigation that finished, and on an investigation's page only the problem the
+causes were weighed for is advised on for them. A resolved issue has nothing to recommend.
+
+Some of the advice is deliberately cautious. Failed queue jobs are to be read before they are
+retried, and retried only when running them again is safe. An asset volume whose files cannot be
+found is to have its filesystem checked first, and its asset records are never to be deleted to
+clear the finding. Project config is applied through `php craft up` or
+`php craft project-config/apply`, never by editing the database to match.
+
+A rule that cannot be applied is said on the page ("could not be worked out"), never read as no
+rule covering the finding, and no rule after it for the same check is given in its place: the
+check's own order decides which advice applies. A weighed cause that is read back without the
+evidence it was found on is not acted on, and a check an investigation kept only part of the
+evidence of is not advised on from what remains; the issue's own page advises on it.
+
+Recommendations are worked out again each time a page is shown and are not stored. Showing them
+reads the finding's evidence and, on an issue's page, its newest investigation's causes; it runs no
+check and writes nothing.
+
 ### Errors
 
 The **Errors** page, beside Issues, lists the exceptions Web Doctor's checks have run into: a check
@@ -590,6 +641,9 @@ subtract nothing, and the floor is 0.
   error the checks never touch is not grouped here. The error text a failed queue job recorded is
   reported by `queue.failedJobs` as evidence, not grouped as an error.
 - **Investigations do not read logs.** Where logs would help, the plan says so.
+- **Recommendations cover Web Doctor's own checks.** A check contributed by another plugin gets
+  none. They are not stored, so there is no record of what was recommended when, and no repair is
+  carried out for any of them.
 - **`email.configuration` reads Craft's mail settings.** A mailer replaced wholesale in
   `config/app.php` is not what it inspects.
 - **Checks establish what they say and no more.** `filesystem.volumes` proves a volume can be

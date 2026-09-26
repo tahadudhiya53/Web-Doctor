@@ -24,6 +24,7 @@ use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\Runs;
+use Tahadudhiya\WebDoctor\Tests\_support\BreakingRuleRecommendations;
 use Tahadudhiya\WebDoctor\Tests\_support\ExplodingDiagnostics;
 use Tahadudhiya\WebDoctor\Tests\_support\FailingCache;
 use Tahadudhiya\WebDoctor\Tests\_support\RecordingOverviewController;
@@ -836,6 +837,74 @@ class HealthDashboardTest extends TestCase
         // bracketed marker a reader would have to interpret.
         self::assertStringContainsString('Mail transport token=<span class="wd-mark wd-mark--redacted"', $html);
         self::assertStringNotContainsString(\Tahadudhiya\WebDoctor\helpers\Redaction::REDACTED, $html);
+    }
+
+    public function testEachFindingCarriesItsRecommendationWithoutWhatItsEvidenceContains(): void
+    {
+        $this->plugin->getDiagnostics()->register(new TestDiagnostic([
+            'diagnosticId' => 'queue.failedJobs',
+            'diagnosticName' => 'Failed queue jobs',
+            'diagnosticCategory' => DiagnosticCategory::QUEUE,
+            'handler' => static fn(TestDiagnostic $d) => $d->build('fail', [
+                'Queue jobs have failed: 1.',
+                [
+                    new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.failedJobs', data: ['failed' => 1, 'examined' => 1]),
+                    new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Sending email', source: 'queue.failedJobs', data: ['description' => 'Sending email', 'occurrences' => 1, 'error' => 'ZZZ-JOB-ERROR-ZZZ']),
+                ],
+            ]),
+        ]));
+
+        // Stored the way a run is remembered, without the run action: that would raise an issue
+        // under a shipped check's ID in whichever installation these tests run in.
+        $run = $this->plugin->getDiagnosticEngine()->runAll(DiagnosticContext::current());
+        self::assertTrue($this->plugin->getRuns()->remember($run));
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $before = WebDoctorTables::snapshot();
+        $html = $this->render();
+
+        // Opening the page ran nothing and wrote nothing: the advice is read from the run shown.
+        self::assertSame(1, $this->diagnostic->runs);
+        self::assertSame($before, WebDoctorTables::snapshot());
+        self::assertStringContainsString('Read each failed job’s error, and retry only when it is safe', $html);
+        self::assertStringContainsString('wd-pill--risk-medium', $html);
+        self::assertStringContainsString('<code>queue.failedJobs</code>', $html);
+        // The dashboard shows what kind of fact advice rests on, never what it contains.
+        self::assertStringContainsString('Sending email, recorded by Failed queue jobs', $html);
+        self::assertStringNotContainsString('ZZZ-JOB-ERROR-ZZZ', $html);
+
+        // A finding no rule answers keeps its check's own advice, said to be the check's.
+        self::assertStringContainsString('The check’s own advice', $html);
+        self::assertStringContainsString('Fix it.', $html);
+    }
+
+    public function testARuleThatBreaksIsSaidAndNoLaterRuleIsGivenInItsPlace(): void
+    {
+        $this->diagnostic->handler = static fn(TestDiagnostic $d) => $d->build('fail', ['Something is broken.']);
+        $this->plugin->getDiagnostics()->register(new TestDiagnostic([
+            'diagnosticId' => 'queue.failedJobs',
+            'diagnosticName' => 'Failed queue jobs',
+            'diagnosticCategory' => DiagnosticCategory::QUEUE,
+            'handler' => static fn(TestDiagnostic $d) => $d->build('fail', [
+                'Queue jobs have failed: 1.',
+                [new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.failedJobs', data: ['failed' => 1])],
+            ]),
+        ]));
+        $this->plugin->getRuns()->remember($this->plugin->getDiagnosticEngine()->runAll(DiagnosticContext::current()));
+        $this->plugin->set('recommendations', new BreakingRuleRecommendations(['check' => 'queue.failedJobs']));
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render();
+
+        // The broken rule comes first for its check, so the advice after it is not given instead.
+        self::assertStringNotContainsString('Read each failed job’s error, and retry only when it is safe', $html);
+        self::assertStringContainsString('could not be worked out', $html);
+        // The row, and every other row, still shows.
+        self::assertStringContainsString('Queue jobs have failed: 1.', $html);
+        self::assertStringContainsString('Something is broken.', $html);
+        self::assertStringNotContainsString('hunter2', $html);
     }
 
     public function testARunFromTheControlPanelKeepsTheEvidenceBehindWhatItFinds(): void

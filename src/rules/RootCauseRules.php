@@ -60,7 +60,7 @@ final class RootCauseRules
      * two wordings — not any message that mentions memory, which a cache server or an image
      * library can say about itself.
      */
-    private const OUT_OF_MEMORY = '/allowed memory size of \d+ bytes exhausted|out of memory \(allocated \d+\)/i';
+    public const OUT_OF_MEMORY = '/allowed memory size of \d+ bytes exhausted|out of memory \(allocated \d+\)/i';
 
     /** @var list<string> The shipped checks that read the database, so their answering shows it answered. */
     private const READS_DATABASE = ['database.migrations', 'database.charset', 'queue.backlog', 'queue.failedJobs', 'plugins.health'];

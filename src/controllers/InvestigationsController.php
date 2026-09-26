@@ -181,6 +181,18 @@ class InvestigationsController extends Controller
 
         $diagnosed = array_values(array_filter($steps, static fn(InvestigationStep $s): bool => $s->type === InvestigationStepType::DIAGNOSED))[0] ?? null;
 
+        // Chosen on their own, so a recommendation that cannot be chosen costs the page its
+        // recommendations rather than costing the reader the investigation.
+        $recommendations = [];
+        $recommendationsFailure = null;
+
+        try {
+            $recommendations = $this->plugin()->getRecommendations()->forInvestigation($checks, $causes, $issue, $diagnosed);
+        } catch (Throwable $e) {
+            SafeException::log('An investigation\'s recommendations could not be chosen', $e);
+            $recommendationsFailure = Craft::t('web-doctor', 'Web Doctor could not work out what to recommend for this investigation. The details are in Craft’s logs.');
+        }
+
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
 
         return $this->renderTemplate('web-doctor/_investigations/_detail', [
@@ -202,6 +214,8 @@ class InvestigationsController extends Controller
             'causeGroups' => $causeGroups,
             'causesFailure' => $causesFailure,
             'diagnosed' => $diagnosed,
+            'recommendations' => $recommendations,
+            'recommendationsFailure' => $recommendationsFailure,
         ]);
     }
 

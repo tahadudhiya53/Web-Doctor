@@ -10,9 +10,11 @@ use Tahadudhiya\WebDoctor\enums\Severity;
 use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\RequestInput;
 use Tahadudhiya\WebDoctor\models\ErrorGroup;
+use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\Investigation;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
 use Tahadudhiya\WebDoctor\models\SafeException;
+use Tahadudhiya\WebDoctor\models\StoredEvidence;
 use Tahadudhiya\WebDoctor\services\Investigations;
 use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
@@ -167,10 +169,14 @@ class IssuesController extends Controller
 
         // Read on its own, so a cause that cannot be read costs the list its causes rather than
         // costing the reader the investigations.
+        $causesFailure = false;
+
         try {
             $leadingCauses = $plugin->getRootCauses()->leading(array_map(static fn(Investigation $i): int => $i->id, $investigations));
         } catch (Throwable $e) {
             SafeException::log('An issue\'s investigations\' causes could not be read', $e);
+            // Said on the page, so a cause that could not be read never reads as no cause.
+            $causesFailure = true;
         }
 
         // Read on its own for the same reason.
@@ -187,6 +193,28 @@ class IssuesController extends Controller
         } catch (Throwable $e) {
             SafeException::log('An issue\'s errors could not be read', $e);
             $errorsFailure = Craft::t('web-doctor', 'Web Doctor could not read the errors related to this issue. The details are in Craft’s logs.');
+        }
+
+        // Chosen on their own, so a recommendation that cannot be chosen costs the page its
+        // recommendations rather than costing the reader the issue. They are chosen from the
+        // evidence, so without it there is nothing to choose them from.
+        $recommendationsFailure = null;
+        $recommendations = null;
+
+        if ($evidenceFailure !== null) {
+            $recommendationsFailure = Craft::t('web-doctor', 'Nothing can be recommended while the evidence behind this issue cannot be read.');
+        } else {
+            try {
+                $recommendations = $plugin->getRecommendations()->forIssue(
+                    $issue,
+                    array_map(static fn(StoredEvidence $stored): Evidence => $stored->evidence, $latestEvidence),
+                    // The investigations already read above, newest first, unless reading them failed.
+                    $investigationFailure === null ? $investigations : null,
+                );
+            } catch (Throwable $e) {
+                SafeException::log('An issue\'s recommendations could not be chosen', $e);
+                $recommendationsFailure = Craft::t('web-doctor', 'Web Doctor could not work out what to recommend for this issue. The details are in Craft’s logs.');
+            }
         }
 
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
@@ -210,12 +238,15 @@ class IssuesController extends Controller
             'investigationRefusal' => $investigationRefusal,
             'investigationFailure' => $investigationFailure,
             'leadingCauses' => $leadingCauses,
+            'causesFailure' => $causesFailure,
             'investigationLimit' => Investigations::HISTORY_LIMIT,
             'canInvestigate' => $plugin->getPermissions()->canInvestigate(),
             'depths' => DiagnosticDepth::cases(),
             'errorGroups' => $errorGroups,
             'errorIssues' => $errorIssues,
             'errorsFailure' => $errorsFailure,
+            'recommendations' => $recommendations,
+            'recommendationsFailure' => $recommendationsFailure,
         ]);
     }
 

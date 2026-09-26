@@ -227,7 +227,7 @@ final class CorrelationCase
 
         foreach ($keys as $key) {
             if (array_key_exists($key, $evidence->data)) {
-                $quoted[] = sprintf('%s: %s', $key, self::describe($evidence->data[$key]));
+                $quoted[] = sprintf('%s: %s', $key, Evidence::describe($evidence->data[$key]));
             }
         }
 
@@ -333,18 +333,5 @@ final class CorrelationCase
     private function established(DiagnosticResult $result): bool
     {
         return $result->status->isConclusive() && $result->confidence === Confidence::CONFIRMED;
-    }
-
-    /**
-     * A value, as a line of text a reader can follow.
-     */
-    private static function describe(mixed $value): string
-    {
-        return match (true) {
-            is_bool($value) => $value ? 'true' : 'false',
-            $value === null => 'null',
-            is_scalar($value) => (string)$value,
-            default => Evidence::encode($value),
-        };
     }
 }

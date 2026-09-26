@@ -117,6 +117,7 @@ class PluginTest extends TestCase
             'investigations' => \Tahadudhiya\WebDoctor\services\Investigations::class,
             'issues' => \Tahadudhiya\WebDoctor\services\Issues::class,
             'permissions' => Permissions::class,
+            'recommendations' => \Tahadudhiya\WebDoctor\services\Recommendations::class,
             'rootCauses' => \Tahadudhiya\WebDoctor\services\RootCauses::class,
             'runs' => \Tahadudhiya\WebDoctor\services\Runs::class,
         ];

@@ -18,6 +18,7 @@ use Tahadudhiya\WebDoctor\services\Investigations;
 use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\Recipes;
+use Tahadudhiya\WebDoctor\services\Recommendations;
 use Tahadudhiya\WebDoctor\services\RootCauses;
 use Tahadudhiya\WebDoctor\services\Runs;
 use yii\base\Event;
@@ -33,6 +34,7 @@ use yii\base\Event;
  * @property-read Issues $issues
  * @property-read Permissions $permissions
  * @property-read Recipes $recipes
+ * @property-read Recommendations $recommendations
  * @property-read RootCauses $rootCauses
  * @property-read Runs $runs
  * @property-read Settings $settings
@@ -71,6 +73,7 @@ class WebDoctor extends Plugin
                 'permissions' => ['class' => Permissions::class],
                 // As with the diagnostics: the registry the plugin hands out holds Web Doctor's own.
                 'recipes' => ['class' => Recipes::class, 'includeCoreRecipes' => true],
+                'recommendations' => ['class' => Recommendations::class],
                 'rootCauses' => ['class' => RootCauses::class],
                 'runs' => ['class' => Runs::class],
             ],
@@ -181,6 +184,22 @@ class WebDoctor extends Plugin
     public function getRecipes(): Recipes
     {
         return $this->get('recipes');
+    }
+
+    /**
+     * Chooses what to recommend for a finding.
+     */
+    public function getRecommendations(): Recommendations
+    {
+        /** @var Recommendations $recommendations */
+        $recommendations = $this->get('recommendations');
+
+        // Tied to this plugin instance's investigations and causes, for the reason the engine is
+        // tied to its registry.
+        $recommendations->investigations ??= $this->getInvestigations();
+        $recommendations->rootCauses ??= $this->getRootCauses();
+
+        return $recommendations;
     }
 
     /**

@@ -1,0 +1,127 @@
+{#
+    Shared rendering for recommendations, wherever a finding is shown. Each one reads in the order a
+    reader acts on it: the problem, the evidence, the likely cause, the action, its risk, how to tell
+    it worked. What kind of fact a recommendation rests on is shown to anybody who may see the page;
+    what a fact contains is evidence, shown only to somebody who may see evidence.
+#}
+
+{#
+    `where` says which page it is on — 'issue', 'investigation' or 'dashboard' — which decides where a
+    cause is linked to and whether facts can be followed to the evidence on the same page.
+#}
+{% macro recommendation(r, canViewEvidence, where) %}
+    {% import "web-doctor/_macros" as shared %}
+    <section class="wd-recommendation" id="recommendation-{{ r.diagnosticId|replace({ '.': '-' }) }}-{{ r.ruleId|replace({ '.': '-' }) }}">
+        <h3 class="wd-recommendation__title">
+            <span class="wd-pill wd-pill--risk-{{ r.risk.value }}">{{ r.risk.label() }}</span>
+            {{ shared.text(r.title) }}
+        </h3>
+
+        <h4 class="wd-recommendation__heading">{{ "Problem"|t('web-doctor') }}</h4>
+        <p>{{ shared.text(r.problem) }}</p>
+        {% if r.explanation %}
+            <p class="light">{{ shared.text(r.explanation) }}</p>
+        {% endif %}
+
+        <h4 class="wd-recommendation__heading">{{ "Evidence"|t('web-doctor') }}</h4>
+        <ul class="wd-recommendation__basis">
+            {% for o in r.basis %}
+                <li>
+                    <span class="wd-cause__kind">{{ o.kindLabel() }}</span>
+                    {% if where == 'investigation' and o.diagnosticId and o.kind == 'evidence' %}
+                        <a href="#evidence-{{ o.diagnosticId }}">{{ shared.text(o.label) }}</a>
+                    {% elseif where == 'investigation' and o.diagnosticId and o.kind == 'result' %}
+                        <a href="#check-{{ o.diagnosticId }}">{{ shared.text(o.label) }}</a>
+                    {% elseif where == 'issue' and o.kind == 'evidence' and o.issueId == r.issueId %}
+                        <a href="#evidence">{{ shared.text(o.label) }}</a>
+                    {% elseif o.issueId and o.issueId != r.issueId and where != 'dashboard' %}
+                        <a href="{{ cpUrl('web-doctor/issues/' ~ o.issueId) }}">{{ shared.text(o.label) }}</a>
+                    {% else %}
+                        {{ shared.text(o.label) }}
+                    {% endif %}
+                    {% if canViewEvidence and o.detail %}
+                        <div class="wd-cause__detail"><code>{{ shared.text(o.detail) }}</code></div>
+                    {% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+
+        <h4 class="wd-recommendation__heading">{{ "Likely cause"|t('web-doctor') }}</h4>
+        {% if r.cause %}
+            <p>
+                <span class="wd-pill wd-pill--confidence-{{ r.cause.confidence.value }}">{{ r.cause.confidence.label() }}</span>
+                {% if where == 'investigation' %}
+                    <a href="#cause-{{ r.cause.position }}">{{ shared.text(r.cause.title) }}</a>
+                {% elseif r.issueId and r.cause.investigationId %}
+                    <a href="{{ cpUrl('web-doctor/issues/' ~ r.issueId ~ '/investigations/' ~ r.cause.investigationId) }}#cause-{{ r.cause.position }}">{{ shared.text(r.cause.title) }}</a>
+                {% else %}
+                    {{ shared.text(r.cause.title) }}
+                {% endif %}
+            </p>
+            {% if r.cause.recordedAt and where != 'investigation' %}
+                <p class="light">{{ "Weighed by the investigation of {date}."|t('web-doctor', { date: r.cause.recordedAt|datetime('short') }) }}</p>
+            {% endif %}
+        {% else %}
+            <p class="light">{{ "This advice follows from the check’s own finding rather than from a weighed cause."|t('web-doctor') }}</p>
+        {% endif %}
+
+        <h4 class="wd-recommendation__heading">{{ "Recommended action"|t('web-doctor') }}</h4>
+        <p>{{ shared.text(r.action) }}</p>
+        <p class="light">{{ shared.text(r.rationale) }}</p>
+
+        {% if r.prerequisites|length %}
+            <h4 class="wd-recommendation__heading">{{ "Before you start"|t('web-doctor') }}</h4>
+            <ul class="wd-plan__list">
+                {% for line in r.prerequisites %}
+                    <li>{{ shared.text(line) }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <h4 class="wd-recommendation__heading">{{ "Risk"|t('web-doctor') }}</h4>
+        <p><span class="wd-pill wd-pill--risk-{{ r.risk.value }}">{{ r.risk.label() }}</span> {{ shared.text(r.riskReason) }}</p>
+        <p class="light">{{ r.risk.explanation() }}</p>
+
+        <h4 class="wd-recommendation__heading">{{ "Verification"|t('web-doctor') }}</h4>
+        <p>{{ shared.text(r.verification) }}</p>
+        <p class="light">
+            {{ "Run these checks again:"|t('web-doctor') }}
+            {% for id in r.verifyWith %}<code>{{ id }}</code>{{ not loop.last ? ', ' }}{% endfor %}.
+            {{ "The issue is resolved only when the check that found the problem runs again and no longer reports it."|t('web-doctor') }}
+        </p>
+
+        <h4 class="wd-recommendation__heading">{{ "Automatic repair"|t('web-doctor') }}</h4>
+        <p class="light">
+            {%- if r.automaticRepair -%}
+                {{ "Available."|t('web-doctor') }}
+            {%- else -%}
+                {{ "Not available. Web Doctor does not carry this out; it is done by hand."|t('web-doctor') }}
+            {%- endif -%}
+        </p>
+    </section>
+{% endmacro %}
+
+{#
+    The recommendations for one finding (a RecommendationSet), and why there are none where there
+    are none. A rule that could not be applied is said, never read as no rule applying. `advice` is
+    the check's own words, shown where no rule answers the finding, labelled as the check's.
+#}
+{% macro list(set, canViewEvidence, where, advice) %}
+    {% import _self as rec %}
+    {% import "web-doctor/_macros" as shared %}
+    {% if set.failed|length %}
+        <p class="error">{{ "{count, plural, =1{A recommendation} other{# recommendations}} for this finding could not be worked out. The details are in Craft’s logs."|t('web-doctor', { count: set.failed|length }) }}</p>
+    {% endif %}
+    {% for r in set.recommendations %}
+        {{ rec.recommendation(r, canViewEvidence, where) }}
+    {% endfor %}
+    {% if set.partialEvidence %}
+        <p class="light">{{ "Only part of this check’s evidence was kept in this investigation, so Web Doctor does not choose a recommendation from what remains. The issue’s own page recommends from its latest finding."|t('web-doctor') }}</p>
+    {% endif %}
+    {% if set.nothingApplies() %}
+        <p class="light">{{ "No recommendation rule covers this finding, so Web Doctor recommends nothing rather than guess."|t('web-doctor') }}</p>
+        {% if advice %}
+            <p><strong>{{ "The check’s own advice"|t('web-doctor') }}:</strong> {{ shared.text(advice) }}</p>
+        {% endif %}
+    {% endif %}
+{% endmacro %}
