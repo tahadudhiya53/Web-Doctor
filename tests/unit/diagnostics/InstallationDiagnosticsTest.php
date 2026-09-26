@@ -344,6 +344,18 @@ class InstallationDiagnosticsTest extends TestCase
         self::assertSame(DiagnosticStatus::PASS, $this->pending([])->status);
     }
 
+    /**
+     * Where Craft has recorded that it could not write the files, it answers "pending?" by writing
+     * them from the database and saying no. So the question is not asked, and nothing is vouched for.
+     */
+    public function testProjectConfigCraftCouldNotWriteIsNotAskedAboutOrPassed(): void
+    {
+        $result = $this->pending(['hadFileWriteIssues' => true]);
+
+        self::assertSame(DiagnosticStatus::UNKNOWN, $result->status);
+        self::assertTrue($result->evidence()[0]->get('hadFileWriteIssues'));
+    }
+
     public function testAnInstallationWithNoProjectConfigFilesHasNothingToApply(): void
     {
         // Keeping configuration only in the database is a supported arrangement, not a fault.

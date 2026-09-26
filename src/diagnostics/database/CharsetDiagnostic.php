@@ -129,8 +129,10 @@ class CharsetDiagnostic extends Diagnostic
             );
         }
 
+        // The sample is the question this check exists to answer, so failing to take it is not
+        // knowing, rather than a note beside a clean result.
         if ($supportsMb4 === null) {
-            return $this->info(
+            return $this->unknown(
                 Craft::t('web-doctor', 'The database is set to {charset}, as configured. Four-byte character support could not be sampled.', ['charset' => $actual['charset']]),
                 $evidence,
             );

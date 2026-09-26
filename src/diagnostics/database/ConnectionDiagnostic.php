@@ -102,8 +102,10 @@ class ConnectionDiagnostic extends Diagnostic
 
         $evidence = [$settings, $connection];
 
+        // Not a non-finding: without the minimum, a server Craft does not support would raise
+        // nothing. As the PHP version check answers the same gap.
         if ($required === null) {
-            return $this->info(
+            return $this->unknown(
                 Craft::t('web-doctor', 'Connected to {driver} {version}. The version Craft requires could not be read.', [
                     'driver' => $driverLabel,
                     'version' => $serverVersion,
@@ -138,7 +140,7 @@ class ConnectionDiagnostic extends Diagnostic
     /**
      * The minimum server version Craft requires for the database actually in use.
      */
-    private function requiredVersion(Connection $db): ?string
+    protected function requiredVersion(Connection $db): ?string
     {
         $versions = Requirements::databaseVersions();
 

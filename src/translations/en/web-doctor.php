@@ -794,4 +794,7 @@ return [
     'An issue cannot be moved to “{status}” by hand. That state is established by what Web Doctor observes, not by a request.' => 'An issue cannot be moved to “{status}” by hand. That state is established by what Web Doctor observes, not by a request.',
     'Setting an issue to “{status}” is a decision rather than an outcome, so it needs a reason.' => 'Setting an issue to “{status}” is a decision rather than an outcome, so it needs a reason.',
     'No issue exists with the ID {id}.' => 'No issue exists with the ID {id}.',
+    'The database could not be reached, so whether Craft is installed could not be determined.' => 'The database could not be reached, so whether Craft is installed could not be determined.',
+    'Craft has recorded that it could not write the project config files, so whether changes are pending was not asked.' => 'Craft has recorded that it could not write the project config files, so whether changes are pending was not asked.',
+    'Asked now, Craft would rewrite the project config files from the database, replacing any changes they hold that have not been applied. Fix what stopped the files being written (usually the permissions on config/project), then run the checks again.' => 'Asked now, Craft would rewrite the project config files from the database, replacing any changes they hold that have not been applied. Fix what stopped the files being written (usually the permissions on config/project), then run the checks again.',
 ];

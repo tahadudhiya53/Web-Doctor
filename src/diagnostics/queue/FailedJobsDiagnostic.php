@@ -31,10 +31,12 @@ use Throwable;
  * form of it: merging two unrelated failures would produce a wrong story, and leaving them
  * apart only produces a longer one.
  *
- * Error text is shown on the same terms Craft itself shows it — in development mode, or to an
- * administrator. Web Doctor does not become the way around that, and it redacts what it does
- * show regardless: being allowed to see an error is not the same as being shown a credential
- * that happened to be inside one.
+ * Error text is read on the same terms Craft itself shows it — in development mode, or when an
+ * administrator runs the check — so a run somebody else starts records only whether there was an
+ * error. What is recorded is evidence from then on, and Web Doctor shows evidence contents to
+ * whoever holds "View evidence"; granting that is granting this. It redacts what it records
+ * regardless: being allowed to see an error is not the same as being shown a credential that
+ * happened to be inside one.
  */
 class FailedJobsDiagnostic extends QueueDiagnostic
 {
@@ -153,13 +155,13 @@ class FailedJobsDiagnostic extends QueueDiagnostic
      */
     protected function groupFailures(Queue $queue, int $limit): array
     {
-        $rows = $this->failedJobs($queue)
+        $rows = $this->onQueueDb($queue, fn($db): array => $this->failedJobs($queue)
             ->select(['description', 'error', 'dateFailed'])
             // Most recent first, and `id` breaks the tie so two rows failing in the same second
             // never come back in a different order on a later run.
             ->orderBy(['dateFailed' => SORT_DESC, 'id' => SORT_DESC])
             ->limit($limit)
-            ->all();
+            ->all($db));
 
         $showErrors = $this->mayShowErrors();
         $groups = [];
@@ -205,7 +207,7 @@ class FailedJobsDiagnostic extends QueueDiagnostic
      */
     protected function totalFailed(Queue $queue): int
     {
-        return (int)$this->failedJobs($queue)->count('*');
+        return (int)$this->onQueueDb($queue, fn($db) => $this->failedJobs($queue)->count('*', $db));
     }
 
     /**
@@ -220,9 +222,10 @@ class FailedJobsDiagnostic extends QueueDiagnostic
     /**
      * Whether the error a job recorded may be shown.
      *
-     * The same terms Craft applies in its own queue listing. Web Doctor reads the queue table
-     * directly — Craft's listing puts failures last, so a bounded read of it returns none — and
-     * reading it directly must not become a way around the rule that comes with it.
+     * The same terms Craft applies in its own queue listing, for the person running the check. Web
+     * Doctor reads the queue table directly — Craft's listing puts failures last, so a bounded read
+     * of it returns none — and a run by somebody Craft would not show the errors to must not read
+     * them. Once read they are evidence, shown under "View evidence" like any other.
      */
     private function mayShowErrors(): bool
     {

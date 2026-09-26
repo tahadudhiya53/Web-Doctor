@@ -147,17 +147,17 @@ class QueueBacklogDiagnostic extends QueueDiagnostic
 
         $pending = fn(): Query => $this->jobs($queue)->andWhere(['fail' => false, 'timeUpdated' => null]);
 
-        return [
+        return $this->onQueueDb($queue, fn($db): array => [
             'waiting' => (int)$pending()
                 ->andWhere(new Expression('[[timePushed]] + [[delay]] <= :time', [':time' => $now]))
-                ->count('*'),
+                ->count('*', $db),
             'delayed' => (int)$pending()
                 ->andWhere(new Expression('[[timePushed]] + [[delay]] > :time', [':time' => $now]))
-                ->count('*'),
+                ->count('*', $db),
             'reserved' => (int)$this->jobs($queue)
                 ->andWhere(['and', ['fail' => false], ['not', ['timeUpdated' => null]]])
-                ->count('*'),
-        ];
+                ->count('*', $db),
+        ]);
     }
 
     /**
@@ -170,10 +170,10 @@ class QueueBacklogDiagnostic extends QueueDiagnostic
     {
         $now = DateTimeHelper::currentTimeStamp();
 
-        $oldest = $this->jobs($queue)
+        $oldest = $this->onQueueDb($queue, fn($db) => $this->jobs($queue)
             ->andWhere(['fail' => false, 'timeUpdated' => null])
             ->andWhere(new Expression('[[timePushed]] + [[delay]] <= :time', [':time' => $now]))
-            ->min('[[timePushed]] + [[delay]]');
+            ->min('[[timePushed]] + [[delay]]', $db));
 
         return $oldest === null || $oldest === false ? null : (int)$oldest;
     }
@@ -192,12 +192,12 @@ class QueueBacklogDiagnostic extends QueueDiagnostic
     protected function longestRunning(Queue $queue): ?array
     {
         /** @var array{timeUpdated: int|string|null, ttr: int|string}|null $row */
-        $row = $this->jobs($queue)
+        $row = $this->onQueueDb($queue, fn($db) => $this->jobs($queue)
             ->select(['timeUpdated', 'ttr'])
             ->andWhere(['and', ['fail' => false], ['not', ['timeUpdated' => null]]])
             ->orderBy(['timeUpdated' => SORT_ASC])
             ->limit(1)
-            ->one() ?: null;
+            ->one($db)) ?: null;
 
         if ($row === null || $row['timeUpdated'] === null) {
             return null;

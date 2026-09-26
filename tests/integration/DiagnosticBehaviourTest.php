@@ -102,6 +102,19 @@ class DiagnosticBehaviourTest extends TestCase
         self::assertSame('Present', $result->evidence()[0]->get('password'));
     }
 
+    public function testAServerWhoseMinimumCannotBeReadIsNotKnowingRatherThanANote(): void
+    {
+        // Without the minimum, a server Craft does not support would raise nothing at all.
+        $diagnostic = new class() extends ConnectionDiagnostic {
+            protected function requiredVersion(Connection $db): ?string
+            {
+                return null;
+            }
+        };
+
+        self::assertSame(DiagnosticStatus::UNKNOWN, $diagnostic->run($this->context())->status);
+    }
+
     public function testAServerVersionWithABuildSuffixIsStillComparedCorrectly(): void
     {
         // `10.11.6-MariaDB-log` and `8.0.35-0ubuntu0.22.04.1` are ordinary version strings, and
@@ -272,12 +285,13 @@ class DiagnosticBehaviourTest extends TestCase
         self::assertSame(DiagnosticStatus::SKIPPED, $this->charset(null, true)->status);
     }
 
-    public function testAnUnsampleableTableIsSaidToBeUnsampledRatherThanFine(): void
+    public function testAnUnsampleableTableIsNotKnowingRatherThanFine(): void
     {
+        // The sample is the question the check exists to answer; not taking it is not knowing.
         $configured = Craft::$app->getConfig()->getDb()->getCharset();
         $result = $this->charset(['charset' => $configured, 'collation' => null], null);
 
-        self::assertSame(DiagnosticStatus::INFO, $result->status);
+        self::assertSame(DiagnosticStatus::UNKNOWN, $result->status);
         self::assertNull($result->evidence()[0]->get('sampledTableAcceptsMb4'));
     }
 
@@ -864,6 +878,26 @@ class DiagnosticBehaviourTest extends TestCase
         $diagnostic = new StubbedQueueBacklogDiagnostic(['queue' => new StubQueue(), 'unreadable' => true]);
 
         self::assertSame(DiagnosticStatus::UNKNOWN, $this->engine()->run($diagnostic, DiagnosticContext::current())->status);
+    }
+
+    /**
+     * A queue can keep its jobs on a connection of its own, and the checks read that one. Here it
+     * names a table prefix with no queue table behind it, so reading it cannot succeed — where
+     * reading the application's default connection instead would have counted another queue's rows.
+     */
+    public function testTheQueueIsReadOnItsOwnConnection(): void
+    {
+        if (!Craft::$app->getQueue() instanceof \craft\queue\Queue) {
+            self::markTestSkipped('This installation does not use Craft’s database-backed queue.');
+        }
+
+        $db = clone Craft::$app->getDb();
+        $db->tablePrefix = 'webdoctor_absent_';
+        $queue = new \craft\queue\Queue(['db' => $db]);
+
+        foreach ([new QueueBacklogDiagnostic(['queue' => $queue]), new FailedJobsDiagnostic(['queue' => $queue])] as $diagnostic) {
+            self::assertSame(DiagnosticStatus::UNKNOWN, $this->engine()->run($diagnostic, DiagnosticContext::current())->status, $diagnostic->id());
+        }
     }
 
     public function testReadingTheQueueNeverChangesIt(): void

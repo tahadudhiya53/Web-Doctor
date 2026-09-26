@@ -131,9 +131,9 @@ abstract class Diagnostic extends Component implements DiagnosticInterface
      *
      * @param Evidence[] $evidence
      */
-    protected function unknown(string $summary, array $evidence = []): DiagnosticResult
+    protected function unknown(string $summary, array $evidence = [], string $description = ''): DiagnosticResult
     {
-        return $this->result(DiagnosticStatus::UNKNOWN, $summary, evidence: $evidence);
+        return $this->result(DiagnosticStatus::UNKNOWN, $summary, evidence: $evidence, description: $description);
     }
 
     /**

@@ -119,12 +119,18 @@ class PlatformDiagnosticsTest extends TestCase
     /**
      * @param bool|RuntimeException $installed
      */
-    private function application(bool|RuntimeException $installed, ?bool $maintenance = false, ?bool $live = true): DiagnosticResult
+    private function application(bool|RuntimeException $installed, ?bool $maintenance = false, ?bool $live = true, ?bool $reachable = true): DiagnosticResult
     {
-        $diagnostic = new class(['installed' => $installed, 'maintenance' => $maintenance, 'live' => $live]) extends ApplicationDiagnostic {
+        $diagnostic = new class(['installed' => $installed, 'maintenance' => $maintenance, 'live' => $live, 'reachable' => $reachable]) extends ApplicationDiagnostic {
             public bool|RuntimeException $installed = true;
             public ?bool $maintenance = false;
             public ?bool $live = true;
+            public ?bool $reachable = true;
+
+            protected function isDbConnectionValid(): ?bool
+            {
+                return $this->reachable;
+            }
 
             protected function isInstalled(): bool
             {
@@ -171,6 +177,12 @@ class PlatformDiagnosticsTest extends TestCase
         self::assertSame(DiagnosticStatus::FAIL, $result->status);
         self::assertSame(Severity::CRITICAL, $result->severity());
         self::assertFalse($result->evidence()[0]->get('installed'));
+
+        // Craft also says "not installed" when it cannot reach the database, or cannot say whether
+        // it can: that is not knowing, not a Craft with no tables.
+        foreach ([false, null] as $reachable) {
+            self::assertSame(DiagnosticStatus::UNKNOWN, $this->application(false, reachable: $reachable)->status);
+        }
     }
 
     public function testMaintenanceModeIsAWarning(): void

@@ -54,6 +54,15 @@ class ApplicationDiagnostic extends Diagnostic
             );
         }
 
+        // Craft answers "not installed" when it cannot reach the database at all, rather than
+        // throwing, so that answer is only believed once the connection is known to work.
+        if (!$installed && $this->isDbConnectionValid() !== true) {
+            return $this->unknown(
+                Craft::t('web-doctor', 'The database could not be reached, so whether Craft is installed could not be determined.'),
+                [$this->state(['installed' => Redaction::UNKNOWN, 'databaseReachable' => false])],
+            );
+        }
+
         if (!$installed) {
             return $this->fail(
                 Craft::t('web-doctor', 'Craft is not installed.'),
@@ -132,6 +141,15 @@ class ApplicationDiagnostic extends Diagnostic
     protected function isInstalled(): bool
     {
         return Craft::$app->getIsInstalled();
+    }
+
+    protected function isDbConnectionValid(): ?bool
+    {
+        try {
+            return Craft::$app->getIsDbConnectionValid();
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     protected function isInMaintenanceMode(): ?bool
