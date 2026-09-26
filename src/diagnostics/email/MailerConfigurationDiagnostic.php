@@ -182,10 +182,22 @@ class MailerConfigurationDiagnostic extends Diagnostic
     {
         $data = ['transportType' => $transportType];
 
+        // An SMTP transport with no host at all is recorded as missing one, as it is judged.
+        if ($transportType === Smtp::class) {
+            $transportSettings += ['host' => null];
+        }
+
         foreach ($transportSettings as $key => $value) {
-            $data[(string)$key] = in_array($key, ['host', 'port', 'encryptionMethod', 'timeout'], true)
-                ? Redaction::redactValue($this->parse(is_scalar($value) ? (string)$value : null))
-                : Redaction::presence($this->parse(is_scalar($value) ? (string)$value : $value));
+            if (!in_array($key, ['host', 'port', 'encryptionMethod', 'timeout'], true)) {
+                $data[(string)$key] = Redaction::presence($this->parse(is_scalar($value) ? (string)$value : $value));
+
+                continue;
+            }
+
+            // Named outright when set; when not, it is missing, in the word every other setting
+            // uses for that, rather than an empty value a reader has to interpret.
+            $parsed = $this->parse(is_scalar($value) ? (string)$value : null);
+            $data[(string)$key] = Redaction::presence($parsed) === Redaction::MISSING ? Redaction::MISSING : Redaction::redactValue($parsed);
         }
 
         return $this->evidence(EvidenceType::ENVIRONMENT_VARIABLE, Craft::t('web-doctor', 'Mail transport'), $data);

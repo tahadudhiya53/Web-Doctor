@@ -119,6 +119,8 @@ class FailedJobsDiagnostic extends QueueDiagnostic
             $description = $complete
                 ? Craft::t('web-doctor', 'Some of these are the same job failing repeatedly, which points at a condition that has not gone away rather than at a one-off.')
                 : Craft::t('web-doctor', 'Of the {examined} most recent failures examined, some are the same job failing repeatedly, which points at a condition that has not gone away. The rest were not read.', ['examined' => $examined]);
+        } elseif ($examined === 0) {
+            $description = Craft::t('web-doctor', 'Work the site was asked to do has not been done, and it will not be retried on its own. Their errors are not read at this depth.');
         } else {
             $description = $complete
                 ? Craft::t('web-doctor', 'Work the site was asked to do has not been done, and it will not be retried on its own.')
@@ -126,9 +128,10 @@ class FailedJobsDiagnostic extends QueueDiagnostic
         }
 
         return $this->fail(
-            $complete
-                ? Craft::t('web-doctor', 'Queue jobs have failed: {count}.', ['count' => $total])
-                : Craft::t('web-doctor', 'Queue jobs have failed: {count}, of which the {examined} most recent were examined.', ['count' => $total, 'examined' => $examined]),
+            match (true) {
+                $complete, $examined === 0 => Craft::t('web-doctor', 'Queue jobs have failed: {count}.', ['count' => $total]),
+                default => Craft::t('web-doctor', 'Queue jobs have failed: {count}, of which the {examined} most recent were examined.', ['count' => $total, 'examined' => $examined]),
+            },
             $evidence,
             recommendation: Craft::t('web-doctor', 'Look at the recorded error for each job, fix what it names, then retry the jobs from Utilities → Queue Manager.'),
             severity: $repeated !== [] || $total > 5 ? Severity::HIGH : Severity::MEDIUM,

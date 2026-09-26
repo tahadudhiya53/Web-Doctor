@@ -155,7 +155,9 @@ class StoragePathsDiagnostic extends Diagnostic
         if (!file_exists($path)) {
             $parent = dirname($path);
 
-            return is_dir($parent) && !is_readable($parent) ? 'unknown' : 'missing';
+            // Whether something exists inside a directory can only be told from inside it: a parent
+            // that cannot be entered makes file_exists() answer false either way.
+            return is_dir($parent) && (!is_readable($parent) || !is_executable($parent)) ? 'unknown' : 'missing';
         }
 
         if (!is_dir($path)) {

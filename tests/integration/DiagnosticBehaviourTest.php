@@ -22,8 +22,10 @@ use Tahadudhiya\WebDoctor\diagnostics\queue\QueueBacklogDiagnostic;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
+use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\services\DiagnosticEngine;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\Tests\_support\ForeignQueue;
@@ -117,6 +119,9 @@ class DiagnosticBehaviourTest extends TestCase
         self::assertSame('10.11.6', $diagnostic->comparable('10.11.6-MariaDB-log'));
         self::assertSame('8.0.35', $diagnostic->comparable('8.0.35-0ubuntu0.22.04.1'));
         self::assertSame('8.0.40', $diagnostic->comparable('8.0.40'));
+        // MariaDB before 11 reports itself behind a MySQL 5.5.5 prefix; the version is the second.
+        self::assertSame('10.6.12', $diagnostic->comparable('5.5.5-10.6.12-MariaDB'));
+        self::assertSame('16.2', $diagnostic->comparable('16.2 (Debian 16.2-1.pgdg120+2)'));
     }
 
     // --- database.migrations -------------------------------------------------
@@ -254,6 +259,12 @@ class DiagnosticBehaviourTest extends TestCase
         self::assertSame(DiagnosticStatus::WARNING, $result->status);
         self::assertSame(Severity::LOW, $result->severity());
         self::assertSame('latin1', $result->evidence()[0]->get('databaseCharset'));
+
+        // A newer server calling the configured `utf8` by its other name is not a disagreement;
+        // four bytes against three still is.
+        self::assertTrue(CharsetDiagnostic::sameCharset('utf8mb3', 'utf8'));
+        self::assertTrue(CharsetDiagnostic::sameCharset('UTF8MB4', 'utf8mb4'));
+        self::assertFalse(CharsetDiagnostic::sameCharset('utf8mb3', 'utf8mb4'));
     }
 
     public function testADriverThatReportsNoCharsetIsSkippedRatherThanGuessedAt(): void
@@ -443,12 +454,21 @@ class DiagnosticBehaviourTest extends TestCase
         self::assertStringContainsString('environment variable', $result->summary);
     }
 
+    /**
+     * Recorded as missing, not as an empty value, whether the host is blank or absent altogether:
+     * that is the word the "a setting the environment lacks" cause reads.
+     */
     public function testAMissingSmtpHostIsAFailure(): void
     {
-        $result = $this->mail(['transportSettings' => ['host' => '', 'useAuthentication' => false]]);
+        foreach ([['host' => '', 'useAuthentication' => false], ['useAuthentication' => false]] as $settings) {
+            $result = $this->mail(['transportSettings' => $settings]);
 
-        self::assertSame(DiagnosticStatus::FAIL, $result->status);
-        self::assertStringContainsString('SMTP host', $result->summary);
+            self::assertSame(DiagnosticStatus::FAIL, $result->status);
+            self::assertStringContainsString('SMTP host', $result->summary);
+
+            $transport = array_values(array_filter($result->evidence(), static fn(Evidence $e): bool => $e->label === 'Mail transport'));
+            self::assertSame(Redaction::MISSING, $transport[0]->get('host'));
+        }
     }
 
     public function testAuthenticationSwitchedOnWithNoCredentialsIsAFailure(): void
@@ -664,6 +684,9 @@ class DiagnosticBehaviourTest extends TestCase
         self::assertSame(DiagnosticStatus::FAIL, $result->status, 'The count is still a finding, however shallow the run.');
         self::assertCount(1, $result->evidence());
         self::assertSame(0, $result->evidence()[0]->get('examined'));
+        // Said as it is, rather than as a sample of none.
+        self::assertSame('Queue jobs have failed: 2.', $result->summary);
+        self::assertStringContainsString('not read at this depth', $result->description);
     }
 
     public function testAQueueThatCannotBeReadIsReportedAsNotKnowing(): void

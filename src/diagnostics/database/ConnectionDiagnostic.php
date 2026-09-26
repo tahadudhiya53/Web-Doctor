@@ -4,6 +4,7 @@ namespace Tahadudhiya\WebDoctor\diagnostics\database;
 
 use Craft;
 use craft\db\Connection;
+use craft\helpers\App;
 use Tahadudhiya\WebDoctor\base\Diagnostic;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
@@ -154,12 +155,12 @@ class ConnectionDiagnostic extends Diagnostic
     /**
      * The part of a reported server version that can be compared.
      *
-     * Servers decorate their version strings — `10.11.6-MariaDB-log`, `8.0.35-0ubuntu0.22.04.1`
-     * — and `version_compare` reads those suffixes as pre-release markers, which would make a
-     * supported server look unsupported.
+     * Servers decorate their version strings — `10.11.6-MariaDB-log`, `8.0.35-0ubuntu0.22.04.1`,
+     * and MariaDB before 11 as `5.5.5-10.6.12-MariaDB` — and `version_compare` would read those as
+     * pre-release markers or as the wrong version. Craft reads them with this same helper.
      */
     private function comparableVersion(string $version): string
     {
-        return preg_match('/^\d+(?:\.\d+)*/', $version, $match) === 1 ? $match[0] : $version;
+        return App::normalizeVersion($version) ?: $version;
     }
 }

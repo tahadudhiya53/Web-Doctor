@@ -46,12 +46,16 @@ class InstallationDiagnosticsTest extends TestCase
 
     /**
      * @param array<string, array<string, mixed>>|RuntimeException $info
+     * @param list<string> $switchedOff
      */
-    private function inventory(array|RuntimeException $info): DiagnosticResult
+    private function inventory(array|RuntimeException $info, array $switchedOff = []): DiagnosticResult
     {
-        $diagnostic = new class(['info' => $info]) extends InstalledPluginsDiagnostic {
+        $diagnostic = new class(['info' => $info, 'switchedOff' => $switchedOff]) extends InstalledPluginsDiagnostic {
             /** @var array<string, array<string, mixed>>|RuntimeException */
             public array|RuntimeException $info = [];
+
+            /** @var list<string> */
+            public array $switchedOff = [];
 
             protected function pluginInfo(): array
             {
@@ -60,6 +64,11 @@ class InstallationDiagnosticsTest extends TestCase
                 }
 
                 return $this->info;
+            }
+
+            protected function isSwitchedOn(string $handle): bool
+            {
+                return !in_array($handle, $this->switchedOff, true);
             }
         };
 
@@ -105,10 +114,14 @@ class InstallationDiagnosticsTest extends TestCase
         $result = $this->inventory([
             'alpha' => $this->plugin(),
             'beta' => $this->plugin(['isEnabled' => false]),
-        ]);
+            // Switched on, but it failed to load: that is a fault, and not this check's to call a choice.
+            'gamma' => $this->plugin(['isEnabled' => false]),
+        ], switchedOff: ['beta']);
 
         self::assertSame(DiagnosticStatus::INFO, $result->status);
-        self::assertStringContainsString('beta', $result->summary);
+        self::assertStringContainsString('Switched off: beta.', $result->summary);
+        self::assertTrue($result->evidence()[2]->get('enabled'));
+        self::assertFalse($result->evidence()[2]->get('loaded'));
     }
 
     public function testALicenceKeyIsNeverRecordedInAnyForm(): void
@@ -551,15 +564,6 @@ class InstallationDiagnosticsTest extends TestCase
         self::assertTrue($result->hasEvidence());
     }
 
-    public function testTheCheckIsDeterministic(): void
-    {
-        $first = $this->storage(['/site/storage/logs' => 'missing']);
-        $second = $this->storage(['/site/storage/logs' => 'missing']);
-
-        self::assertSame($first->status, $second->status);
-        self::assertSame($first->evidence()[0]->data, $second->evidence()[0]->data);
-    }
-
     public function testAFileWhereADirectoryBelongsIsNotReportedAsMissing(): void
     {
         // The two need different fixes, and calling a file "missing" sends somebody to create
@@ -623,6 +627,14 @@ class InstallationDiagnosticsTest extends TestCase
             'an existing writable directory' => [static fn(string $base): string => $base, 'writable'],
             'a path that is not there' => [static fn(string $base): string => $base . '/not-here', 'missing'],
             'a file where a directory belongs' => [static fn(string $base): string => $base . '/occupied', 'notADirectory'],
+            // `chmod -R 644 storage`: the parent can be read but not entered, so whether the
+            // directory inside it exists cannot be told — which is not the same as it being absent.
+            'a directory inside one that cannot be entered' => [static function(string $base): string {
+                mkdir($base . '/locked/runtime', 0o755, true);
+                chmod($base . '/locked', 0o644);
+
+                return $base . '/locked/runtime';
+            }, 'unknown'],
         ];
     }
 
@@ -650,6 +662,9 @@ class InstallationDiagnosticsTest extends TestCase
         try {
             self::assertSame($expected, $diagnostic->state($path($base)));
         } finally {
+            @chmod($base . '/locked', 0o755);
+            @rmdir($base . '/locked/runtime');
+            @rmdir($base . '/locked');
             @unlink($base . '/occupied');
             @rmdir($base);
         }

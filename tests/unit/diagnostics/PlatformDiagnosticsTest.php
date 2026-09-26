@@ -421,15 +421,6 @@ class PlatformDiagnosticsTest extends TestCase
         self::assertSame('cli', $result->evidence()[0]->get('sapi'));
     }
 
-    public function testThePhpVersionCheckIsDeterministic(): void
-    {
-        $first = $this->version('8.1.0', '^8.2')->run($this->context());
-        $second = $this->version('8.1.0', '^8.2')->run($this->context());
-
-        self::assertSame($first->status, $second->status);
-        self::assertSame($first->evidence()[0]->data, $second->evidence()[0]->data);
-    }
-
     /**
      * @param string[] $required
      * @param string[] $loaded

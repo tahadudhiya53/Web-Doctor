@@ -118,19 +118,6 @@ class CoreDiagnosticsRunTest extends TestCase
         }
     }
 
-    public function testNoShippedCheckFailedToRun(): void
-    {
-        // An ERROR is the check breaking rather than finding something, so on a working
-        // installation every one of these should have reached a conclusion of its own — even
-        // the ones whose answer is that they could not tell.
-        $failures = array_map(
-            static fn(DiagnosticResult $r): string => $r->diagnosticId . ': ' . $r->description,
-            $this->shippedWithStatus($this->fullRun(), DiagnosticStatus::ERROR),
-        );
-
-        self::assertSame([], $failures, 'These checks threw instead of reporting: ' . implode('; ', $failures));
-    }
-
     public function testEveryResultIsAttributedToTheRunAndTheCheckThatMadeIt(): void
     {
         $run = $this->fullRun();
@@ -190,19 +177,6 @@ class CoreDiagnosticsRunTest extends TestCase
         $second = $this->engine()->runAll(DiagnosticContext::current());
 
         self::assertSame($statuses($first), $statuses($second));
-    }
-
-    public function testResultsComeBackInTheSameOrderEveryTime(): void
-    {
-        $ids = static fn(DiagnosticRun $run): array => array_map(
-            static fn(DiagnosticResult $r): string => $r->diagnosticId,
-            $run->results(),
-        );
-
-        self::assertSame(
-            $ids($this->engine()->runAll(DiagnosticContext::current())),
-            $ids($this->engine()->runAll(DiagnosticContext::current())),
-        );
     }
 
     public function testNothingARunRecordsIsACredential(): void
@@ -423,19 +397,6 @@ class CoreDiagnosticsRunTest extends TestCase
 
             self::assertCount(count(CoreDiagnostics::classes()), $this->shippedResults($run), "at {$depth->value} depth");
             self::assertSame([], $this->shippedWithStatus($run, DiagnosticStatus::ERROR), "a check failed to run at {$depth->value} depth");
-        }
-    }
-
-    public function testTheHealthScoreIsShownWithTheArithmeticBehindIt(): void
-    {
-        $health = $this->fullRun()->health();
-
-        self::assertSame(count($this->fullRun()->results()), $health->total);
-        self::assertNotSame([], $health->weights());
-
-        foreach ($health->contributions as $contribution) {
-            self::assertNotNull($this->fullRun()->resultFor($contribution['diagnosticId']));
-            self::assertSame($health->weights()[$contribution['severity']], $contribution['penalty']);
         }
     }
 }

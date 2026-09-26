@@ -34,7 +34,7 @@ class QueueBacklogDiagnostic extends QueueDiagnostic
     public const ID = 'queue.backlog';
 
     /** @var int How long a job may sit at the front of the queue before the queue looks stalled, in seconds. */
-    private const STALLED_AFTER = 1800;
+    public const STALLED_AFTER = 1800;
 
     /** @var int A backlog above this is worth mentioning even while it is moving. */
     private const LARGE_BACKLOG = 100;

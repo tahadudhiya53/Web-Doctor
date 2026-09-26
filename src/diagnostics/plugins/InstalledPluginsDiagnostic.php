@@ -70,7 +70,11 @@ class InstalledPluginsDiagnostic extends Diagnostic
                 'name' => $plugin['name'] ?? $handle,
                 'version' => $plugin['version'] ?? null,
                 'edition' => $plugin['edition'] ?? null,
-                'enabled' => $plugin['isEnabled'] ?? false,
+                // Whether the installation means to run it — not Craft's `isEnabled`, which says
+                // only whether the plugin object was created, and so is false for a plugin that is
+                // switched on but failed to load. That is plugins.health's finding, not a choice.
+                'enabled' => $this->isSwitchedOn($handle),
+                'loaded' => $plugin['isEnabled'] ?? false,
                 'licenseStatus' => $plugin['licenseKeyStatus'] ?? null,
             ];
 
@@ -117,5 +121,14 @@ class InstalledPluginsDiagnostic extends Diagnostic
     protected function pluginInfo(): array
     {
         return Craft::$app->getPlugins()->getAllPluginInfo();
+    }
+
+    /**
+     * Whether the installation has the plugin switched on. Protected for the reason
+     * {@see pluginInfo()} is.
+     */
+    protected function isSwitchedOn(string $handle): bool
+    {
+        return Craft::$app->getPlugins()->isPluginEnabled($handle);
     }
 }
