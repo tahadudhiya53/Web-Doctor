@@ -60,6 +60,7 @@ use Tahadudhiya\WebDoctor\Tests\_support\RecordingInvestigationsController;
 use Tahadudhiya\WebDoctor\Tests\_support\RecordingIssuesController;
 use Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic;
 use Tahadudhiya\WebDoctor\Tests\_support\TestUser;
+use Tahadudhiya\WebDoctor\Tests\_support\WebDoctorTables;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use yii\base\Component;
 use yii\base\InvalidArgumentException;
@@ -86,6 +87,9 @@ use yii\web\NotFoundHttpException;
 class InvestigationTest extends TestCase
 {
     private const ACCESS_CP = 'accessCp';
+
+    /** @var string A parameter left out of the request, as against one sent empty. */
+    private const MISSING = '(missing)';
 
     private string $environment;
     private Diagnostics $registry;
@@ -971,11 +975,82 @@ class InvestigationTest extends TestCase
         self::assertSame($dashboard->id(), $runs->latest(null)?->id());
     }
 
-    public function testARequestThatNamesNoUsableIssueOrDepthChangesNothingItShouldNot(): void
+    /**
+     * What a request may ask for: missing, the depth is normal, as the form states; one of the
+     * three, that one exactly; anything else — and an issue ID that is not a number — is refused
+     * before anything runs or is written.
+     *
+     * @return array<string, array{mixed, mixed, DiagnosticDepth|null}>
+     */
+    public static function startRequests(): array
     {
-        $this->check('tests.origin', DiagnosticCategory::DATABASE, DiagnosticStatus::FAIL);
+        return [
+            'shallow' => [null, 'shallow', DiagnosticDepth::SHALLOW],
+            'normal' => [null, 'normal', DiagnosticDepth::NORMAL],
+            'deep' => [null, 'deep', DiagnosticDepth::DEEP],
+            'depth missing' => [null, self::MISSING, DiagnosticDepth::NORMAL],
+            'a depth Web Doctor does not have' => [null, 'bottomless', null],
+            'an empty depth' => [null, '', null],
+            'the wrong case' => [null, 'Deep', null],
+            'a depth as a list' => [null, ['deep'], null],
+            'an issue ID that is not a number' => ['not-an-id', 'normal', null],
+            'an issue ID as a list' => [['1'], 'normal', null],
+            'a negative issue ID' => ['-4', 'normal', null],
+            // Read as a number, this would name the real issue.
+            'the real issue ID with text after it' => ['{id}abc', 'normal', null],
+        ];
+    }
+
+    #[DataProvider('startRequests')]
+    public function testAnInvestigationStartsExactlyAsAskedOrNotAtAll(mixed $issueId, mixed $depth, ?DiagnosticDepth $expected): void
+    {
+        $origin = $this->check('tests.origin', DiagnosticCategory::DATABASE, DiagnosticStatus::FAIL, 'Failing.', [
+            new Evidence(type: EvidenceType::CONFIGURATION, label: 'Settings', source: 'tests.origin', data: ['value' => 1]),
+        ]);
+        $breaks = $this->check('tests.breaks', DiagnosticCategory::DATABASE, static fn(): DiagnosticResult => throw new RuntimeException('Would leave an error group.'));
         $issue = $this->raise('tests.origin');
         $this->signIn(admin: true);
+
+        $params = ['issueId' => is_string($issueId) ? str_replace('{id}', (string)$issue->id, $issueId) : ($issueId ?? (string)$issue->id)];
+
+        if ($depth !== self::MISSING) {
+            $params['depth'] = $depth;
+        }
+
+        $this->post($params);
+
+        if ($expected === null) {
+            $before = WebDoctorTables::snapshot();
+
+            try {
+                $this->investigationsController()->runAction('start');
+                self::fail('A malformed request started an investigation.');
+            } catch (BadRequestHttpException) {
+            }
+
+            // Nothing ran, and nothing was written anywhere Web Doctor keeps anything: no
+            // investigation, step, issue change, evidence, error group or cause.
+            self::assertSame(0, $origin->runs);
+            self::assertSame(0, $breaks->runs);
+            self::assertSame($before, WebDoctorTables::snapshot());
+
+            return;
+        }
+
+        $this->investigationsController()->runAction('start');
+        $made = $this->investigations->forIssue($issue->id);
+
+        self::assertCount(1, $made);
+        self::assertSame($expected, $made[0]->depth);
+        self::assertSame(1, $origin->runs);
+    }
+
+    public function testARequestNamingNoIssueOrOneThatDoesNotExistChangesNothing(): void
+    {
+        $this->check('tests.origin', DiagnosticCategory::DATABASE, DiagnosticStatus::FAIL);
+        $this->raise('tests.origin');
+        $this->signIn(admin: true);
+        $before = WebDoctorTables::snapshot();
 
         // No issue at all is a malformed request.
         $this->post([]);
@@ -985,22 +1060,13 @@ class InvestigationTest extends TestCase
         } catch (BadRequestHttpException) {
         }
 
-        // An issue that does not exist is refused and said so, with nothing written.
-        foreach (['999999999', 'not-an-id'] as $id) {
-            $this->post(['issueId' => $id]);
-            $controller = $this->investigationsController();
-            $controller->runAction('start');
+        // A well-formed ID naming no issue is refused and said so.
+        $this->post(['issueId' => '999999999']);
+        $controller = $this->investigationsController();
+        $controller->runAction('start');
 
-            self::assertSame('fail', $controller->lastFlash()['level'] ?? null);
-        }
-
-        // A depth Web Doctor does not have is the normal one, as on the dashboard.
-        $this->post(['issueId' => $issue->id, 'depth' => 'bottomless']);
-        $this->investigationsController()->runAction('start');
-
-        $made = $this->investigations->forIssue($issue->id);
-        self::assertCount(1, $made);
-        self::assertSame(DiagnosticDepth::NORMAL, $made[0]->depth);
+        self::assertSame('fail', $controller->lastFlash()['level'] ?? null);
+        self::assertSame($before, WebDoctorTables::snapshot());
     }
 
     public function testInvestigatingIsNotManagingAndReadingIsNotSeeingInside(): void
@@ -1302,6 +1368,37 @@ class InvestigationTest extends TestCase
         // A cause is what its investigation concluded, and goes with it.
         IssueRecord::deleteAll(['id' => $issue->id]);
         self::assertSame(0, (int)RootCauseRecord::find()->where(['investigationId' => $investigation->id])->count());
+    }
+
+    /**
+     * A request killed outright leaves its investigation `running` for good. Long past any request's
+     * time it is said to have stopped, on every page it appears on, and nothing is rewritten.
+     */
+    public function testAnInvestigationWhoseRequestDiedIsSaidToHaveStoppedNotToBeRunning(): void
+    {
+        $this->check('tests.origin', DiagnosticCategory::DATABASE, DiagnosticStatus::FAIL);
+        $issue = $this->raise('tests.origin');
+        $investigation = $this->investigations->investigate($issue->id);
+        $this->signIn(admin: true);
+        $this->request('GET');
+
+        $page = fn(): array => [
+            $this->render($this->issuesController(), 'detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]),
+            $this->render($this->investigationsController(), 'detail', 'web-doctor/_investigations/_investigation', ['issueId' => $issue->id, 'investigationId' => $investigation->id]),
+        ];
+
+        InvestigationRecord::updateAll(['status' => InvestigationStatus::RUNNING->value, 'startedAt' => Db::prepareDateForDb(new \DateTime('-10 seconds'))], ['id' => $investigation->id]);
+        foreach ($page() as $html) {
+            self::assertStringContainsString('Running', $html);
+            self::assertStringNotContainsString('Stopped without an ending', $html);
+        }
+
+        InvestigationRecord::updateAll(['startedAt' => Db::prepareDateForDb(new \DateTime('-2 hours'))], ['id' => $investigation->id]);
+        foreach ($page() as $html) {
+            self::assertStringContainsString('Stopped without an ending', $html);
+        }
+
+        self::assertSame(InvestigationStatus::RUNNING->value, InvestigationRecord::findOne($investigation->id)?->status);
     }
 
     // The finishing transaction --------------------------------------------

@@ -10,6 +10,8 @@ use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\helpers\DiagnosticMeta;
 use Tahadudhiya\WebDoctor\investigations\InvestigationRules;
 use Tahadudhiya\WebDoctor\investigations\RelatedArea;
+use Tahadudhiya\WebDoctor\recipes\Recipe;
+use yii\base\InvalidArgumentException;
 
 /**
  * Which checks an investigation runs, and the reason for every one of them.
@@ -32,6 +34,9 @@ final class InvestigationPlan implements JsonSerializable
     /** @var int The most checks one investigation runs, whatever the rule would reach. */
     public const MAX_CHECKS = 25;
 
+    /** @var string The rule ID a recipe's plan is recorded under; which recipe is its own field. */
+    public const RECIPE_RULE = 'recipe';
+
     /**
      * @param string $ruleId The rule the plan was built under.
      * @param string $ruleLabel What kind of problem it was taken to be, as a reader saw it then.
@@ -41,6 +46,8 @@ final class InvestigationPlan implements JsonSerializable
      * inspecting that nothing registered here covers.
      * @param list<string> $leads What is worth inspecting by hand.
      * @param int $omitted Checks the rule reached that the bound left out.
+     * @param string|null $recipeId The recipe the plan was built from, for an investigation that
+     * started from a symptom rather than an issue. Such a plan has no check that raised anything.
      */
     public function __construct(
         public readonly string $ruleId,
@@ -50,6 +57,7 @@ final class InvestigationPlan implements JsonSerializable
         public readonly array $uncovered = [],
         public readonly array $leads = [],
         public readonly int $omitted = 0,
+        public readonly ?string $recipeId = null,
     ) {
     }
 
@@ -70,7 +78,85 @@ final class InvestigationPlan implements JsonSerializable
         int $maxChecks = self::MAX_CHECKS,
     ): self {
         $rule = InvestigationRules::for($category);
-        $maxChecks = max(1, $maxChecks);
+
+        $areas = [
+            [RelatedArea::check($diagnosticId, Craft::t('web-doctor', 'The check that raised this issue, to see what it reports now.')), true],
+            [RelatedArea::category($category, Craft::t('web-doctor', 'The rest of {category}, where the problem was found.', ['category' => $category->label()])), false],
+        ];
+
+        if ($depth !== DiagnosticDepth::SHALLOW) {
+            if ($affectedPlugin !== null && $affectedPlugin !== '' && $category !== DiagnosticCategory::PLUGINS) {
+                $areas[] = [RelatedArea::category(DiagnosticCategory::PLUGINS, Craft::t('web-doctor', 'The finding names the plugin “{plugin}”.', ['plugin' => $affectedPlugin])), false];
+            }
+
+            foreach ($rule->related as $area) {
+                $areas[] = [$area, false];
+            }
+        }
+
+        [$checks, $uncovered, $omitted] = self::choose($areas, $available, $maxChecks, $diagnosticId);
+
+        return new self(
+            ruleId: $rule->id,
+            ruleLabel: $rule->label,
+            depth: $depth,
+            checks: $checks,
+            uncovered: $uncovered,
+            leads: $rule->leads,
+            omitted: $omitted,
+        );
+    }
+
+    /**
+     * Plans the investigation of a symptom, from the recipe written for it.
+     *
+     * Chosen exactly as an issue's checks are, from the recipe's areas in the order it names them:
+     * its primary areas at every depth, its related ones at normal depth and deeper. Nothing
+     * raised the symptom, so no check is the origin.
+     *
+     * @param iterable<DiagnosticInterface> $available The checks registered here, in any order.
+     */
+    public static function forRecipe(
+        Recipe $recipe,
+        iterable $available,
+        DiagnosticDepth $depth = DiagnosticDepth::NORMAL,
+        int $maxChecks = self::MAX_CHECKS,
+    ): self {
+        $areas = array_map(static fn(RelatedArea $area): array => [$area, false], $depth === DiagnosticDepth::SHALLOW
+            ? $recipe->primary
+            : [...$recipe->primary, ...$recipe->related]);
+
+        [$checks, $uncovered, $omitted] = self::choose($areas, $available, $maxChecks);
+
+        return new self(
+            ruleId: self::RECIPE_RULE,
+            ruleLabel: $recipe->title,
+            depth: $depth,
+            checks: $checks,
+            uncovered: $uncovered,
+            leads: $recipe->leads,
+            omitted: $omitted,
+            recipeId: $recipe->id,
+        );
+    }
+
+    /**
+     * Chooses the checks the areas reach, each once and for its closest reason, within the bound;
+     * and lists the areas nothing registered here covers.
+     *
+     * @param list<array{RelatedArea, bool}> $areas Each area, and whether it is the origin.
+     * @param iterable<DiagnosticInterface> $available
+     * @param string|null $originId The check that raised the problem, where one did.
+     * @throws InvalidArgumentException for a bound below one.
+     * @return array{list<array{diagnosticId: string, name: string, category: string, reason: string, origin: bool}>, list<array{area: string, reason: string, origin: bool}>, int}
+     */
+    private static function choose(array $areas, iterable $available, int $maxChecks, ?string $originId = null): array
+    {
+        // A bound of nothing would plan an investigation of nothing; read as one, it would plan
+        // something nobody configured.
+        if ($maxChecks < 1) {
+            throw new InvalidArgumentException(sprintf('An investigation needs a maxChecks of at least 1; %d was given.', $maxChecks));
+        }
 
         // Asked defensively: a contributed check that throws when asked what it is must cost the
         // plan that check, not the investigation.
@@ -87,21 +173,6 @@ final class InvestigationPlan implements JsonSerializable
         // arrived in. Once the bound cuts in, which checks are chosen depends on that order, and a
         // plan that changed with how the registry happened to list them would not be repeatable.
         uksort($registered, static fn(string $a, string $b): int => [$registered[$a]['category']->position(), $a] <=> [$registered[$b]['category']->position(), $b]);
-
-        $areas = [
-            [RelatedArea::check($diagnosticId, Craft::t('web-doctor', 'The check that raised this issue, to see what it reports now.')), true],
-            [RelatedArea::category($category, Craft::t('web-doctor', 'The rest of {category}, where the problem was found.', ['category' => $category->label()])), false],
-        ];
-
-        if ($depth !== DiagnosticDepth::SHALLOW) {
-            if ($affectedPlugin !== null && $affectedPlugin !== '' && $category !== DiagnosticCategory::PLUGINS) {
-                $areas[] = [RelatedArea::category(DiagnosticCategory::PLUGINS, Craft::t('web-doctor', 'The finding names the plugin “{plugin}”.', ['plugin' => $affectedPlugin])), false];
-            }
-
-            foreach ($rule->related as $area) {
-                $areas[] = [$area, false];
-            }
-        }
 
         $checks = $uncovered = $omitted = [];
 
@@ -138,7 +209,7 @@ final class InvestigationPlan implements JsonSerializable
 
             if (!$covered) {
                 $uncovered[] = [
-                    'area' => $origin ? $diagnosticId : $area->label(),
+                    'area' => $origin ? (string)$originId : $area->label(),
                     'reason' => $origin
                         ? Craft::t('web-doctor', 'The check that raised this issue is not installed here any more, so what it reports now cannot be asked.')
                         : $area->reason,
@@ -147,15 +218,7 @@ final class InvestigationPlan implements JsonSerializable
             }
         }
 
-        return new self(
-            ruleId: $rule->id,
-            ruleLabel: $rule->label,
-            depth: $depth,
-            checks: array_values($checks),
-            uncovered: $uncovered,
-            leads: $rule->leads,
-            omitted: count($omitted),
-        );
+        return [array_values($checks), $uncovered, count($omitted)];
     }
 
     /**
@@ -200,6 +263,7 @@ final class InvestigationPlan implements JsonSerializable
             uncovered: $uncovered,
             leads: array_values(array_map('strval', array_filter((array)($stored['leads'] ?? []), 'is_string'))),
             omitted: (int)($stored['omitted'] ?? 0),
+            recipeId: is_string($stored['recipeId'] ?? null) && $stored['recipeId'] !== '' ? $stored['recipeId'] : null,
         );
     }
 
@@ -224,6 +288,15 @@ final class InvestigationPlan implements JsonSerializable
         }
 
         return false;
+    }
+
+    /**
+     * Whether the plan should have included the check that raised the problem and could not. A
+     * recipe's plan never has one to include.
+     */
+    public function missesOrigin(): bool
+    {
+        return $this->recipeId === null && !$this->includesOrigin();
     }
 
     /**
@@ -274,6 +347,7 @@ final class InvestigationPlan implements JsonSerializable
             'uncovered' => $this->uncovered,
             'leads' => $this->leads,
             'omitted' => $this->omitted,
+            'recipeId' => $this->recipeId,
         ];
     }
 }

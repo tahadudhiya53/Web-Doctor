@@ -99,6 +99,19 @@
     </div>
 {% endif %}
 
+{% if (recipes ?? [])|length %}
+    {% import "web-doctor/_macros" as shared %}
+    <div class="pane wd-recipes-pointer">
+        <h2>{{ "Something specific going wrong?"|t('web-doctor') }}</h2>
+        <p class="light">{{ "A recipe runs the checks that cover what a symptom most often comes from, and weighs what they find."|t('web-doctor') }}</p>
+        <ul class="wd-plan__list">
+            {% for recipe in recipes %}
+                <li><a href="{{ cpUrl('web-doctor/recipes') }}#recipe-{{ recipe.id }}">{{ shared.text(recipe.symptom) }}</a> <span class="light">— {{ shared.text(recipe.title) }}</span></li>
+            {% endfor %}
+        </ul>
+    </div>
+{% endif %}
+
 <form method="post" accept-charset="UTF-8" data-wd-run-form>
     {{ csrfInput() }}
     {{ actionInput('web-doctor/overview/run') }}

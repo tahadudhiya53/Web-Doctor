@@ -7,14 +7,14 @@
 {% import "web-doctor/_macros" as shared %}
 {% import _self as rc %}
 
-{% macro observation(o, canViewEvidence, causeGroups, issue) %}
+{% macro observation(o, canViewEvidence, causeGroups, subject) %}
     {% import "web-doctor/_macros" as shared %}
     {% set group = o.errorFingerprint ? (causeGroups[o.errorFingerprint] ?? null) : null %}
     <li class="wd-cause__observation">
         <span class="wd-cause__kind">{{ o.kindLabel() }}</span>
-        {% if o.issueId and o.issueId == issue.id and o.kind == 'issue' %}
-            {{ shared.text(o.label) }} <span class="wd-mark wd-mark--origin">{{ "This issue"|t('web-doctor') }}</span>
-        {% elseif o.issueId and o.issueId != issue.id %}
+        {% if o.issueId and o.issueId == subject.id and o.kind == 'issue' %}
+            {{ shared.text(o.label) }} <span class="wd-mark wd-mark--origin">{{ subject.label }}</span>
+        {% elseif o.issueId and o.issueId != subject.id %}
             <a href="{{ cpUrl('web-doctor/issues/' ~ o.issueId) }}">{{ shared.text(o.label) }}</a>
         {% elseif group %}
             <a href="{{ cpUrl('web-doctor/errors/' ~ group.id) }}">{{ shared.text(o.label) }}</a>
@@ -31,7 +31,7 @@
     </li>
 {% endmacro %}
 
-{% macro condition(condition, canViewEvidence, causeGroups, issue) %}
+{% macro condition(condition, canViewEvidence, causeGroups, subject) %}
     {% import "web-doctor/_macros" as shared %}
     {% import _self as rc %}
     <li class="wd-cause__condition">
@@ -39,7 +39,7 @@
         {% if condition.observations|length %}
             <ul class="wd-cause__observations">
                 {% for o in condition.observations %}
-                    {{ rc.observation(o, canViewEvidence, causeGroups, issue) }}
+                    {{ rc.observation(o, canViewEvidence, causeGroups, subject) }}
                 {% endfor %}
             </ul>
             {% if condition.omitted %}
@@ -53,6 +53,11 @@
 {% set likely = constant('Tahadudhiya\\WebDoctor\\enums\\Confidence::LIKELY') %}
 {% set high = constant('Tahadudhiya\\WebDoctor\\enums\\Confidence::HIGH') %}
 {% set confirmed = constant('Tahadudhiya\\WebDoctor\\enums\\Confidence::CONFIRMED') %}
+
+{# The issue the causes explain: the one investigated, or for a recipe the problem they were weighed for. #}
+{% set subject = issue
+    ? { id: issue.id, label: "This issue"|t('web-doctor') }
+    : { id: diagnosed ? diagnosed.relatedIssueId : null, label: "The problem weighed"|t('web-doctor') } %}
 
 <div class="pane" id="causes">
     <h2>{{ "Possible causes"|t('web-doctor') }}</h2>
@@ -71,23 +76,29 @@
         {% if diagnosed.note %}
             <p><strong>{{ shared.text(diagnosed.note) }}</strong></p>
         {% endif %}
-        <p class="light">
-            {{ "Weighed from Web Doctor’s fixed list of known causes against what this investigation recorded. A cause here is a candidate, not a verdict: none is established unless it is marked Confirmed, and each says what counts against it."|t('web-doctor') }}
-        </p>
+        {% if not issue and subject.id %}
+            <p><a href="{{ cpUrl('web-doctor/issues/' ~ subject.id) }}">{{ "Open the problem the causes were weighed for"|t('web-doctor') }}</a></p>
+        {% endif %}
+        {# A recipe that found no problem weighed nothing, and its note has said so. #}
+        {% if issue or subject.id %}
+            <p class="light">
+                {{ "Weighed from Web Doctor’s fixed list of known causes against what this investigation recorded. A cause here is a candidate, not a verdict: none is established unless it is marked Confirmed, and each says what counts against it."|t('web-doctor') }}
+            </p>
 
-        <details class="wd-explainer">
-            <summary>{{ "How confidence is decided"|t('web-doctor') }}</summary>
-            <ul class="wd-plan__list">
-                <li><strong>{{ possible.label() }}</strong> — {{ "what the cause requires was found."|t('web-doctor') }}</li>
-                <li><strong>{{ likely.label() }}</strong> — {{ "and at least one signal that supports it."|t('web-doctor') }}</li>
-                <li><strong>{{ high.label() }}</strong> — {{ "and every signal that supports it, where it has at least two."|t('web-doctor') }}</li>
-                <li><strong>{{ confirmed.label() }}</strong> — {{ "evidence that establishes it was found, recorded by a check that established it, and nothing counts against it."|t('web-doctor') }}</li>
-            </ul>
-            <p class="light">{{ "Each thing found that counts against a cause lowers it one step, never below Possible. Some causes are never held above a stated level, and say why."|t('web-doctor') }}</p>
-        </details>
+            <details class="wd-explainer">
+                <summary>{{ "How confidence is decided"|t('web-doctor') }}</summary>
+                <ul class="wd-plan__list">
+                    <li><strong>{{ possible.label() }}</strong> — {{ "what the cause requires was found."|t('web-doctor') }}</li>
+                    <li><strong>{{ likely.label() }}</strong> — {{ "and at least one signal that supports it."|t('web-doctor') }}</li>
+                    <li><strong>{{ high.label() }}</strong> — {{ "and every signal that supports it, where it has at least two."|t('web-doctor') }}</li>
+                    <li><strong>{{ confirmed.label() }}</strong> — {{ "evidence that establishes it was found, recorded by a check that established it, and nothing counts against it."|t('web-doctor') }}</li>
+                </ul>
+                <p class="light">{{ "Each thing found that counts against a cause lowers it one step, never below Possible. Some causes are never held above a stated level, and say why."|t('web-doctor') }}</p>
+            </details>
 
-        {% if not canViewEvidence %}
-            <p class="light">{{ "You can see what kind of fact each cause rests on. What those facts contain needs the “View evidence” permission."|t('web-doctor') }}</p>
+            {% if not canViewEvidence %}
+                <p class="light">{{ "You can see what kind of fact each cause rests on. What those facts contain needs the “View evidence” permission."|t('web-doctor') }}</p>
+            {% endif %}
         {% endif %}
 
         {% for cause in causes %}
@@ -107,7 +118,7 @@
                 <h4 class="wd-cause__heading">{{ "Evidence"|t('web-doctor') }}</h4>
                 <ul class="wd-cause__conditions">
                     {% for condition in supporting %}
-                        {{ rc.condition(condition, canViewEvidence, causeGroups, issue) }}
+                        {{ rc.condition(condition, canViewEvidence, causeGroups, subject) }}
                     {% endfor %}
                 </ul>
 
@@ -128,7 +139,7 @@
                 {% if conflicting|length %}
                     <ul class="wd-cause__conditions">
                         {% for condition in conflicting %}
-                            {{ rc.condition(condition, canViewEvidence, causeGroups, issue) }}
+                            {{ rc.condition(condition, canViewEvidence, causeGroups, subject) }}
                         {% endfor %}
                     </ul>
                 {% else %}
@@ -166,7 +177,9 @@
                 </ul>
             </section>
         {% else %}
-            <p class="light">{{ "None of Web Doctor’s known causes fits what this investigation found. That is not a finding that nothing is wrong: it means no written-out cause matches these findings. What was observed is below."|t('web-doctor') }}</p>
+            {% if issue or subject.id %}
+                <p class="light">{{ "None of Web Doctor’s known causes fits what this investigation found. That is not a finding that nothing is wrong: it means no written-out cause matches these findings. What was observed is below."|t('web-doctor') }}</p>
+            {% endif %}
         {% endfor %}
     {% endif %}
 </div>

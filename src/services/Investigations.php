@@ -14,6 +14,7 @@ use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\ExecutionMode;
 use Tahadudhiya\WebDoctor\enums\InvestigationStatus;
 use Tahadudhiya\WebDoctor\enums\InvestigationStepType;
+use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\models\CorrelationCase;
@@ -30,16 +31,19 @@ use Tahadudhiya\WebDoctor\models\IssueReconciliation;
 use Tahadudhiya\WebDoctor\models\IssueSnapshot;
 use Tahadudhiya\WebDoctor\models\RootCause;
 use Tahadudhiya\WebDoctor\models\SafeException;
+use Tahadudhiya\WebDoctor\recipes\Recipe;
 use Tahadudhiya\WebDoctor\records\InvestigationRecord;
 use Tahadudhiya\WebDoctor\records\InvestigationStepRecord;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
 use yii\base\Component;
 use yii\base\InvalidArgumentException;
+use yii\base\InvalidConfigException;
+use yii\db\Query;
 
 /**
- * Investigates an issue: runs the checks worth running alongside it, keeps what they found, and
- * says what else is open nearby.
+ * Investigates an issue, or a symptom through the recipe written for it: runs the checks worth
+ * running, keeps what they found, and says what else is open nearby.
  *
  * Which checks is the plan's answer ({@see InvestigationPlan}), and it is decided before anything
  * runs and recorded with its reasons. The checks run through the engine like any other run, so a
@@ -72,6 +76,9 @@ class Investigations extends Component
     /** @var int The most investigations one issue keeps; the oldest go first. */
     public int $maxPerIssue = 20;
 
+    /** @var int The most investigations one recipe keeps in one place; the oldest go first. */
+    public int $maxPerRecipe = 20;
+
     /** @var int The most open issues nearby that one investigation records. */
     public int $relatedLimit = 20;
 
@@ -90,6 +97,9 @@ class Investigations extends Component
     /** @var RootCauses|null What weighs the findings against the known causes; the plugin's unless set. */
     public ?RootCauses $rootCauses = null;
 
+    /** @var Recipes|null Where recipes are looked up; the plugin's unless set. */
+    public ?Recipes $recipes = null;
+
     /**
      * @var string|null The environment this installation is running as. Craft's answer unless set,
      * which a test does so that an issue recorded under its own environment can be investigated.
@@ -101,6 +111,8 @@ class Investigations extends Component
      */
     public function plan(Issue $issue, DiagnosticDepth $depth = DiagnosticDepth::NORMAL): InvestigationPlan
     {
+        $this->bounds();
+
         return InvestigationPlan::build(
             $issue->diagnosticId,
             $issue->category,
@@ -109,6 +121,16 @@ class Investigations extends Component
             $depth,
             $this->maxChecks,
         );
+    }
+
+    /**
+     * What running a recipe would run, and why, without running any of it.
+     */
+    public function planRecipe(Recipe $recipe, DiagnosticDepth $depth = DiagnosticDepth::NORMAL): InvestigationPlan
+    {
+        $this->bounds();
+
+        return InvestigationPlan::forRecipe($recipe, $this->registry()->all(), $depth, $this->maxChecks);
     }
 
     /**
@@ -143,24 +165,25 @@ class Investigations extends Component
     /**
      * Investigates an issue and returns what the investigation found.
      *
-     * An investigation that breaks part-way is kept as a failed one saying why, rather than
-     * thrown away; a record of an attempt is worth more to the next person than no record.
-     *
      * @param int|null $userId Who asked. Recorded, never used to authorise — that is the controller's.
      * @throws InvalidArgumentException if there is no such issue, or it cannot be investigated here.
      */
     public function investigate(int $issueId, DiagnosticDepth $depth = DiagnosticDepth::NORMAL, ?int $userId = null): Investigation
     {
+        // Before anything is read or written: a bound that cannot be one is a configuration to fix,
+        // not a number to guess at.
+        $this->bounds();
+
         $issue = $this->issues()->get($issueId);
 
         if ($issue === null) {
-            throw new InvalidArgumentException(Craft::t('web-doctor', 'No issue exists with the ID {id}.', ['id' => $issueId]));
+            throw new Refusal(Craft::t('web-doctor', 'No issue exists with the ID {id}.', ['id' => $issueId]));
         }
 
         $refusal = $this->refusal($issue);
 
         if ($refusal !== null) {
-            throw new InvalidArgumentException($refusal);
+            throw new Refusal($refusal);
         }
 
         $plan = $this->plan($issue, $depth);
@@ -175,17 +198,60 @@ class Investigations extends Component
             depth: $depth,
         );
 
-        $record = $this->begin($issue, $plan, $context, $userId);
+        return $this->conduct($issue, null, $plan, $context, $userId);
+    }
+
+    /**
+     * Investigates a symptom with the recipe written for it, and returns what was found.
+     *
+     * It runs here — this environment and the site in view — exactly as a diagnostic run from the
+     * dashboard does, so what it finds lands on the same issues a run would have raised.
+     *
+     * @param int|null $userId Who asked. Recorded, never used to authorise — that is the controller's.
+     * @throws InvalidArgumentException if there is no such recipe.
+     * @throws InvalidConfigException if a configured bound cannot be one.
+     */
+    public function runRecipe(string $recipeId, DiagnosticDepth $depth = DiagnosticDepth::NORMAL, ?int $userId = null): Investigation
+    {
+        // Bounds are checked by planning, before anything is written.
+        $recipe = $this->recipes()->get($recipeId);
+
+        if ($recipe === null) {
+            throw new Refusal(Craft::t('web-doctor', 'No recipe exists with the ID “{id}”.', ['id' => $recipeId]));
+        }
+
+        $context = new DiagnosticContext(
+            siteId: DiagnosticContext::currentSiteId(),
+            environment: $this->environment(),
+            mode: Craft::$app instanceof ConsoleApplication ? ExecutionMode::CONSOLE : ExecutionMode::MANUAL,
+            depth: $depth,
+        );
+
+        return $this->conduct(null, $recipe, $this->planRecipe($recipe, $depth), $context, $userId);
+    }
+
+    /**
+     * Runs an investigation of one subject — an issue, or a recipe's symptom — from its plan.
+     *
+     * An investigation that breaks part-way is kept as a failed one saying why, rather than
+     * thrown away; a record of an attempt is worth more to the next person than no record.
+     */
+    private function conduct(?Issue $issue, ?Recipe $recipe, InvestigationPlan $plan, DiagnosticContext $context, ?int $userId): Investigation
+    {
+        $record = $this->begin($issue, $recipe, $plan, $context, $userId);
         $position = 0;
 
         // Everything after the record exists is inside this, its first two steps included: an
         // attempt that has been written down must end as something other than "running".
         try {
-            $this->step($record, $position, InvestigationStepType::STARTED, $context->startedAt, [
+            $this->step($record, $position, InvestigationStepType::STARTED, $context->startedAt, $issue !== null ? [
                 'diagnosticId' => $issue->diagnosticId,
                 'diagnosticName' => $issue->diagnosticName,
                 'summary' => $issue->title,
                 'relatedIssueId' => $issue->id,
+            ] : [
+                'summary' => $recipe?->symptom,
+                'note' => $recipe?->title,
             ]);
 
             $this->step($record, $position, InvestigationStepType::PLANNED, new DateTimeImmutable(), [
@@ -200,12 +266,16 @@ class Investigations extends Component
             $reconciliation = $this->reconcile($run);
             $errors = $this->recordErrors($run);
 
-            $this->finish($record, $position, $issue, $plan, $run, $reconciliation, $errors);
+            $this->finish($record, $position, $issue, $recipe, $plan, $run, $reconciliation, $errors);
         } catch (Throwable $e) {
             $this->fail($record, $position, $context, $e);
         }
 
-        $this->prune($issue->id);
+        if ($issue !== null) {
+            $this->prune(['issueId' => $issue->id], $this->maxPerIssue);
+        } else {
+            $this->prune(['recipeId' => $plan->recipeId, 'environment' => $context->environment, 'siteId' => $context->siteId], $this->maxPerRecipe);
+        }
 
         return Investigation::fromRecord($record);
     }
@@ -227,7 +297,51 @@ class Investigations extends Component
         $records = InvestigationRecord::find()
             ->where(['issueId' => $issueId])
             ->orderBy(['startedAt' => SORT_DESC, 'id' => SORT_DESC])
-            ->limit(max(1, $limit))
+            ->limit($this->positive($limit, 'limit'))
+            ->all();
+
+        $out = [];
+
+        foreach ($records as $record) {
+            if ($record instanceof InvestigationRecord) {
+                $out[] = Investigation::fromRecord($record);
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * The investigations recipes ran here — this environment and the site in view, where a recipe
+     * would run now — newest first, at most `$perRecipe` of each (every one kept when omitted).
+     * The bound is per recipe, in one query: a single limit across all of them let one recipe run
+     * often push every other recipe's history off the page while it was still kept.
+     *
+     * @return list<Investigation>
+     */
+    public function recipeHistory(?int $perRecipe = null): array
+    {
+        $perRecipe = $this->positive($perRecipe ?? $this->maxPerRecipe, 'perRecipe');
+        $place = ['environment' => $this->environment(), 'siteId' => DiagnosticContext::currentSiteId()];
+        $table = InvestigationRecord::tableName();
+
+        // How many of the same recipe's investigations here are newer than this one.
+        $newer = (new Query())
+            ->from(['newer' => $table])
+            ->where('[[newer.recipeId]] = [[i.recipeId]]')
+            ->andWhere(['newer.environment' => $place['environment'], 'newer.siteId' => $place['siteId']])
+            ->andWhere(['or',
+                '[[newer.startedAt]] > [[i.startedAt]]',
+                ['and', '[[newer.startedAt]] = [[i.startedAt]]', '[[newer.id]] > [[i.id]]'],
+            ])
+            ->select('COUNT(*)');
+
+        $records = InvestigationRecord::find()
+            ->alias('i')
+            ->where(['not', ['i.recipeId' => null]])
+            ->andWhere(['i.environment' => $place['environment'], 'i.siteId' => $place['siteId']])
+            ->andWhere(['<', $newer, $perRecipe])
+            ->orderBy(['i.startedAt' => SORT_DESC, 'i.id' => SORT_DESC])
             ->all();
 
         $out = [];
@@ -269,10 +383,11 @@ class Investigations extends Component
      * Writes the investigation down before anything runs, so an attempt that never returns — a
      * fatal error, a killed request — still leaves a record that it was made.
      */
-    private function begin(Issue $issue, InvestigationPlan $plan, DiagnosticContext $context, ?int $userId): InvestigationRecord
+    private function begin(?Issue $issue, ?Recipe $recipe, InvestigationPlan $plan, DiagnosticContext $context, ?int $userId): InvestigationRecord
     {
         $record = new InvestigationRecord();
-        $record->issueId = $issue->id;
+        $record->issueId = $issue?->id;
+        $record->recipeId = $issue === null ? $recipe?->id : null;
         $record->runId = $context->runId;
         $record->status = InvestigationStatus::RUNNING->value;
         $record->depth = $plan->depth->value;
@@ -299,13 +414,14 @@ class Investigations extends Component
     private function finish(
         InvestigationRecord $record,
         int &$position,
-        Issue $issue,
+        ?Issue $issue,
+        ?Recipe $recipe,
         InvestigationPlan $plan,
         DiagnosticRun $run,
         IssueReconciliation|string $reconciliation,
         ErrorRecording|string $errors,
     ): void {
-        $budget = max(0, $this->maxEvidence);
+        $budget = $this->maxEvidence;
         $raised = $this->issuesRaisedBy($run);
 
         foreach ($run->results() as $result) {
@@ -331,7 +447,7 @@ class Investigations extends Component
             $this->count($record, $result);
             $record->evidenceCount += count($evidence);
 
-            if ($result->diagnosticId === $issue->diagnosticId) {
+            if ($issue !== null && $result->diagnosticId === $issue->diagnosticId) {
                 $record->originStatus = $result->status->value;
             }
         }
@@ -363,15 +479,18 @@ class Investigations extends Component
         ]);
 
         $categories = $plan->categories();
+        $category = $issue->category ?? $recipe?->category;
 
-        if (!in_array($issue->category, $categories, true)) {
-            $categories[] = $issue->category;
+        if ($category !== null && !in_array($category, $categories, true)) {
+            $categories[] = $category;
         }
 
         // Read after reconciling, so what is open reflects what the checks just established, and
         // without the issues this run touched, which are already in the timeline as findings.
         $now = new DateTimeImmutable();
-        $nearbyIssues = $this->issues()->related($issue, $categories, $run->id(), $this->relatedLimit);
+        $nearbyIssues = $issue !== null
+            ? $this->issues()->related($issue, $categories, $run->id(), $this->relatedLimit)
+            : $this->issues()->nearby($run->context->environment, $run->context->siteId, $categories, exceptRunId: $run->id(), limit: $this->relatedLimit);
 
         foreach ($nearbyIssues as $nearby) {
             $this->step($record, $position, InvestigationStepType::RELATED_ISSUE, $now, [
@@ -380,16 +499,18 @@ class Investigations extends Component
                 'status' => $nearby->resultStatus->value,
                 'severity' => $nearby->severity->value,
                 'summary' => $nearby->title,
-                'note' => $this->relatedBecause($issue, $nearby),
+                'note' => $this->relatedBecause($issue?->affectedPlugin, $nearby),
                 'relatedIssueId' => $nearby->id,
             ]);
 
             $record->relatedIssues++;
         }
 
-        $weighed = $this->weigh($issue, $run, $raised, $nearbyIssues);
+        $weighed = $issue !== null
+            ? $this->weigh($issue, $run, $raised, $nearbyIssues)
+            : $this->weighLeading($run, $raised, $nearbyIssues);
 
-        $status = $record->checksIncomplete > 0 || !$plan->includesOrigin() ? InvestigationStatus::PARTIAL : InvestigationStatus::COMPLETED;
+        $status = $record->checksIncomplete > 0 || $plan->missesOrigin() ? InvestigationStatus::PARTIAL : InvestigationStatus::COMPLETED;
         $finishedAt = new DateTimeImmutable();
         $start = $position;
         $transaction = Craft::$app->getDb()->beginTransaction();
@@ -403,6 +524,7 @@ class Investigations extends Component
             $this->step($record, $position, InvestigationStepType::DIAGNOSED, $finishedAt, [
                 'summary' => $weighed['summary'],
                 'note' => $weighed['note'],
+                'relatedIssueId' => $weighed['issueId'] ?? null,
             ]);
 
             $record->status = $status->value;
@@ -437,7 +559,7 @@ class Investigations extends Component
      *
      * @param array<string, int> $raised The issue each check's findings landed on, by check.
      * @param list<Issue> $nearby The issues open nearby, as they stood.
-     * @return array{causes: list<RootCause>, summary: string|null, note: string}
+     * @return array{causes: list<RootCause>, summary: string|null, note: string, issueId?: int|null}
      */
     private function weigh(Issue $issue, DiagnosticRun $run, array $raised, array $nearby): array
     {
@@ -476,6 +598,66 @@ class Investigations extends Component
         }
 
         return ['causes' => $causes, 'summary' => $summary, 'note' => $note];
+    }
+
+    /**
+     * Weighs a recipe's findings. A symptom is not an issue and the known causes each explain an
+     * issue, so they are weighed for the most serious problem the checks found — the worst
+     * severity, and of equals the first the plan ran — against everything the run recorded, exactly
+     * as investigating that issue would weigh the same results. Which problem that was is said,
+     * and linked, with the causes.
+     *
+     * @param array<string, int> $raised The issue each check's findings landed on, by check.
+     * @param list<Issue> $nearby The issues open nearby, as they stood.
+     * @return array{causes: list<RootCause>, summary: string|null, note: string, issueId?: int|null}
+     */
+    private function weighLeading(DiagnosticRun $run, array $raised, array $nearby): array
+    {
+        // Chosen from the results alone, before asking where they landed: whether the Issue Center
+        // could record a finding must not change which finding is the most serious.
+        $leading = null;
+
+        foreach ($run->results() as $result) {
+            if ($result->status->isProblem() && ($leading === null || $result->severity()->rank() > $leading->severity()->rank())) {
+                $leading = $result;
+            }
+        }
+
+        if ($leading === null) {
+            return [
+                'causes' => [],
+                'summary' => null,
+                'note' => Craft::t('web-doctor', 'None of the checks reported a problem, so there was nothing to weigh the known causes against.'),
+            ];
+        }
+
+        $issue = null;
+
+        try {
+            $issue = isset($raised[$leading->diagnosticId]) ? $this->issues()->get($raised[$leading->diagnosticId]) : null;
+        } catch (Throwable $e) {
+            SafeException::log('The problem a recipe found could not be read to weigh its causes', $e);
+        }
+
+        // Found by the fingerprint, which holds the environment and site; asked again, because an
+        // issue from anywhere else would be weighed with facts about a different place.
+        if ($issue === null
+            || $issue->environment !== $run->context->environment
+            || $issue->siteId !== $run->context->siteId
+            || $issue->diagnosticId !== $leading->diagnosticId
+        ) {
+            return [
+                'causes' => [],
+                'summary' => null,
+                'note' => Craft::t('web-doctor', 'The most serious problem the checks found, “{problem}”, could not be matched to an issue recorded here, so the known causes were not weighed.', ['problem' => $leading->summary]),
+            ];
+        }
+
+        $weighed = $this->weigh($issue, $run, $raised, $nearby);
+        $weighed['note'] = Craft::t('web-doctor', 'Weighed for the most serious problem found, “{problem}”.', ['problem' => $issue->title]) . ' ' . $weighed['note'];
+        $weighed['issueId'] = $issue->id;
+
+        return $weighed;
     }
 
     /**
@@ -573,7 +755,11 @@ class Investigations extends Component
 
         try {
             $ids = $this->issues()->idsByFingerprint(array_values($fingerprints));
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            // The timeline then names no issue for its findings, which is only readable as a
+            // failure if the reason is somewhere.
+            SafeException::log('The issues an investigation\'s findings landed on could not be read', $e);
+
             return [];
         }
 
@@ -607,9 +793,9 @@ class Investigations extends Component
      * Why an open issue counted as nearby, and where it stood then — kept on the step, because the
      * issue will move on and the investigation has to go on saying what it saw.
      */
-    private function relatedBecause(Issue $issue, Issue $nearby): string
+    private function relatedBecause(?string $plugin, Issue $nearby): string
     {
-        if ($issue->affectedPlugin !== null && $issue->affectedPlugin !== '' && $nearby->affectedPlugin === $issue->affectedPlugin) {
+        if ($plugin !== null && $plugin !== '' && $nearby->affectedPlugin === $plugin) {
             return Craft::t('web-doctor', '{status} at the time. Related because it names the plugin “{plugin}” too.', [
                 'status' => $nearby->status->label(),
                 'plugin' => $nearby->affectedPlugin,
@@ -649,7 +835,11 @@ class Investigations extends Component
     {
         try {
             return Craft::$app->getSites()->getSiteById($siteId, true) !== null;
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            // Refusing is the safe answer, but the reader is told the site has gone, so why it
+            // could not be looked up has to be recorded.
+            SafeException::log('Whether a site still exists could not be established', $e);
+
             return false;
         }
     }
@@ -669,16 +859,19 @@ class Investigations extends Component
     }
 
     /**
-     * Drops an issue's investigations beyond its limit, oldest first. Their steps go with them.
+     * Drops the investigations beyond a limit — one issue's, or one recipe's in one place — oldest
+     * first. Their steps and causes go with them.
+     *
+     * @param array<string, mixed> $of
      */
-    private function prune(int $issueId): void
+    private function prune(array $of, int $limit): void
     {
         try {
             $stale = InvestigationRecord::find()
                 ->select(['id'])
-                ->where(['issueId' => $issueId])
+                ->where($of)
                 ->orderBy(['startedAt' => SORT_DESC, 'id' => SORT_DESC])
-                ->offset(max(1, $this->maxPerIssue))
+                ->offset($limit)
                 ->column();
 
             if ($stale !== []) {
@@ -744,7 +937,38 @@ class Investigations extends Component
         }
     }
 
-    private function environment(): string
+    /**
+     * The configured bounds, refused when one cannot be a bound. A limit of zero or less would
+     * either run and keep nothing or be read as some other number, and neither is what anybody
+     * configured.
+     *
+     * @throws InvalidConfigException
+     */
+    private function bounds(): void
+    {
+        foreach (['maxChecks' => 1, 'maxEvidence' => 0, 'maxPerIssue' => 1, 'maxPerRecipe' => 1, 'relatedLimit' => 1] as $property => $minimum) {
+            if ($this->$property < $minimum) {
+                throw new InvalidConfigException(sprintf('Web Doctor\'s investigations component needs a %s of at least %d; %d was configured.', $property, $minimum, $this->$property));
+            }
+        }
+    }
+
+    /**
+     * @throws InvalidArgumentException for a limit that is not one.
+     */
+    private function positive(int $limit, string $name): int
+    {
+        if ($limit < 1) {
+            throw new InvalidArgumentException(sprintf('A %s of at least 1 is needed; %d was given.', $name, $limit));
+        }
+
+        return $limit;
+    }
+
+    /**
+     * The environment investigations run in here: Craft's, unless a test has set one.
+     */
+    public function environment(): string
     {
         return $this->environment ?? DiagnosticContext::currentEnvironment();
     }
@@ -772,6 +996,11 @@ class Investigations extends Component
     private function rootCauses(): RootCauses
     {
         return $this->rootCauses ??= WebDoctor::getInstance()?->getRootCauses() ?? new RootCauses();
+    }
+
+    private function recipes(): Recipes
+    {
+        return $this->recipes ??= WebDoctor::getInstance()?->getRecipes() ?? new Recipes(['includeCoreRecipes' => true]);
     }
 
     /**

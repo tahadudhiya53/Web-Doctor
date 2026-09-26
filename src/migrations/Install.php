@@ -197,14 +197,18 @@ class Install extends Migration
     }
 
     /**
-     * One investigation of one issue: what it set out to look at, how it went, and what it found,
-     * counted. What happened along the way is its steps.
+     * One investigation — of an issue, or of a symptom through a recipe: what it set out to look
+     * at, how it went, and what it found, counted. What happened along the way is its steps.
      */
     private function createInvestigationsTable(): void
     {
         $this->createTable(InvestigationRecord::TABLE, [
             'id' => $this->primaryKey(),
-            'issueId' => $this->integer()->notNull(),
+            // Exactly one of the two: the issue investigated, or the recipe a symptom was
+            // investigated with. A recipe's investigation belongs to no issue until its checks
+            // find something, and what they find is linked from its steps.
+            'issueId' => $this->integer(),
+            'recipeId' => $this->string(100),
             // The diagnostic run the investigation's checks ran as, so its findings and the
             // evidence they left behind issues can be followed back to it.
             'runId' => $this->string(36),
@@ -239,6 +243,8 @@ class Install extends Migration
 
         // An issue's investigations, newest first, and the pruning that keeps them bounded.
         $this->createIndex(null, InvestigationRecord::TABLE, ['issueId', 'startedAt']);
+        // A recipe's investigations in one place, newest first, and the pruning that bounds them.
+        $this->createIndex(null, InvestigationRecord::TABLE, ['recipeId', 'environment', 'siteId', 'startedAt']);
         $this->createIndex(null, InvestigationRecord::TABLE, ['siteId']);
 
         // An investigation exists to explain its issue, so it goes when the issue does.

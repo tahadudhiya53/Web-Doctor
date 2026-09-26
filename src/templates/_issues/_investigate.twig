@@ -73,7 +73,7 @@
                     {% for investigation in investigations %}
                         <tr>
                             <td class="wd-col-narrow"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '/investigations/' ~ investigation.id) }}">{{ investigation.startedAt|datetime('short') }}</a></td>
-                            <td class="wd-col-narrow"><span class="wd-pill wd-pill--investigation-{{ investigation.status.value }}">{{ investigation.status.label() }}</span></td>
+                            <td class="wd-col-narrow"><span class="wd-pill wd-pill--investigation-{{ investigation.status.value }}">{{ investigation.statusLabel() }}</span></td>
                             <td class="wd-col-narrow">{{ investigation.depth.label() }}</td>
                             <td>{{ investigation.checksRun }}</td>
                             <td>{{ investigation.checksWithProblems }}</td>
@@ -81,6 +81,7 @@
                             <td>
                                 {% set cause = leadingCauses[investigation.id] ?? null %}
                                 {% if cause %}
+
                                     <span class="wd-pill wd-pill--confidence-{{ cause.confidence.value }}">{{ cause.confidence.label() }}</span>
                                     <a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '/investigations/' ~ investigation.id) }}#causes">{{ shared.text(cause.title) }}</a>
                                 {% else %}

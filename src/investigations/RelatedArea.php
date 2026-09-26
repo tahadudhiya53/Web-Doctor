@@ -3,6 +3,7 @@
 namespace Tahadudhiya\WebDoctor\investigations;
 
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
+use Tahadudhiya\WebDoctor\helpers\Redaction;
 
 /**
  * One part of the installation worth inspecting alongside a problem, and why.
@@ -14,11 +15,16 @@ use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
  */
 final class RelatedArea
 {
+    public readonly string $reason;
+
     private function __construct(
         public readonly ?DiagnosticCategory $category,
         public readonly ?string $diagnosticId,
-        public readonly string $reason,
+        string $reason,
     ) {
+        // Redacted as it is built: a recipe another plugin contributes writes its own reasons, and
+        // a plan is shown before anything stores, and so redacts, it.
+        $this->reason = Redaction::redactString($reason);
     }
 
     public static function category(DiagnosticCategory $category, string $reason): self

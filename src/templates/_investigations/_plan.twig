@@ -6,7 +6,7 @@
 
 {% import "web-doctor/_macros" as shared %}
 
-<p><strong>{{ "Treated as"|t('web-doctor') }}:</strong> {{ plan.ruleLabel }} · <span class="light">{{ "Depth"|t('web-doctor') }}: {{ plan.depth.label() }}</span></p>
+<p><strong>{{ plan.recipeId ? "Recipe"|t('web-doctor') : "Treated as"|t('web-doctor') }}:</strong> {{ shared.text(plan.ruleLabel) }} · <span class="light">{{ "Depth"|t('web-doctor') }}: {{ plan.depth.label() }}</span></p>
 
 {% if plan.checks|length %}
     <div class="wd-table-scroll">
@@ -40,19 +40,19 @@
 {% endif %}
 
 {% if plan.uncovered|length %}
-    <h3 class="wd-plan__heading">{{ "Related, but no check here covers it"|t('web-doctor') }}</h3>
+    <h3 class="wd-plan__heading">{{ "Related, but no registered check covers it"|t('web-doctor') }}</h3>
     <ul class="wd-plan__list">
         {% for area in plan.uncovered %}
-            <li><strong>{{ area.area }}</strong> — {{ shared.text(area.reason) }}</li>
+            <li><strong>{{ shared.text(area.area) }}</strong> — {{ shared.text(area.reason) }}</li>
         {% endfor %}
     </ul>
 {% endif %}
 
 {% if plan.leads|length %}
-    <h3 class="wd-plan__heading">{{ "Worth inspecting by hand"|t('web-doctor') }}</h3>
+    <h3 class="wd-plan__heading">{{ "Not inspected by Web Doctor — worth inspecting by hand"|t('web-doctor') }}</h3>
     <ul class="wd-plan__list">
         {% for lead in plan.leads %}
-            <li>{{ lead }}</li>
+            <li>{{ shared.text(lead) }}</li>
         {% endfor %}
     </ul>
 {% endif %}

@@ -5,10 +5,11 @@ namespace Tahadudhiya\WebDoctor\records;
 use craft\db\ActiveRecord;
 
 /**
- * The `webdoctor_investigations` row: one investigation of one issue.
+ * The `webdoctor_investigations` row: one investigation of an issue, or of a symptom through a recipe.
  *
  * @property int $id
- * @property int $issueId
+ * @property int|null $issueId
+ * @property string|null $recipeId
  * @property string|null $runId
  * @property string $status
  * @property string $depth

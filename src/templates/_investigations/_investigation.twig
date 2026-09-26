@@ -61,20 +61,37 @@
 {% endmacro %}
 
 {% set outcome = investigation.originOutcome() %}
+{# A recipe's investigation has no issue: the symptom it was run for is what its first step records. #}
+{% set symptom = issue ? null : (steps|filter(s => s.type.value == 'started')|first).summary ?? null %}
 
-<p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id) }}">&larr; {{ "Back to the issue"|t('web-doctor') }}</a></p>
+{% if issue %}
+    <p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id) }}">&larr; {{ "Back to the issue"|t('web-doctor') }}</a></p>
+{% else %}
+    <p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/recipes') }}#recipe-{{ investigation.recipeId }}">&larr; {{ "Back to the recipes"|t('web-doctor') }}</a></p>
+{% endif %}
 
 <div class="pane wd-investigation">
-    <h2 class="wd-issue__title">{{ "Investigation"|t('web-doctor') }}: {{ shared.text(issue.title) }}</h2>
+    {% if issue %}
+        <h2 class="wd-issue__title">{{ "Investigation"|t('web-doctor') }}: {{ shared.text(issue.title) }}</h2>
+    {% else %}
+        <h2 class="wd-issue__title">{{ shared.text(investigation.plan.ruleLabel) }}{% if symptom %}: {{ shared.text(symptom) }}{% endif %}</h2>
+    {% endif %}
 
     <div class="wd-issue__pills">
-        <span class="wd-pill wd-pill--investigation-{{ investigation.status.value }}">{{ investigation.status.label() }}</span>
-        <span class="wd-pill wd-pill--severity wd-pill--severity-{{ issue.severity.value }}">{{ issue.severity.label() }}</span>
-        <span class="wd-pill wd-pill--issue-{{ issue.status.value }}">{{ issue.status.label() }}</span>
+        <span class="wd-pill wd-pill--investigation-{{ investigation.status.value }}">{{ investigation.statusLabel() }}</span>
+        {% if issue %}
+            <span class="wd-pill wd-pill--severity wd-pill--severity-{{ issue.severity.value }}">{{ issue.severity.label() }}</span>
+            <span class="wd-pill wd-pill--issue-{{ issue.status.value }}">{{ issue.status.label() }}</span>
+        {% endif %}
     </div>
 
     <div class="wd-investigation__summary">
-        {% if investigation.status.value == 'running' %}
+        {% if not issue %}
+            <p>{{ "A recipe investigates a symptom rather than an issue. It ran the checks that cover what the symptom most often comes from. Any problem they found is recorded as an issue, and the causes below are weighed for the most serious of them."|t('web-doctor') }}</p>
+        {% endif %}
+        {% if investigation.hasStopped() %}
+            <p><strong>{{ "This investigation stopped without recording an ending."|t('web-doctor') }}</strong> {{ "The request that ran it ended before it could finish — usually a timeout or a fatal error, which Craft’s logs will show — and what is below is as far as it got."|t('web-doctor') }}</p>
+        {% elseif investigation.status.value == 'running' %}
             <p><strong>{{ "This investigation has not finished."|t('web-doctor') }}</strong> {{ "It runs in the request that started it. If it has been running for more than a few minutes, that request ended before it could finish, and what is below is as far as it got."|t('web-doctor') }}</p>
         {% elseif investigation.failure %}
             <p><strong>{{ "This investigation stopped before it finished."|t('web-doctor') }}</strong> {{ shared.text(investigation.failure) }}
@@ -149,7 +166,7 @@
                         <td>
                             <div class="wd-result__name">{{ shared.text(step.diagnosticName ?? step.diagnosticId) }}</div>
                             <div class="wd-result__id"><code>{{ step.diagnosticId }}</code></div>
-                            {% if step.diagnosticId == issue.diagnosticId %}<span class="wd-mark wd-mark--origin">{{ "Raised this issue"|t('web-doctor') }}</span>{% endif %}
+                            {% if issue and step.diagnosticId == issue.diagnosticId %}<span class="wd-mark wd-mark--origin">{{ "Raised this issue"|t('web-doctor') }}</span>{% endif %}
                             {% if step.note %}<div class="wd-result__note light">{{ shared.text(step.note) }}</div>{% endif %}
                         </td>
                         <td class="wd-col-narrow">
@@ -273,7 +290,7 @@
                                     {% for issueId in related %}
                                         {% set relatedIssue = errorIssues[issueId] ?? null %}
                                         <li>
-                                            {% if issueId == issue.id %}
+                                            {% if issue and issueId == issue.id %}
                                                 <span class="wd-mark wd-mark--origin">{{ "This issue"|t('web-doctor') }}</span>
                                             {% elseif relatedIssue %}
                                                 <a href="{{ cpUrl('web-doctor/issues/' ~ issueId) }}">{{ shared.text(relatedIssue.title) }}</a>

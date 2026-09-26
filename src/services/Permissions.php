@@ -46,10 +46,10 @@ class Permissions extends Component
     public const VIEW_EVIDENCE = 'webDoctor:viewEvidence';
 
     /**
-     * @var string Investigating an issue: running the checks related to it and recording what
-     * they find. Separate from {@see self::VIEW_ISSUES} because it spends the site's time on
-     * demand, as a diagnostic run does, and separate from {@see self::MANAGE_ISSUES} because
-     * looking into a problem is not deciding anything about it.
+     * @var string Investigating an issue, or a symptom through a recipe: running the checks
+     * related to it and recording what they find. Separate from {@see self::VIEW_ISSUES} because
+     * it spends the site's time on demand, as a diagnostic run does, and separate from
+     * {@see self::MANAGE_ISSUES} because looking into a problem is not deciding anything about it.
      */
     public const INVESTIGATE_ISSUES = 'webDoctor:investigateIssues';
 
@@ -86,7 +86,7 @@ class Permissions extends Component
                             ],
                             self::INVESTIGATE_ISSUES => [
                                 'label' => Craft::t('web-doctor', 'Investigate issues'),
-                                'info' => Craft::t('web-doctor', 'Runs the checks related to an issue and records what they find.'),
+                                'info' => Craft::t('web-doctor', 'Runs the checks related to an issue, or a recipe for a symptom, and records what they find.'),
                             ],
                         ],
                     ],

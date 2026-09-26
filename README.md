@@ -25,6 +25,10 @@ history rather than two reports.
   checks related to it, chosen from a fixed, published list of what is related to what, each with
   the reason it was chosen. What each check reported, the evidence it left, what else is open
   nearby and a timeline of the whole investigation are kept against the issue.
+- **Recipes** — start from a symptom rather than an issue: "I have a 500 error", "Email is not
+  being sent", "Queue jobs are failing or not running", "The database is failing", "Something
+  broke after a deployment". Each recipe runs the checks that cover what its symptom most often
+  comes from, as an investigation, and what they find becomes issues like any other finding.
 - **Possible causes, with the evidence for and against them** — each investigation weighs what it
   found against a fixed list of known causes, and says for each one that fits how firmly it is
   held, why, and what counts against it.
@@ -43,7 +47,7 @@ history rather than two reports.
 - **Environment- and site-scoped results**, so one environment's answers are never shown as
   another's.
 - **`php craft webdoctor/status`** for confirming an installation from a script.
-- **An extension point** other plugins can register their own checks through.
+- **Extension points** other plugins can register their own checks and recipes through.
 
 ### The checks
 
@@ -102,6 +106,11 @@ them and leaves nothing else behind.
 1. Open **Web Doctor** in the control panel. It shows what the last run concluded — opening it
    does not run anything.
 2. Choose a depth: shallow skips the expensive work, normal is the default, deep does the most.
+   A request that names no depth runs at normal; one that names anything other than `shallow`,
+   `normal` or `deep` — for checks, an investigation or a recipe — is refused without running or
+   recording anything, as is an issue ID that is not a whole number, or a choice of checks in any
+   shape but the form's. The same holds for reading: a list asked for with a status, severity,
+   sort, date or page that is not one is refused rather than shown some other way.
 3. Press **Run all checks**, or tick individual checks and press **Run selected checks**.
 4. Read the results. The health score sits at the top, with **How this score was calculated**
    beneath it listing the weights and what each check subtracted.
@@ -131,7 +140,7 @@ Under a **Web Doctor** heading in a user group's permissions:
 | View issues | `webDoctor:viewIssues` | Reading the Issue Center and the errors the checks ran into |
 | Manage issues | `webDoctor:manageIssues` | Changing where an issue stands |
 | View evidence | `webDoctor:viewEvidence` | Reading what an issue's evidence contains, and what an error said and where it was thrown |
-| Investigate issues | `webDoctor:investigateIssues` | Starting an investigation of an issue |
+| Investigate issues | `webDoctor:investigateIssues` | Starting an investigation of an issue, or running a recipe |
 
 A non-admin also needs Craft's own **Access Web Doctor** permission (under "Access the control
 panel") to reach the section at all.
@@ -139,9 +148,11 @@ panel") to reach the section at all.
 Each is nested under the one it depends on and checked separately: running checks and starting
 investigations spend the site's time, changing an issue records a decision, and evidence carries
 internals — file paths, stack traces, database errors — that somebody following an issue may not
-need. Without "View evidence", a reader still sees what kind of evidence an issue rests on.
-Reading a finished investigation needs only "View issues". Admins pass, as they do elsewhere in
-Craft.
+need. Without "View evidence", a reader still sees what kind of evidence an issue rests on. A
+failed queue job's error is read only when the checks run in dev mode or are run by an admin, as
+Craft shows it; once read it is evidence, so granting "View evidence" grants reading it.
+Reading a finished investigation, and the Recipes page, needs only "View issues". Admins pass, as
+they do elsewhere in Craft.
 
 ## Running checks from code
 
@@ -218,6 +229,44 @@ Notes worth knowing:
   `unknown`); **severity** says how much it matters (`info`, `low`, `medium`, `high`,
   `critical`). They are independent — `fail` + `low` is an ordinary result, and `critical` is
   never a status.
+
+## Adding a recipe from another plugin
+
+A recipe holds no diagnostic logic: it names the areas worth looking at for a symptom, each with
+the reason, and the checks registered in those areas do the looking. Register one from your
+plugin's `init()`:
+
+```php
+use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
+use Tahadudhiya\WebDoctor\events\RegisterRecipesEvent;
+use Tahadudhiya\WebDoctor\investigations\RelatedArea;
+use Tahadudhiya\WebDoctor\recipes\Recipe;
+use Tahadudhiya\WebDoctor\services\Recipes;
+use yii\base\Event;
+
+Event::on(Recipes::class, Recipes::EVENT_REGISTER_RECIPES, function(RegisterRecipesEvent $event) {
+    $event->recipes[] = new Recipe(
+        id: 'myPlugin.ordersStuck',
+        title: 'Orders Doctor',
+        symptom: 'Orders are stuck in processing',
+        description: 'Looks at the order checks, then at the queue orders are processed on.',
+        category: DiagnosticCategory::COMMERCE,
+        // Looked at at every depth.
+        primary: [
+            RelatedArea::check('myPlugin.orphanedOrders', 'Orders with no customer cannot be processed.'),
+        ],
+        // Added at normal depth and deeper.
+        related: [
+            RelatedArea::category(DiagnosticCategory::QUEUE, 'Orders are processed by queue jobs.'),
+        ],
+        leads: ['The payment gateway’s own dashboard, for payments that never reached the site.'],
+    );
+});
+```
+
+A recipe ID has the same shape and the same first-wins rule as a check ID, so a plugin cannot
+replace one of Web Doctor's own recipes. A malformed recipe is logged and skipped without stopping
+anyone else's.
 
 ## The Issue Center
 
@@ -339,6 +388,51 @@ and a timeline. What was observed is then weighed against the known causes (see 
 An investigation that stops records why by the kind of error only; the details are in Craft's logs.
 An investigation keeps at most 100 pieces of evidence (`maxEvidence`), and an issue keeps its 20
 most recent investigations (`maxPerIssue`). Investigations are deleted with their issue.
+
+### Recipes
+
+The **Recipes** page starts from a symptom rather than an issue. Each recipe says what it looks at
+and why before anything runs; somebody with "Investigate issues" can run it at a chosen depth.
+
+| Recipe | Symptom | Looks at first | Then, at normal depth and deeper |
+|---|---|---|---|
+| 500 Error Doctor | I have a 500 error | PHP, Craft, plugins, the database | Storage, the queue, configuration, the environment |
+| Email Doctor | Email is not being sent | The mailer's configuration, the environment | Failed queue jobs, the queue backlog |
+| Queue Doctor | Queue jobs are failing or not running | Failed jobs, the backlog and long-running jobs | PHP's limits, the database connection, plugins |
+| Database Doctor | The database is failing | The connection, migrations, the character set | The environment, pending project config, failed queue jobs, plugins |
+| Deployment Doctor | Something broke after a deployment | Craft, PHP, plugins, project config, migrations, the environment | The queue, filesystems, storage, the database connection |
+
+What each recipe reports is what its checks establish, and no more. The Queue Doctor counts failed
+jobs at every depth, but reads their errors and recognises the same job failing repeatedly only at
+normal depth and deeper. The Database Doctor's character-set check samples the one table Craft uses
+as its indicator, not every table. The Deployment Doctor looks at the state of the installation now:
+Web Doctor records no deployments, so it cannot say what a deployment changed or when.
+
+A recipe runs as an investigation, through the same engine and the same Issue Center as any other.
+Its checks run in the request, against this environment and the site in view — where a run from the
+dashboard would — so what it finds raises or updates the same issues such a run would. Its page shows
+every check with its result and reason, the problems found (each linked to its issue), other issues
+open nearby, the errors the checks ran into, the evidence they recorded and a timeline.
+
+A symptom is not an issue, and the known causes each explain an issue, so a recipe weighs them for
+the most serious problem its checks found — the highest severity, and of equals the first it ran —
+and says which problem that was. A recipe that finds nothing says there was nothing to weigh.
+
+What no check here can inspect is stated as a lead rather than left out. In particular, Web Doctor
+does not capture the exceptions a site throws while serving requests and does not read logs, so the
+500 Error Doctor points to Craft's web log for the failing request's exception and trace. The Email
+Doctor reports mail settings only as present or missing, and never sends a message.
+
+The depth is shallow, normal or deep; a request that names none runs at normal, and one that names
+anything else is refused without running anything. A recipe keeps its 20 most recent investigations
+in each environment and site (`maxPerRecipe` on the `investigations` component); the page lists the
+five most recent of each. The `investigations` component's bounds — `maxChecks`, `maxEvidence`,
+`maxPerIssue`, `maxPerRecipe`, `relatedLimit` — are refused with an `InvalidConfigException` when
+set below what they can mean (one, or zero for `maxEvidence`), rather than read as another number.
+
+Recipe runs are not serialised: the run button is disabled once a form is submitted, but that is a
+convenience in the browser, not a guarantee, and two requests started together run two
+investigations.
 
 ### Possible causes
 

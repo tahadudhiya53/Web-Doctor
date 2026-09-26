@@ -17,6 +17,7 @@ use Tahadudhiya\WebDoctor\services\EvidenceStore;
 use Tahadudhiya\WebDoctor\services\Investigations;
 use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
+use Tahadudhiya\WebDoctor\services\Recipes;
 use Tahadudhiya\WebDoctor\services\RootCauses;
 use Tahadudhiya\WebDoctor\services\Runs;
 use yii\base\Event;
@@ -31,6 +32,7 @@ use yii\base\Event;
  * @property-read Investigations $investigations
  * @property-read Issues $issues
  * @property-read Permissions $permissions
+ * @property-read Recipes $recipes
  * @property-read RootCauses $rootCauses
  * @property-read Runs $runs
  * @property-read Settings $settings
@@ -67,6 +69,8 @@ class WebDoctor extends Plugin
                 'investigations' => ['class' => Investigations::class],
                 'issues' => ['class' => Issues::class],
                 'permissions' => ['class' => Permissions::class],
+                // As with the diagnostics: the registry the plugin hands out holds Web Doctor's own.
+                'recipes' => ['class' => Recipes::class, 'includeCoreRecipes' => true],
                 'rootCauses' => ['class' => RootCauses::class],
                 'runs' => ['class' => Runs::class],
             ],
@@ -99,6 +103,7 @@ class WebDoctor extends Plugin
         $subnav = ['overview' => ['label' => Craft::t('web-doctor', 'Overview'), 'url' => 'web-doctor']];
 
         if ($this->getPermissions()->canViewIssues()) {
+            $subnav['recipes'] = ['label' => Craft::t('web-doctor', 'Recipes'), 'url' => 'web-doctor/recipes'];
             $subnav['issues'] = ['label' => Craft::t('web-doctor', 'Issues'), 'url' => 'web-doctor/issues'];
             $subnav['errors'] = ['label' => Craft::t('web-doctor', 'Errors'), 'url' => 'web-doctor/errors'];
         }
@@ -165,8 +170,17 @@ class WebDoctor extends Plugin
         $investigations->issues ??= $this->getIssues();
         $investigations->errors ??= $this->getErrors();
         $investigations->rootCauses ??= $this->getRootCauses();
+        $investigations->recipes ??= $this->getRecipes();
 
         return $investigations;
+    }
+
+    /**
+     * Every recipe Web Doctor knows about, its own and any a plugin has contributed.
+     */
+    public function getRecipes(): Recipes
+    {
+        return $this->get('recipes');
     }
 
     /**
@@ -249,6 +263,9 @@ class WebDoctor extends Plugin
             $event->rules['web-doctor/issues/<issueId:\d+>'] = 'web-doctor/issues/detail';
             $event->rules['web-doctor/errors'] = 'web-doctor/errors/index';
             $event->rules['web-doctor/errors/<groupId:\d+>'] = 'web-doctor/errors/detail';
+            $event->rules['web-doctor/recipes'] = 'web-doctor/recipes/index';
+            // A recipe ID has a diagnostic ID's shape, so only that shape reaches the controller.
+            $event->rules['web-doctor/recipes/<recipeId:[a-z][a-zA-Z0-9]*(?:\.[a-z][a-zA-Z0-9]*)+>/investigations/<investigationId:\d+>'] = 'web-doctor/investigations/recipe-detail';
         });
     }
 

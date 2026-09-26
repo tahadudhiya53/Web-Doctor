@@ -5,24 +5,26 @@ namespace Tahadudhiya\WebDoctor\controllers;
 use Craft;
 use craft\helpers\UrlHelper;
 use craft\web\Controller;
-use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\InvestigationStepType;
+use Tahadudhiya\WebDoctor\errors\Refusal;
+use Tahadudhiya\WebDoctor\helpers\RequestInput;
 use Tahadudhiya\WebDoctor\models\ErrorGroup;
 use Tahadudhiya\WebDoctor\models\ErrorSignature;
 use Tahadudhiya\WebDoctor\models\Investigation;
 use Tahadudhiya\WebDoctor\models\InvestigationStep;
+use Tahadudhiya\WebDoctor\models\Issue;
 use Tahadudhiya\WebDoctor\models\RootCause;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
-use yii\base\InvalidArgumentException;
 use yii\web\NotFoundHttpException;
 use yii\web\Response;
 
 /**
- * Investigating an issue, and reading what an investigation found.
+ * Investigating an issue, and reading what an investigation found — of an issue, or of a symptom
+ * through a recipe.
  *
  * Reading needs what reading an issue needs. Starting one needs its own permission and a POST,
  * because it runs checks against the installation in this request, as a diagnostic run does.
@@ -54,13 +56,13 @@ class InvestigationsController extends Controller
         $this->requirePostRequest();
         $this->requirePermission(Permissions::INVESTIGATE_ISSUES);
 
-        $issueId = (int)$this->request->getRequiredBodyParam('issueId');
-        $requested = $this->request->getBodyParam('depth');
-        $depth = is_string($requested) ? DiagnosticDepth::tryFrom($requested) ?? DiagnosticDepth::NORMAL : DiagnosticDepth::NORMAL;
+        // Read before anything runs: a malformed request is refused, never read as another one.
+        $issueId = RequestInput::id($this->request->getRequiredBodyParam('issueId'));
+        $depth = RequestInput::depth($this->request->getBodyParam('depth'));
 
         try {
             $investigation = $this->plugin()->getInvestigations()->investigate($issueId, $depth, $this->userId());
-        } catch (InvalidArgumentException $e) {
+        } catch (Refusal $e) {
             $this->setFailFlash($e->getMessage());
 
             return $this->redirectToPostedUrl();
@@ -85,12 +87,9 @@ class InvestigationsController extends Controller
      */
     public function actionDetail(int $issueId, int $investigationId): Response
     {
-        $plugin = $this->plugin();
-
         try {
-            $issue = $plugin->getIssues()->get($issueId);
-            $investigation = $plugin->getInvestigations()->get($investigationId);
-            $steps = $investigation === null ? [] : $plugin->getInvestigations()->steps($investigationId);
+            $issue = $this->plugin()->getIssues()->get($issueId);
+            $investigation = $this->plugin()->getInvestigations()->get($investigationId);
         } catch (Throwable $e) {
             SafeException::log('An investigation could not be read', $e);
 
@@ -101,6 +100,49 @@ class InvestigationsController extends Controller
         // one's URL, so a link can only ever show what it says it shows.
         if ($issue === null || $investigation === null || $investigation->issueId !== $issue->id) {
             throw new NotFoundHttpException(Craft::t('web-doctor', 'No such investigation.'));
+        }
+
+        return $this->show($investigation, $issue);
+    }
+
+    /**
+     * One investigation a recipe ran, reached through the recipe it was run from. It is still
+     * shown when the recipe is no longer registered — its plan says what it was.
+     *
+     * @throws NotFoundHttpException if that recipe ran no such investigation.
+     */
+    public function actionRecipeDetail(string $recipeId, int $investigationId): Response
+    {
+        try {
+            $investigation = $this->plugin()->getInvestigations()->get($investigationId);
+        } catch (Throwable $e) {
+            SafeException::log('An investigation could not be read', $e);
+
+            throw new NotFoundHttpException(Craft::t('web-doctor', 'That investigation could not be read.'));
+        }
+
+        if ($investigation === null || $investigation->recipeId === null || $investigation->recipeId !== $recipeId) {
+            throw new NotFoundHttpException(Craft::t('web-doctor', 'No such investigation.'));
+        }
+
+        return $this->show($investigation, null);
+    }
+
+    /**
+     * What an investigation looked at and why, what it found, and in what order.
+     *
+     * @param Issue|null $issue The issue investigated; null for a recipe's investigation.
+     */
+    private function show(Investigation $investigation, ?Issue $issue): Response
+    {
+        $plugin = $this->plugin();
+
+        try {
+            $steps = $plugin->getInvestigations()->steps($investigation->id);
+        } catch (Throwable $e) {
+            SafeException::log('An investigation could not be read', $e);
+
+            throw new NotFoundHttpException(Craft::t('web-doctor', 'That investigation could not be read.'));
         }
 
         $checks = array_values(array_filter($steps, static fn(InvestigationStep $s): bool => $s->type === InvestigationStepType::CHECKED));
@@ -137,15 +179,18 @@ class InvestigationsController extends Controller
             $causesFailure = Craft::t('web-doctor', 'Web Doctor could not read the causes this investigation weighed. The details are in Craft’s logs.');
         }
 
+        $diagnosed = array_values(array_filter($steps, static fn(InvestigationStep $s): bool => $s->type === InvestigationStepType::DIAGNOSED))[0] ?? null;
+
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
 
         return $this->renderTemplate('web-doctor/_investigations/_detail', [
-            'title' => Craft::t('web-doctor', 'Investigation'),
+            'title' => $issue !== null ? Craft::t('web-doctor', 'Investigation') : $investigation->plan->ruleLabel,
             'issue' => $issue,
+            'recipe' => $investigation->recipeId === null ? null : $plugin->getRecipes()->get($investigation->recipeId),
             'investigation' => $investigation,
             'steps' => $steps,
             'checks' => $checks,
-            'findings' => array_values(array_filter($checks, static fn(InvestigationStep $s): bool => $s->isFinding() && $s->diagnosticId !== $issue->diagnosticId)),
+            'findings' => array_values(array_filter($checks, static fn(InvestigationStep $s): bool => $s->isFinding() && $s->diagnosticId !== $issue?->diagnosticId)),
             'incomplete' => array_values(array_filter($checks, static fn(InvestigationStep $s): bool => $s->isIncomplete())),
             'relatedIssues' => array_values(array_filter($steps, static fn(InvestigationStep $s): bool => $s->type === InvestigationStepType::RELATED_ISSUE)),
             'startedBy' => $this->userLabel($investigation->startedBy),
@@ -156,7 +201,7 @@ class InvestigationsController extends Controller
             'causes' => $causes,
             'causeGroups' => $causeGroups,
             'causesFailure' => $causesFailure,
-            'diagnosed' => array_values(array_filter($steps, static fn(InvestigationStep $s): bool => $s->type === InvestigationStepType::DIAGNOSED))[0] ?? null,
+            'diagnosed' => $diagnosed,
         ]);
     }
 

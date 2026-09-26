@@ -67,6 +67,18 @@ class OverviewController extends Controller
             $failure = Craft::t('web-doctor', 'Web Doctor could not read the last diagnostic run. The details are in Craft’s logs.');
         }
 
+        // The way from a symptom to the recipe for it, for somebody who may read what a recipe found.
+        // A registry that cannot be read costs the dashboard this pointer and nothing else.
+        $recipes = [];
+
+        if ($plugin->getPermissions()->canViewIssues()) {
+            try {
+                $recipes = $plugin->getRecipes()->all();
+            } catch (Throwable $e) {
+                SafeException::log('The recipes could not be read for the dashboard', $e);
+            }
+        }
+
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
 
         return $this->renderTemplate('web-doctor/_index', [
@@ -79,6 +91,7 @@ class OverviewController extends Controller
             'canRun' => $plugin->getPermissions()->canRun(),
             'siteLabel' => $this->siteLabel($dashboard->run?->context->siteId ?? $siteId),
             'failure' => $failure,
+            'recipes' => $recipes,
         ]);
     }
 
