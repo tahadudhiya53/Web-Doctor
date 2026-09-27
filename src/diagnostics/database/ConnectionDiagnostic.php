@@ -4,6 +4,7 @@ namespace Tahadudhiya\WebDoctor\diagnostics\database;
 
 use Craft;
 use craft\db\Connection;
+use craft\helpers\App;
 use Tahadudhiya\WebDoctor\base\Diagnostic;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
@@ -92,7 +93,7 @@ class ConnectionDiagnostic extends Diagnostic
         }
 
         $required = $this->requiredVersion($db);
-        $connection = $this->evidence(EvidenceType::CONFIGURATION, Craft::t('web-doctor', 'Database server'), [
+        $connection = $this->evidence(EvidenceType::DATABASE, Craft::t('web-doctor', 'Database server'), [
             'succeeded' => true,
             'driver' => $driverLabel,
             'serverVersion' => $serverVersion,
@@ -101,8 +102,10 @@ class ConnectionDiagnostic extends Diagnostic
 
         $evidence = [$settings, $connection];
 
+        // Not a non-finding: without the minimum, a server Craft does not support would raise
+        // nothing. As the PHP version check answers the same gap.
         if ($required === null) {
-            return $this->info(
+            return $this->unknown(
                 Craft::t('web-doctor', 'Connected to {driver} {version}. The version Craft requires could not be read.', [
                     'driver' => $driverLabel,
                     'version' => $serverVersion,
@@ -137,7 +140,7 @@ class ConnectionDiagnostic extends Diagnostic
     /**
      * The minimum server version Craft requires for the database actually in use.
      */
-    private function requiredVersion(Connection $db): ?string
+    protected function requiredVersion(Connection $db): ?string
     {
         $versions = Requirements::databaseVersions();
 
@@ -154,12 +157,12 @@ class ConnectionDiagnostic extends Diagnostic
     /**
      * The part of a reported server version that can be compared.
      *
-     * Servers decorate their version strings — `10.11.6-MariaDB-log`, `8.0.35-0ubuntu0.22.04.1`
-     * — and `version_compare` reads those suffixes as pre-release markers, which would make a
-     * supported server look unsupported.
+     * Servers decorate their version strings — `10.11.6-MariaDB-log`, `8.0.35-0ubuntu0.22.04.1`,
+     * and MariaDB before 11 as `5.5.5-10.6.12-MariaDB` — and `version_compare` would read those as
+     * pre-release markers or as the wrong version. Craft reads them with this same helper.
      */
     private function comparableVersion(string $version): string
     {
-        return preg_match('/^\d+(?:\.\d+)*/', $version, $match) === 1 ? $match[0] : $version;
+        return App::normalizeVersion($version) ?: $version;
     }
 }

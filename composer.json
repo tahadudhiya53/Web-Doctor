@@ -2,7 +2,7 @@
     "name": "tahadudhiya53/craft-web-doctor",
     "description": "A diagnostic and maintenance platform for Craft CMS.",
     "type": "craft-plugin",
-    "version": "1.0.0",
+    "version": "5.0.0",
     "license": "proprietary",
     "keywords": [
         "craft",

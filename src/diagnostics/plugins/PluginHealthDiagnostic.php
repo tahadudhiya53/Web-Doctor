@@ -120,7 +120,7 @@ class PluginHealthDiagnostic extends Diagnostic
         ksort($contextual, SORT_STRING);
 
         $evidence = [
-            $this->evidence(EvidenceType::PLUGIN_VERSION, Craft::t('web-doctor', 'Plugin state'), [
+            $this->evidence(EvidenceType::PLUGIN, Craft::t('web-doctor', 'Plugin state'), [
                 'recorded' => count($recorded),
                 'failedToLoad' => $notLoaded,
                 'missingFromProject' => $missing,

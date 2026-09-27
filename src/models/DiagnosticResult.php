@@ -8,6 +8,7 @@ use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\helpers\Redaction;
 
 /**
  * What one diagnostic concluded, and what it concluded it from.
@@ -20,9 +21,33 @@ use Tahadudhiya\WebDoctor\enums\Severity;
  * Results are immutable. The engine stamps identity and timing onto a copy once the diagnostic
  * has finished, so a diagnostic cannot claim a run it was not part of or a duration it did not
  * take.
+ *
+ * The text a result carries — its prose, and the name and affected component and plugin a
+ * diagnostic gives it — is redacted as the result is built, for the reason evidence is: it
+ * is written by diagnostics, including other plugins', about installations whose failures quote
+ * credentials — and it travels into the dashboard, the cache, the issue it raises and every report
+ * after that. Redacting it once here means none of those has to remember to.
  */
 final class DiagnosticResult implements JsonSerializable
 {
+    /** @var string The diagnostic's name, as a reader sees it. */
+    public readonly string $name;
+
+    /** @var string|null What is affected, named in Web Doctor's own terms. */
+    public readonly ?string $affectedComponent;
+
+    /** @var string|null The handle of the plugin at fault, where one is. */
+    public readonly ?string $affectedPlugin;
+
+    /** @var string One line, for a person. */
+    public readonly string $summary;
+
+    /** @var string The longer explanation, where one helps. */
+    public readonly string $description;
+
+    /** @var string|null What to do about it. */
+    public readonly ?string $recommendation;
+
     /**
      * @param string $diagnosticId Which diagnostic produced this.
      * @param string $name The diagnostic's name, as a reader sees it.
@@ -44,17 +69,17 @@ final class DiagnosticResult implements JsonSerializable
      */
     public function __construct(
         public readonly string $diagnosticId,
-        public readonly string $name,
+        string $name,
         public readonly DiagnosticCategory $category,
         public readonly DiagnosticStatus $status,
-        public readonly string $summary = '',
+        string $summary = '',
         public readonly ?Severity $severity = null,
-        public readonly string $description = '',
+        string $description = '',
         public readonly array $evidence = [],
-        public readonly ?string $recommendation = null,
+        ?string $recommendation = null,
         public readonly Confidence $confidence = Confidence::INFORMATIONAL,
-        public readonly ?string $affectedComponent = null,
-        public readonly ?string $affectedPlugin = null,
+        ?string $affectedComponent = null,
+        ?string $affectedPlugin = null,
         public readonly bool $repairAvailable = false,
         public readonly bool $verificationAvailable = false,
         public readonly ?string $environment = null,
@@ -63,6 +88,12 @@ final class DiagnosticResult implements JsonSerializable
         public readonly ?DateTimeImmutable $finishedAt = null,
         public readonly ?float $durationMs = null,
     ) {
+        $this->name = Redaction::redactString($name);
+        $this->affectedComponent = $affectedComponent === null ? null : Redaction::redactString($affectedComponent);
+        $this->affectedPlugin = $affectedPlugin === null ? null : Redaction::redactString($affectedPlugin);
+        $this->summary = Redaction::redactString($summary);
+        $this->description = Redaction::redactString($description);
+        $this->recommendation = $recommendation === null ? null : Redaction::redactString($recommendation);
     }
 
     /**
@@ -98,6 +129,12 @@ final class DiagnosticResult implements JsonSerializable
         float $durationMs,
     ): self {
         return $this->copy(
+            // The evidence is attributed along with the result, so a fact can be followed back to
+            // the run, site and environment it was gathered in without the result beside it.
+            evidence: array_map(
+                fn(Evidence $item): Evidence => $item->withAttribution($this->diagnosticId, $context),
+                $this->evidence,
+            ),
             environment: $context->environment,
             runId: $context->runId,
             startedAt: $startedAt,

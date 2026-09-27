@@ -69,6 +69,16 @@ class PendingChangesDiagnostic extends Diagnostic
             );
         }
 
+        // Craft answers this question, in that state, by writing the files out from the database —
+        // over whatever a deployment put there — and then saying nothing is pending.
+        if (($state['hadFileWriteIssues'] ?? false) === true) {
+            return $this->unknown(
+                Craft::t('web-doctor', 'Craft has recorded that it could not write the project config files, so whether changes are pending was not asked.'),
+                $evidence,
+                description: Craft::t('web-doctor', 'Asked now, Craft would rewrite the project config files from the database, replacing any changes they hold that have not been applied. Fix what stopped the files being written (usually the permissions on config/project), then run the checks again.'),
+            );
+        }
+
         if (!$state['changesPending']) {
             return $this->pass(Craft::t('web-doctor', 'The project config files are applied.'), $evidence);
         }
@@ -94,21 +104,24 @@ class PendingChangesDiagnostic extends Diagnostic
      * The project config's state, through Craft's own service.
      *
      * `areChangesPending()` is only asked once there are files to compare against, because with
-     * no external config there is nothing that could be pending.
+     * no external config there is nothing that could be pending — and not while Craft has recorded
+     * that it could not write them, because then it regenerates the files instead of comparing.
      *
      * Protected so a test can state a half-deployed installation rather than needing one.
      *
-     * @return array{externalConfigExists: bool, changesPending: bool, writeYamlAutomatically: bool, readOnly: bool, allowAdminChanges: bool}
+     * @return array{externalConfigExists: bool, hadFileWriteIssues?: bool, changesPending: bool, writeYamlAutomatically: bool, readOnly: bool, allowAdminChanges: bool}
      * @throws Throwable where the project config cannot be read.
      */
     protected function state(): array
     {
         $projectConfig = Craft::$app->getProjectConfig();
         $externalConfigExists = $projectConfig->getDoesExternalConfigExist();
+        $hadFileWriteIssues = $projectConfig->getHadFileWriteIssues();
 
         return [
             'externalConfigExists' => $externalConfigExists,
-            'changesPending' => $externalConfigExists && $projectConfig->areChangesPending(),
+            'hadFileWriteIssues' => $hadFileWriteIssues,
+            'changesPending' => $externalConfigExists && !$hadFileWriteIssues && $projectConfig->areChangesPending(),
             'writeYamlAutomatically' => $projectConfig->writeYamlAutomatically,
             'readOnly' => $projectConfig->readOnly,
             'allowAdminChanges' => Craft::$app->getConfig()->getGeneral()->allowAdminChanges,

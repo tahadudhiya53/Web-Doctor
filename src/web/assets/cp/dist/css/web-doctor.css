@@ -1,0 +1,840 @@
+/* Neutral chrome follows Craft's own custom properties so the dashboard tracks the control
+   panel's theme. The status and severity colours are stated outright instead, because a
+   contrast ratio is a promise and a variable somebody else owns cannot keep it. Colour is never
+   the only signal: every pill carries its own text. */
+
+.wd-visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Toolbar ---------------------------------------------------------------- */
+
+.wd-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+}
+
+.wd-toolbar .field {
+    margin: 0;
+}
+
+.wd-toolbar__note,
+.wd-run-status {
+    margin-top: 10px;
+}
+
+.wd-run-status {
+    font-weight: 600;
+}
+
+.wd-run-status::before {
+    content: '';
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-right: 8px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: wd-spin 0.7s linear infinite;
+    vertical-align: baseline;
+}
+
+@keyframes wd-spin {
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .wd-run-status::before { animation: none; }
+}
+
+.wd-running [type="submit"],
+.wd-running [type="checkbox"],
+.wd-running select {
+    cursor: progress;
+}
+
+/* Summary ---------------------------------------------------------------- */
+
+.wd-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    align-items: flex-start;
+}
+
+.wd-score {
+    flex: 0 0 auto;
+    max-width: 240px;
+    min-width: 140px;
+    text-align: center;
+}
+
+.wd-score__value {
+    font-size: 48px;
+    line-height: 1.1;
+    font-weight: 700;
+}
+
+.wd-score__max,
+.wd-score__caption {
+    color: var(--light-text-color, #596673);
+    font-size: 12px;
+}
+
+.wd-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    flex: 1 1 320px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.wd-count {
+    flex: 1 1 92px;
+    min-width: 92px;
+    padding: 8px 12px;
+    border: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.15));
+    border-radius: 5px;
+}
+
+.wd-count__value {
+    display: block;
+    font-size: 22px;
+    font-weight: 600;
+}
+
+.wd-count__label {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-count--critical .wd-count__value { color: #8a0014; }
+.wd-count--high .wd-count__value { color: #b00020; }
+.wd-count--warning .wd-count__value { color: #8a5200; }
+.wd-count--pass .wd-count__value { color: #1f6b30; }
+
+/* Run metadata ----------------------------------------------------------- */
+
+.wd-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 24px;
+    margin: 0;
+    font-size: 12px;
+}
+
+.wd-meta > div {
+    min-width: 0;
+}
+
+.wd-meta dt {
+    color: var(--light-text-color, #596673);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-size: 10px;
+}
+
+.wd-meta dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+/* Pills ------------------------------------------------------------------ */
+
+.wd-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 9px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: #fff;
+    background: #4b5563;
+    white-space: nowrap;
+}
+
+.wd-pill--pass { background: #1f6b30; }
+.wd-pill--info { background: #1553b6; }
+.wd-pill--warning { background: #ffb020; color: #1d2a35; }
+.wd-pill--fail { background: #b00020; }
+.wd-pill--error { background: #7a0014; }
+.wd-pill--unknown { background: #5b3bb0; }
+.wd-pill--skipped { background: #d5d9de; color: #1d2a35; }
+.wd-pill--none { background: transparent; color: var(--light-text-color, #596673); font-weight: 400; }
+
+.wd-pill--severity {
+    color: var(--text-color, #1d2a35);
+    background: transparent;
+    border: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.3));
+}
+
+.wd-pill--severity-high { border-color: #b00020; }
+.wd-pill--severity-critical { border-color: #8a0014; background: #8a0014; color: #fff; }
+
+/* Results ---------------------------------------------------------------- */
+
+.wd-results {
+    width: 100%;
+    table-layout: fixed;
+}
+
+.wd-results th {
+    text-align: left;
+}
+
+.wd-results td,
+.wd-results th {
+    vertical-align: top;
+    /* A diagnostic summary can be a paragraph and an ID can be long. Both wrap rather than
+       forcing the table wider than the panel it sits in. */
+    overflow-wrap: anywhere;
+}
+
+.wd-col-select { width: 36px; }
+.wd-col-narrow { width: 112px; }
+.wd-col-detail { width: auto; }
+
+.wd-result__name {
+    font-weight: 600;
+}
+
+.wd-result__id,
+.wd-result__timing,
+.wd-result__evidence {
+    color: var(--light-text-color, #596673);
+    font-size: 12px;
+}
+
+.wd-result__summary {
+    margin: 2px 0 0;
+}
+
+.wd-result__note {
+    margin: 4px 0 0;
+    font-size: 12px;
+}
+
+.wd-result__evidence {
+    margin-top: 4px;
+}
+
+/* Panels ----------------------------------------------------------------- */
+
+.wd-empty {
+    padding: 24px;
+    text-align: center;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-failure {
+    border-left: 4px solid #b00020;
+}
+
+.wd-stale {
+    border-left: 4px solid var(--hairline-color, rgba(51, 64, 77, 0.3));
+}
+
+.wd-explainer summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.wd-weights td,
+.wd-weights th {
+    padding-right: 24px;
+}
+
+.wd-weights--contributions {
+    margin-top: 16px;
+}
+
+/* Focus ------------------------------------------------------------------ */
+
+.wd-results [type="checkbox"]:focus-visible,
+.wd-toolbar [type="submit"]:focus-visible,
+.wd-explainer summary:focus-visible {
+    outline: 2px solid var(--link-color, #0b69a3);
+    outline-offset: 2px;
+}
+
+/* Narrow viewports ------------------------------------------------------- */
+
+@media (max-width: 767px) {
+    .wd-results {
+        table-layout: auto;
+    }
+
+    .wd-col-narrow {
+        width: auto;
+    }
+
+    .wd-score {
+        max-width: none;
+        text-align: left;
+    }
+
+    .wd-counts {
+        flex-basis: 100%;
+    }
+}
+
+/* Issue Center ----------------------------------------------------------- */
+
+.wd-issues__headline {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 6px;
+}
+
+.wd-filters__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    margin-top: 12px;
+}
+
+.wd-filters__group {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.wd-filters__group > legend,
+.wd-filters__group > label {
+    display: block;
+    margin: 10px 0 4px;
+    font-weight: 600;
+}
+
+.wd-filters__group > legend {
+    margin-top: 0;
+    padding: 0;
+}
+
+.wd-filters__check {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin: 3px 0;
+    font-weight: 400;
+}
+
+.wd-filters__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+/* The status pills use the same palette as the diagnostic statuses they grow out of, with the
+   two closed-by-decision states held apart from the closed-by-observation one: "resolved" is
+   something Web Doctor established, and the other two are somebody's choice. */
+.wd-pill--issue-new { background: #b00020; }
+.wd-pill--issue-investigating { background: #1553b6; }
+.wd-pill--issue-confirmed { background: #7a0014; }
+.wd-pill--issue-repairing { background: #1f6b30; }
+.wd-pill--issue-resolved { background: #1f6b30; }
+.wd-pill--issue-ignored { background: #d5d9de; color: #1d2a35; }
+.wd-pill--issue-wont_fix { background: #5b6570; }
+
+.wd-pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.wd-pager p {
+    margin: 0;
+}
+
+.wd-pager__links {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* Issue detail ----------------------------------------------------------- */
+
+.wd-breadcrumb {
+    margin: 0 0 12px;
+}
+
+.wd-issue__title {
+    margin-top: 0;
+}
+
+.wd-issue__pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.wd-issue__description,
+.wd-issue__recommendation,
+.wd-issue__note {
+    margin: 8px 0 0;
+}
+
+/* Set apart because it is a claim about what Web Doctor knows, and the paragraph under it says
+   how far that claim goes. A reader skimming for "is this fixed?" has to meet both. */
+.wd-issue__resolution {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-left: 3px solid #1f6b30;
+    background: var(--gray-050, #f3f7fc);
+}
+
+.wd-issue__resolution p {
+    margin: 0 0 4px;
+}
+
+/* Titles, summaries and evidence labels come from diagnostics, including other plugins'. Nothing
+   bounds their length, so they wrap instead of stretching the table off the page. */
+.wd-fingerprint,
+.wd-issues .wd-result__name,
+.wd-issues .wd-result__id,
+.wd-issue__title {
+    overflow-wrap: anywhere;
+}
+
+.wd-history td {
+    vertical-align: top;
+}
+
+/* Evidence --------------------------------------------------------------- */
+
+.wd-evidence-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.wd-evidence {
+    border: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.2));
+    border-radius: 4px;
+    padding: 0 12px;
+}
+
+.wd-evidence__summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 10px;
+    padding: 10px 0;
+    cursor: pointer;
+}
+
+.wd-evidence__type {
+    color: var(--light-text-color, #596673);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.wd-evidence__label {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.wd-evidence__meta {
+    padding-bottom: 10px;
+}
+
+.wd-evidence__body {
+    padding: 10px 0 12px;
+    border-top: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.1));
+}
+
+.wd-evidence__heading {
+    margin: 0 0 6px;
+    font-size: 12px;
+}
+
+.wd-evidence__heading:not(:first-child) {
+    margin-top: 12px;
+}
+
+.wd-evidence-data {
+    margin: 0;
+    font-size: 12px;
+}
+
+.wd-evidence-data > div {
+    display: grid;
+    grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
+    gap: 12px;
+    padding: 3px 0;
+}
+
+.wd-evidence-data dt {
+    color: var(--light-text-color, #596673);
+    font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+    overflow-wrap: anywhere;
+}
+
+.wd-evidence-data dd {
+    margin: 0;
+    min-width: 0;
+}
+
+.wd-evidence-data .wd-evidence-data {
+    padding-left: 10px;
+    border-left: 2px solid var(--hairline-color, rgba(51, 64, 77, 0.15));
+}
+
+.wd-evidence-list {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 12px;
+}
+
+.wd-evidence-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.wd-evidence-omitted {
+    margin: 4px 0 0;
+    font-size: 12px;
+}
+
+/* Marks stand for something that is not shown. Each carries its own word, and the redacted one
+   is drawn as a solid block so it cannot be read as part of the value around it. */
+.wd-mark {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    white-space: nowrap;
+    vertical-align: baseline;
+}
+
+.wd-mark--redacted { background: #1d2a35; color: #fff; }
+.wd-mark--truncated { background: transparent; color: #8a5200; border: 1px dashed #8a5200; }
+.wd-mark--presence { background: transparent; color: var(--text-color, #1d2a35); border: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.3)); }
+.wd-mark--presence-present { border-color: #1f6b30; color: #1f6b30; }
+.wd-mark--presence-missing,
+.wd-mark--presence-invalid { border-color: #b00020; color: #b00020; }
+
+/* A table wider than a narrow screen scrolls inside its own box rather than pushing the whole
+   control panel sideways. */
+.wd-table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+/* On a narrow screen a key sits above its value, so nested evidence gains depth downwards instead
+   of sideways — three levels of side-by-side keys would not fit a phone. */
+@media (max-width: 600px) {
+    .wd-evidence-data > div {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0;
+    }
+
+    .wd-evidence-data .wd-evidence-data {
+        padding-left: 6px;
+    }
+}
+
+/* Investigations. Its status says whether it got its answers, not what they were, so the palette
+   is the neutral one: a partly completed investigation is a gap to know about, not a failure of
+   the site. */
+.wd-pill--investigation-running { background: #1553b6; }
+.wd-pill--investigation-completed { background: #1f6b30; }
+.wd-pill--investigation-partial { background: #5b3bb0; }
+.wd-pill--investigation-failed { background: #7a0014; }
+
+.wd-mark--origin { background: transparent; color: #1553b6; border: 1px solid #1553b6; }
+
+.wd-investigation__summary p {
+    margin: 0 0 8px;
+}
+
+.wd-plan__heading {
+    margin: 16px 0 6px;
+    font-size: 14px;
+}
+
+.wd-plan__list,
+.wd-signals {
+    margin: 0 0 8px;
+    padding-left: 18px;
+    list-style: disc;
+}
+
+.wd-plan__list li,
+.wd-signals li {
+    margin: 0 0 6px;
+}
+
+.wd-signals .wd-pill {
+    margin-right: 4px;
+}
+
+.wd-timeline {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-left: 2px solid var(--hairline-color, rgba(51, 64, 77, 0.2));
+}
+
+.wd-timeline__step {
+    position: relative;
+    margin: 0 0 12px;
+    padding-left: 16px;
+}
+
+.wd-timeline__step::before {
+    content: '';
+    position: absolute;
+    top: 5px;
+    left: -6px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--light-text-color, #596673);
+}
+
+.wd-timeline__step--failed::before { background: #7a0014; }
+.wd-timeline__step--finished::before { background: #1f6b30; }
+.wd-timeline__step--relatedIssue::before { background: #ffb020; }
+.wd-timeline__step--diagnosed::before { background: #1553b6; }
+
+.wd-timeline__when {
+    font-size: 12px;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-timeline__what .wd-pill {
+    margin-left: 4px;
+}
+
+.wd-timeline__detail {
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+}
+
+/* Error groups */
+
+.wd-mark--repeated { background: transparent; color: #8a5200; border: 1px solid #8a5200; }
+
+.wd-error__message {
+    margin: 2px 0;
+    font-family: var(--code-font, SFMono-Regular, Consolas, monospace);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.wd-errors .wd-result__name,
+.wd-error__list,
+.wd-error__frames {
+    overflow-wrap: anywhere;
+}
+
+.wd-error__list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.wd-error__list li {
+    margin: 0 0 4px;
+}
+
+.wd-error__list .wd-pill {
+    margin-left: 4px;
+}
+
+.wd-error__frames {
+    margin: 0;
+    padding-left: 24px;
+    font-size: 12px;
+}
+
+.wd-error__frames li {
+    margin: 0 0 2px;
+}
+
+.wd-errors .wd-col-detail {
+    width: 40%;
+    min-width: 220px;
+}
+
+/* In a table the message identifies the row; the error's own page shows it whole. */
+.wd-errors .wd-error__message {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+/* Possible causes. Confidence says how firmly a cause is held, not how much the problem matters,
+   so it has a palette of its own rather than borrowing severity's: only a confirmed cause is shown
+   solid, and a possible one is barely more than an outline. */
+.wd-pill--confidence-possible {
+    color: var(--text-color, #1d2a35);
+    background: transparent;
+    border: 1px dashed var(--hairline-color, rgba(51, 64, 77, 0.5));
+}
+.wd-pill--confidence-likely { color: #1553b6; background: transparent; border: 1px solid #1553b6; }
+.wd-pill--confidence-high { background: #1553b6; }
+.wd-pill--confidence-confirmed { background: #1f6b30; }
+
+.wd-mark--role-required { background: transparent; color: var(--text-color, #1d2a35); border: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.3)); }
+.wd-mark--role-supporting { background: transparent; color: #1f6b30; border: 1px solid #1f6b30; }
+.wd-mark--role-confirming { background: #1f6b30; color: #fff; border: 1px solid #1f6b30; }
+.wd-mark--role-contradicting { background: transparent; color: #b00020; border: 1px solid #b00020; }
+
+.wd-cause {
+    margin: 16px 0 0;
+    padding: 16px 0 0;
+    border-top: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.15));
+}
+
+.wd-cause__title {
+    margin: 0 0 8px;
+    font-size: 16px;
+    overflow-wrap: anywhere;
+}
+
+.wd-cause__title .wd-pill {
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.wd-cause__heading {
+    margin: 14px 0 4px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-cause p {
+    margin: 0 0 6px;
+}
+
+.wd-cause__conditions,
+.wd-cause__observations {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.wd-cause__condition {
+    margin: 0 0 10px;
+}
+
+.wd-cause__observations {
+    margin: 4px 0 0 12px;
+    padding-left: 10px;
+    border-left: 2px solid var(--hairline-color, rgba(51, 64, 77, 0.2));
+}
+
+.wd-cause__observation {
+    margin: 0 0 4px;
+    overflow-wrap: anywhere;
+}
+
+.wd-cause__kind {
+    display: inline-block;
+    min-width: 7em;
+    font-size: 11px;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-cause__detail code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* Recommendations -------------------------------------------------------- */
+
+/* Risk is the risk of the action, not the seriousness of the problem, so it has a palette of its
+   own rather than borrowing severity's: outlined, and solid only where acting cannot be undone. */
+.wd-pill--risk-low { color: #1f6b30; background: transparent; border: 1px solid #1f6b30; }
+.wd-pill--risk-medium { color: #8a5200; background: transparent; border: 1px solid #8a5200; }
+.wd-pill--risk-high { background: #b00020; }
+
+.wd-recommendation {
+    margin: 16px 0 0;
+    padding: 16px 0 0;
+    border-top: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.15));
+}
+
+.wd-recommendation__title {
+    margin: 0 0 8px;
+    font-size: 16px;
+    overflow-wrap: anywhere;
+}
+
+.wd-recommendation__title .wd-pill {
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.wd-recommendation__heading {
+    margin: 14px 0 4px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--light-text-color, #596673);
+}
+
+.wd-recommendation p {
+    margin: 0 0 6px;
+    overflow-wrap: anywhere;
+}
+
+.wd-recommendation__basis {
+    margin: 0;
+    padding: 0 0 0 10px;
+    list-style: none;
+    border-left: 2px solid var(--hairline-color, rgba(51, 64, 77, 0.2));
+}
+
+.wd-recommendation__basis li {
+    margin: 0 0 4px;
+    overflow-wrap: anywhere;
+}
+
+.wd-result__recommendations {
+    margin: 6px 0 0;
+}
+
+.wd-result__recommendations > summary {
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+
+.wd-result__recommendations .wd-recommendation:first-of-type {
+    margin-top: 8px;
+}

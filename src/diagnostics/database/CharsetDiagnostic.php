@@ -88,7 +88,7 @@ class CharsetDiagnostic extends Diagnostic
         $supportsMb4 = $this->supportsMb4($db);
 
         $evidence = [
-            $this->evidence(EvidenceType::CONFIGURATION, Craft::t('web-doctor', 'Character set'), [
+            $this->evidence(EvidenceType::DATABASE, Craft::t('web-doctor', 'Character set'), [
                 'driver' => $db->getDriverLabel(),
                 'configuredCharset' => $configured,
                 'configuredCollation' => $configuredCollation,
@@ -98,7 +98,7 @@ class CharsetDiagnostic extends Diagnostic
                 'sampledTable' => self::SAMPLED_TABLE,
                 'sampledTableAcceptsMb4' => $supportsMb4,
                 'columnsInspected' => false,
-            ]),
+            ], reference: self::SAMPLED_TABLE),
         ];
 
         if ($db->getIsMysql() && $supportsMb4 === false) {
@@ -112,7 +112,7 @@ class CharsetDiagnostic extends Diagnostic
             );
         }
 
-        if (strcasecmp($actual['charset'], $configured) !== 0) {
+        if (!self::sameCharset($actual['charset'], $configured)) {
             return $this->warning(
                 Craft::t('web-doctor', 'The database is set to {actual} but Craft is configured for {configured}.', [
                     'actual' => $actual['charset'],
@@ -129,8 +129,10 @@ class CharsetDiagnostic extends Diagnostic
             );
         }
 
+        // The sample is the question this check exists to answer, so failing to take it is not
+        // knowing, rather than a note beside a clean result.
         if ($supportsMb4 === null) {
-            return $this->info(
+            return $this->unknown(
                 Craft::t('web-doctor', 'The database is set to {charset}, as configured. Four-byte character support could not be sampled.', ['charset' => $actual['charset']]),
                 $evidence,
             );
@@ -191,5 +193,17 @@ class CharsetDiagnostic extends Diagnostic
         } catch (Throwable) {
             return null;
         }
+    }
+
+    /**
+     * Whether two charset names mean the same charset. MySQL 8.0.30 and MariaDB 10.6 report the
+     * three-byte `utf8` as `utf8mb3`, which Craft's configuration may still call `utf8`; the
+     * difference is a name, not a mismatch.
+     */
+    public static function sameCharset(string $a, string $b): bool
+    {
+        $canonical = static fn(string $name): string => strtolower($name) === 'utf8' ? 'utf8mb3' : strtolower($name);
+
+        return $canonical($a) === $canonical($b);
     }
 }

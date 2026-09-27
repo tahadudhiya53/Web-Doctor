@@ -1,0 +1,151 @@
+{#
+    The evidence behind an issue. What it contains is shown only to somebody who may see it;
+    everybody who may read the issue sees what kind of evidence it rests on.
+
+    Values Web Doctor withheld are rendered as withheld — a labelled mark, never a bracket a
+    reader has to interpret. They were removed before anything was stored, so there is nothing
+    behind the mark to reveal.
+#}
+
+{% import _self as ev %}
+{% import "web-doctor/_macros" as shared %}
+
+{% macro node(node) %}
+    {% import _self as ev %}
+    {% import "web-doctor/_macros" as shared %}
+    {% if node.kind == 'map' or node.kind == 'list' %}
+        {% if node.kind == 'map' and node.entries|length %}
+            <dl class="wd-evidence-data">
+                {% for entry in node.entries %}
+                    <div><dt>{{ entry.key }}</dt><dd>{{ ev.node(entry.node) }}</dd></div>
+                {% endfor %}
+            </dl>
+        {% elseif node.kind == 'list' and node.items|length %}
+            <ol class="wd-evidence-list">
+                {% for item in node.items %}
+                    <li>{{ ev.node(item) }}</li>
+                {% endfor %}
+            </ol>
+        {% elseif not node.omitted %}
+            <span class="light">{{ "Empty"|t('web-doctor') }}</span>
+        {% endif %}
+        {% if node.omitted %}
+            <p class="wd-evidence-omitted"><span class="wd-mark wd-mark--truncated">{{ "Left out"|t('web-doctor') }}</span> {{ node.omitted }}</p>
+        {% endif %}
+    {% elseif node.kind == 'redacted' %}
+        {{ shared.redacted() }}
+    {% elseif node.kind == 'presence' %}
+        <span class="wd-mark wd-mark--presence wd-mark--presence-{{ node.value|lower }}">{{ node.value|t('web-doctor') }}</span>
+    {% elseif node.kind == 'deep' %}
+        <span class="wd-mark wd-mark--truncated" title="{{ 'Nested too deeply to record.'|t('web-doctor') }}">{{ "Too deep to record"|t('web-doctor') }}</span>
+    {% elseif node.kind == 'text' %}
+        <span class="wd-evidence-text">
+            {%- for segment in node.segments -%}
+                {%- if segment.redacted -%}{{ shared.redacted() }}{%- else -%}{{ segment.text }}{%- endif -%}
+            {%- endfor -%}
+        </span>
+        {%- if node.truncated %} <span class="wd-mark wd-mark--truncated">{{ "Cut short"|t('web-doctor') }}</span>{% endif %}
+    {% else %}
+        <code>{{ node.value }}</code>
+    {% endif %}
+{% endmacro %}
+
+{% macro item(stored, canViewEvidence, open) %}
+    {% import _self as ev %}
+    {% import "web-doctor/_macros" as shared %}
+    {% set evidence = stored.evidence %}
+    {% set redactions = evidence.redactions() %}
+    <details class="wd-evidence"{{ open ? ' open' }}>
+        <summary class="wd-evidence__summary">
+            <span class="wd-evidence__type">{{ evidence.type.label() }}</span>
+            <span class="wd-evidence__label">{{ shared.text(evidence.label) }}</span>
+            {% if redactions %}
+                <span class="wd-mark wd-mark--redacted">{{ "{count, plural, =1{1 value withheld} other{# values withheld}}"|t('web-doctor', { count: redactions }) }}</span>
+            {% endif %}
+            {% if evidence.truncated %}
+                <span class="wd-mark wd-mark--truncated">{{ "Shortened"|t('web-doctor') }}</span>
+            {% endif %}
+        </summary>
+
+        <dl class="wd-meta wd-evidence__meta">
+            <div><dt>{{ "Recorded by"|t('web-doctor') }}</dt><dd><code>{{ shared.text(evidence.source) }}</code></dd></div>
+            {# Where a fact lives — a file, a table, a job — is itself part of what it contains. #}
+            {% if canViewEvidence and evidence.reference %}
+                <div><dt>{{ "Where to find it"|t('web-doctor') }}</dt><dd><code>{{ shared.text(evidence.reference) }}</code></dd></div>
+            {% endif %}
+            {% if evidence.observedAt %}
+                <div><dt>{{ "True as of"|t('web-doctor') }}</dt><dd>{{ evidence.observedAt|datetime('short') }}</dd></div>
+            {% endif %}
+            {% if evidence.confidence %}
+                <div><dt>{{ "Confidence"|t('web-doctor') }}</dt><dd>{{ evidence.confidence.label() }}</dd></div>
+            {% endif %}
+            <div><dt>{{ "First seen"|t('web-doctor') }}</dt><dd>{{ stored.firstSeen|datetime('short') }}</dd></div>
+            <div><dt>{{ "Last seen"|t('web-doctor') }}</dt><dd>{{ stored.lastSeen|datetime('short') }}</dd></div>
+            <div><dt>{{ "Times seen"|t('web-doctor') }}</dt><dd>{{ stored.occurrences }}</dd></div>
+            <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ evidence.environment }}</dd></div>
+        </dl>
+
+        {% if canViewEvidence %}
+            <div class="wd-evidence__body">
+                <h3 class="wd-evidence__heading">{{ "What was recorded"|t('web-doctor') }}</h3>
+                {{ ev.node(stored.dataTree()) }}
+                {% if evidence.metadata|length %}
+                    <h3 class="wd-evidence__heading">{{ "How it was gathered"|t('web-doctor') }}</h3>
+                    {{ ev.node(stored.metadataTree()) }}
+                {% endif %}
+            </div>
+        {% endif %}
+    </details>
+{% endmacro %}
+
+<div class="pane" id="evidence">
+    <h2>{{ "Evidence behind the latest finding"|t('web-doctor') }}</h2>
+
+    {% if evidenceFailure %}
+        <p class="error">{{ evidenceFailure }}</p>
+    {% else %}
+        <p class="light">
+            {{ "What the check recorded the last time it reported this problem. Anything that is, or may be, a credential was removed before it was stored and is marked “Redacted”; it cannot be recovered here."|t('web-doctor') }}
+        </p>
+        {% if not canViewEvidence %}
+            <p class="light">{{ "You can see what kind of evidence this issue rests on. What it contains needs the “View evidence” permission."|t('web-doctor') }}</p>
+        {% endif %}
+
+        {% if latestEvidence|length %}
+            <div class="wd-evidence-group">
+                {% for stored in latestEvidence %}
+                    {{ ev.item(stored, canViewEvidence, canViewEvidence and loop.first) }}
+                {% endfor %}
+            </div>
+        {% else %}
+            <p class="light">{{ "The check that reported this recorded no evidence alongside it."|t('web-doctor') }}</p>
+        {% endif %}
+    {% endif %}
+</div>
+
+{% if earlierEvidence and earlierEvidence.total %}
+    <div class="pane" id="evidence-earlier">
+        <h2>{{ "Earlier evidence"|t('web-doctor') }}</h2>
+        <p class="light">
+            {{ "What earlier runs recorded that the latest one did not, most recently seen first. The same evidence seen again is counted rather than kept twice."|t('web-doctor') }}
+        </p>
+
+        <div class="wd-evidence-group">
+            {% for stored in earlierEvidence.items %}
+                {{ ev.item(stored, canViewEvidence, false) }}
+            {% endfor %}
+        </div>
+
+        {% if earlierEvidence.pageCount() > 1 %}
+            <nav class="wd-pager__links" aria-label="{{ "Pagination"|t('web-doctor') }}">
+                {% if earlierEvidence.hasPreviousPage() %}
+                    <a class="btn" href="{{ cpUrl('web-doctor/issues/' ~ issue.id, { evidencePage: earlierEvidence.page - 1 }) }}#evidence-earlier">{{ "Previous"|t('web-doctor') }}</a>
+                {% endif %}
+                <span class="light">{{ "Page {page} of {pages}"|t('web-doctor', { page: earlierEvidence.page, pages: earlierEvidence.pageCount() }) }}</span>
+                {% if earlierEvidence.hasNextPage() %}
+                    <a class="btn" href="{{ cpUrl('web-doctor/issues/' ~ issue.id, { evidencePage: earlierEvidence.page + 1 }) }}#evidence-earlier">{{ "Next"|t('web-doctor') }}</a>
+                {% endif %}
+            </nav>
+        {% endif %}
+    </div>
+{% endif %}

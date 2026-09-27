@@ -16,8 +16,8 @@ use Tahadudhiya\WebDoctor\helpers\Redaction;
  *
  * A context carries no secrets. Options scope work — a time window, a component, a limit — and
  * nothing else; where a diagnostic needs a credential it reads it from Craft at the moment it
- * needs it and reports only whether it was there. Options are redacted wherever a context is
- * serialized, but that is a backstop against a mistake rather than permission to make one.
+ * needs it and reports only whether it was there. Options are redacted as the context is built,
+ * but that is a backstop against a mistake rather than permission to make one.
  */
 final class DiagnosticContext implements JsonSerializable
 {
@@ -48,7 +48,10 @@ final class DiagnosticContext implements JsonSerializable
     ) {
         $this->runId = $runId ?? StringHelper::UUID();
         $this->startedAt = $startedAt ?? new DateTimeImmutable();
-        $this->options = $options;
+        // Redacted here as well as when serialized to JSON. A run is cached as a serialized PHP
+        // object, which never calls jsonSerialize(), so the redaction there alone would miss the
+        // one serialization every run goes through.
+        $this->options = Redaction::redact($options);
     }
 
     /**
@@ -70,7 +73,7 @@ final class DiagnosticContext implements JsonSerializable
 
         return new self(
             siteId: $siteId ?? self::currentSiteId(),
-            environment: $app->env,
+            environment: self::currentEnvironment(),
             mode: $mode ?? ($app instanceof ConsoleApplication ? ExecutionMode::CONSOLE : ExecutionMode::MANUAL),
             depth: $depth,
             options: $options,
@@ -85,13 +88,23 @@ final class DiagnosticContext implements JsonSerializable
      * null, which is a fact a diagnostic can act on; inventing a site ID would produce findings
      * attributed to a site nobody was looking at.
      */
-    private static function currentSiteId(): ?int
+    public static function currentSiteId(): ?int
     {
         try {
             return Craft::$app->getSites()->getCurrentSite()->id;
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    /**
+     * The environment being diagnosed, by Craft's name for it. Craft names none when nothing sets
+     * CRAFT_ENVIRONMENT, ENVIRONMENT or a server name — a bare command line — and that is still
+     * one place, so it is recorded under a name that says the environment was not known.
+     */
+    public static function currentEnvironment(): string
+    {
+        return Craft::$app->env ?? 'unknown';
     }
 
     public function option(string $key, mixed $default = null): mixed

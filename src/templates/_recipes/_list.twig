@@ -1,0 +1,126 @@
+{# The recipes, kept apart from the control panel shell they are shown in so that what Web Doctor
+   renders can be rendered — and asserted against — on its own. #}
+
+{% import "web-doctor/_macros" as shared %}
+{% set withheld = constant('Tahadudhiya\\WebDoctor\\helpers\\Redaction::REDACTED') %}
+
+<div class="pane">
+    <p class="wd-issues__headline">{{ "What is going wrong?"|t('web-doctor') }}</p>
+    <p class="light">
+        {{ "A recipe investigates a symptom. It runs the checks that cover what the symptom most often comes from, records what they report and the evidence they leave, and weighs the most serious problem they find against Web Doctor’s known causes. It changes nothing on the site. What it finds updates the Issue Center as any run does: a problem becomes or updates an issue, and an issue whose check no longer reports it is observed clear."|t('web-doctor') }}
+    </p>
+    <p class="light">
+        {{ "Each recipe says what it cannot inspect. Web Doctor does not read Craft’s, the web server’s or PHP’s logs, and does not capture the exceptions a site throws while serving requests; those are listed as not inspected, to be looked at by hand."|t('web-doctor') }}
+    </p>
+    <p class="light">
+        {% if siteName %}
+            {{ "Recipes run in this request, against the “{environment}” environment and the site “{site}”."|t('web-doctor', { environment: environment, site: siteName }) }}
+        {% else %}
+            {{ "Recipes run in this request, against the “{environment}” environment."|t('web-doctor', { environment: environment }) }}
+        {% endif %}
+    </p>
+</div>
+
+{% if failure %}
+    <div class="pane wd-failure" role="alert">
+        <p><strong>{{ failure }}</strong></p>
+    </div>
+{% endif %}
+
+{% if historyFailure %}
+    <div class="pane wd-failure" role="alert">
+        <p>{{ historyFailure }}</p>
+    </div>
+{% endif %}
+
+{% for recipe in recipes %}
+    {% set plan = plans[recipe.id] ?? null %}
+    {% set runs = history[recipe.id] ?? [] %}
+    <div class="pane wd-recipe" id="recipe-{{ recipe.id }}">
+        <h2 class="wd-recipe__symptom">{{ shared.text(recipe.symptom) }}</h2>
+        <p><strong>{{ shared.text(recipe.title) }}</strong> — {{ shared.text(recipe.description) }}</p>
+
+        {% if canInvestigate %}
+            <form method="post" accept-charset="UTF-8" class="wd-toolbar" data-wd-run-form>
+                {{ csrfInput() }}
+                {{ actionInput('web-doctor/recipes/run') }}
+                {{ redirectInput('web-doctor/recipes') }}
+                <input type="hidden" name="recipeId" value="{{ recipe.id }}">
+
+                <div class="field">
+                    <label for="wd-recipe-depth-{{ loop.index }}">{{ "Depth"|t('web-doctor') }}</label>
+                    <div class="select">
+                        <select id="wd-recipe-depth-{{ loop.index }}" name="depth">
+                            {% for depth in depths %}
+                                <option value="{{ depth.value }}"{{ depth.value == 'normal' ? ' selected' : '' }}>{{ depth.label() }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn submit">{{ "Run {recipe}"|t('web-doctor', { recipe: recipe.title|replace({ (withheld): '(' ~ 'Redacted'|t('web-doctor') ~ ')' }) }) }}</button>
+
+                <p class="wd-run-status" role="status" aria-live="polite" data-wd-run-status hidden>
+                    {{ "Investigating… this page will move on when it finishes."|t('web-doctor') }}
+                </p>
+            </form>
+        {% endif %}
+
+        {% if plan %}
+            <details class="wd-explainer">
+                <summary>{{ "What it looks at, and why"|t('web-doctor') }}</summary>
+                {% include "web-doctor/_investigations/_plan" with { plan: plan } only %}
+                <p class="light">{{ "Shown at normal depth. A shallow run looks only where the symptom itself lives; a deep one runs the same checks as a normal one and asks each of them to go further."|t('web-doctor') }}</p>
+            </details>
+        {% endif %}
+
+        {% if runs|length %}
+            <h3 class="wd-plan__heading">{{ "Recent runs"|t('web-doctor') }}</h3>
+            <div class="wd-table-scroll">
+            <table class="data fullwidth wd-investigations">
+                <thead>
+                    <tr>
+                        <th scope="col">{{ "Started"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Status"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Depth"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Checks performed"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Reported a problem"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Could not be completed"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Leading cause"|t('web-doctor') }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for investigation in runs %}
+                        {% set url = cpUrl('web-doctor/recipes/' ~ recipe.id ~ '/investigations/' ~ investigation.id) %}
+                        <tr>
+                            <td class="wd-col-narrow"><a href="{{ url }}">{{ investigation.startedAt|datetime('short') }}</a></td>
+                            <td class="wd-col-narrow"><span class="wd-pill wd-pill--investigation-{{ investigation.status.value }}">{{ investigation.statusLabel() }}</span></td>
+                            <td class="wd-col-narrow">{{ investigation.depth.label() }}</td>
+                            <td>{{ investigation.checksRun }}</td>
+                            <td>{{ investigation.checksWithProblems }}</td>
+                            <td>{{ investigation.checksIncomplete }}</td>
+                            <td>
+                                {% set cause = leadingCauses[investigation.id] ?? null %}
+                                {% if causesFailure %}
+                                    <span class="light">{{ "Could not be read"|t('web-doctor') }}</span>
+                                {% elseif cause %}
+                                    <span class="wd-pill wd-pill--confidence-{{ cause.confidence.value }}">{{ cause.confidence.label() }}</span>
+                                    <a href="{{ url }}#causes">{{ shared.text(cause.title) }}</a>
+                                {% else %}
+                                    <span class="light">{{ "None"|t('web-doctor') }}</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+        {% endif %}
+    </div>
+{% else %}
+    {% if not failure %}
+        <div class="pane">
+            <p class="light">{{ "No recipes are registered."|t('web-doctor') }}</p>
+        </div>
+    {% endif %}
+{% endfor %}

@@ -1,0 +1,14 @@
+{# The errors run into by the check behind this issue, on its runs in this environment and site. #}
+
+<div class="pane" id="errors">
+    <h2>{{ "Errors"|t('web-doctor') }}</h2>
+
+    {% if errorsFailure %}
+        <p class="error">{{ errorsFailure }}</p>
+    {% elseif errorGroups|length %}
+        <p class="light">{{ "Exceptions the check behind this issue ran into here, grouped so the same error is counted rather than listed again. An error is where to start looking, not a diagnosis."|t('web-doctor') }}</p>
+        {% include "web-doctor/_errors/_groups" with { groups: errorGroups, issues: errorIssues, canViewEvidence: canViewEvidence, currentIssueId: issue.id } only %}
+    {% else %}
+        <p class="light">{{ "The check behind this issue has not run into an error here."|t('web-doctor') }}</p>
+    {% endif %}
+</div>

@@ -1,0 +1,109 @@
+{# One error group, kept apart from the control panel shell for the reason the issue page is. #}
+
+{% import "web-doctor/_macros" as shared %}
+
+<p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/errors') }}">&larr; {{ "All errors"|t('web-doctor') }}</a></p>
+
+<div class="pane wd-issue">
+    <h2 class="wd-issue__title"><code>{{ group.shortClass() }}</code></h2>
+
+    {% if canViewEvidence %}
+        {% if group.normalizedMessage %}
+            <p class="wd-error__message">{{ shared.text(group.normalizedMessage) }}</p>
+        {% endif %}
+    {% else %}
+        <p class="light">{{ "What this error said, where it was thrown and how it got there need the “View evidence” permission."|t('web-doctor') }}</p>
+    {% endif %}
+
+    <p class="light">{{ "This is a record of what happened, not a diagnosis: an error a check ran into is where to start looking, not necessarily the cause of anything."|t('web-doctor') }}</p>
+
+    <dl class="wd-meta">
+        <div><dt>{{ "Error type"|t('web-doctor') }}</dt><dd><code>{{ group.exceptionClass }}</code></dd></div>
+        <div><dt>{{ "Times seen"|t('web-doctor') }}</dt><dd>{{ group.occurrences }}</dd></div>
+        <div><dt>{{ "First seen"|t('web-doctor') }}</dt><dd>{{ group.firstSeen|datetime('short') }}</dd></div>
+        <div><dt>{{ "Last seen"|t('web-doctor') }}</dt><dd>{{ group.lastSeen|datetime('short') }}</dd></div>
+        <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ group.environment }}</dd></div>
+        <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ siteLabel }}</dd></div>
+        {% if canViewEvidence %}
+            <div><dt>{{ "Thrown at"|t('web-doctor') }}</dt><dd><code>{{ shared.text(group.origin) }}</code></dd></div>
+        {% endif %}
+        {% if group.lastRunId %}
+            <div><dt>{{ "Latest run"|t('web-doctor') }}</dt><dd><code>{{ group.lastRunId }}</code></dd></div>
+        {% endif %}
+        <div><dt>{{ "Fingerprint"|t('web-doctor') }}</dt><dd><code class="wd-fingerprint">{{ group.fingerprint }}</code></dd></div>
+    </dl>
+</div>
+
+{% if canViewEvidence %}
+    <div class="pane">
+        <h2>{{ "What it said"|t('web-doctor') }}</h2>
+        <p class="light">{{ "The grouped form takes out what changes between occurrences — IDs, timestamps, UUIDs, addresses, tokens and the like — and marks what kind of value each was. The latest occurrence is shown as it was written. Anything that is, or may be, a credential was removed before it was stored."|t('web-doctor') }}</p>
+        <dl class="wd-meta">
+            <div><dt>{{ "Grouped as"|t('web-doctor') }}</dt><dd>{% if group.normalizedMessage %}{{ shared.text(group.normalizedMessage) }}{% else %}—{% endif %}</dd></div>
+            <div><dt>{{ "Latest occurrence"|t('web-doctor') }}</dt><dd>{% if group.message %}{{ shared.text(group.message) }}{% else %}—{% endif %}</dd></div>
+        </dl>
+
+        {% if group.previous|length %}
+            <h3 class="wd-plan__heading">{{ "Caused by"|t('web-doctor') }}</h3>
+            <ul class="wd-error__list">
+                {% for link in group.previous %}
+                    <li><code>{{ link.class }}</code>{% if link.message %} — {{ shared.text(link.message) }}{% endif %}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <h3 class="wd-plan__heading">{{ "Stack trace"|t('web-doctor') }}</h3>
+        {% if group.frames|length %}
+            <p class="light">{{ "The latest recorded trace, without arguments. The calls at the top of it are part of what identifies the error."|t('web-doctor') }}</p>
+            <ol class="wd-error__frames">
+                {% for frame in group.frames %}
+                    <li><code>{{ shared.text(frame) }}</code></li>
+                {% endfor %}
+            </ol>
+        {% else %}
+            <p class="light">{{ "No trace was recorded. A trace is kept when a check itself breaks; an exception a check caught and reported is recorded without one."|t('web-doctor') }}</p>
+        {% endif %}
+    </div>
+{% endif %}
+
+<div class="pane">
+    <h2>{{ "Checks that ran into it"|t('web-doctor') }}</h2>
+    <div class="wd-table-scroll">
+    <table class="data fullwidth wd-results">
+        <thead>
+            <tr>
+                <th scope="col">{{ "Check"|t('web-doctor') }}</th>
+                <th scope="col" class="wd-col-narrow">{{ "Last result"|t('web-doctor') }}</th>
+                <th scope="col" class="wd-col-narrow">{{ "Seen"|t('web-doctor') }}</th>
+                <th scope="col" class="wd-col-narrow">{{ "First seen"|t('web-doctor') }}</th>
+                <th scope="col" class="wd-col-narrow">{{ "Last seen"|t('web-doctor') }}</th>
+                <th scope="col">{{ "Related issue"|t('web-doctor') }}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for source in group.sources %}
+                {% set relatedIssue = source.issueId ? (issues[source.issueId] ?? null) : null %}
+                <tr>
+                    <td>
+                        <div class="wd-result__name">{{ shared.text(source.diagnosticName) }}</div>
+                        <div class="wd-result__id"><code>{{ source.diagnosticId }}</code></div>
+                    </td>
+                    <td class="wd-col-narrow"><span class="wd-pill wd-pill--{{ source.lastStatus.value }}">{{ source.lastStatus.label() }}</span></td>
+                    <td class="wd-col-narrow">{{ source.occurrences }}</td>
+                    <td class="wd-col-narrow">{{ source.firstSeen|datetime('short') }}</td>
+                    <td class="wd-col-narrow">{{ source.lastSeen|datetime('short') }}</td>
+                    <td>
+                        {% if relatedIssue %}
+                            <a href="{{ cpUrl('web-doctor/issues/' ~ relatedIssue.id) }}">{{ shared.text(relatedIssue.title) }}</a>
+                            <span class="wd-pill wd-pill--issue-{{ relatedIssue.status.value }}">{{ relatedIssue.status.label() }}</span>
+                        {% else %}
+                            <span class="light">{{ "None"|t('web-doctor') }}</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    <p class="light">{{ "The related issue is the one that check’s findings in this environment and site are recorded on, if it has raised one. A check that broke raises no issue itself, but may have raised one on an earlier run."|t('web-doctor') }}</p>
+</div>

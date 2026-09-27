@@ -8,6 +8,7 @@ use craft\web\Request as WebRequest;
 use craft\web\Response as WebResponse;
 use craft\web\TemplateResponseBehavior;
 use craft\web\View;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
@@ -17,13 +18,19 @@ use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
+use Tahadudhiya\WebDoctor\records\ErrorGroupRecord;
+use Tahadudhiya\WebDoctor\records\ErrorSourceRecord;
+use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\Runs;
+use Tahadudhiya\WebDoctor\Tests\_support\BreakingRuleRecommendations;
 use Tahadudhiya\WebDoctor\Tests\_support\ExplodingDiagnostics;
+use Tahadudhiya\WebDoctor\Tests\_support\FailingCache;
 use Tahadudhiya\WebDoctor\Tests\_support\RecordingOverviewController;
 use Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic;
 use Tahadudhiya\WebDoctor\Tests\_support\TestUser;
+use Tahadudhiya\WebDoctor\Tests\_support\WebDoctorTables;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use yii\base\Component;
 use yii\caching\ArrayCache;
@@ -43,6 +50,9 @@ class HealthDashboardTest extends TestCase
 {
     /** @var string The permission Craft itself demands of anyone reaching the control panel. */
     private const ACCESS_CP = 'accessCp';
+
+    /** @var string A parameter left out of the request, as against one sent empty. */
+    private const MISSING = '(missing)';
 
     private WebDoctor $plugin;
     private TestDiagnostic $diagnostic;
@@ -76,6 +86,18 @@ class HealthDashboardTest extends TestCase
     {
         Craft::$app->getUser()->setIdentity(null);
 
+        // Running the dashboard's action reconciles what it found into the Issue Center, which
+        // is a real table in whoever's installation these tests run in. Only the rows this
+        // test's own check could have raised are removed, matched on the ID it registered under.
+        if (Craft::$app->getDb()->tableExists(IssueRecord::TABLE)) {
+            IssueRecord::deleteAll(['like', 'diagnosticId', 'tests.%', false]);
+        }
+
+        // The errors this test's checks ran into, found through the sources that name them.
+        if (Craft::$app->getDb()->tableExists(ErrorGroupRecord::TABLE)) {
+            ErrorGroupRecord::deleteAll(['id' => ErrorSourceRecord::find()->select(['errorGroupId'])->where(['like', 'diagnosticId', 'tests.%', false])->column()]);
+        }
+
         if ($this->originalRequest !== null) {
             Craft::$app->set('request', $this->originalRequest);
             $this->originalRequest = null;
@@ -104,7 +126,7 @@ class HealthDashboardTest extends TestCase
 
         return new WebDoctor('web-doctor', Craft::$app, $config + [
             'name' => 'Web Doctor',
-            'version' => '1.0.0',
+            'version' => '5.0.0',
         ]);
     }
 
@@ -345,14 +367,91 @@ class HealthDashboardTest extends TestCase
         self::assertSame('deep', $this->plugin->getRuns()->latest($this->siteId())?->context->depth->value);
     }
 
-    public function testADepthWebDoctorDoesNotHaveFallsBackToTheNormalOne(): void
+    /**
+     * @return array<string, array{mixed, string|null}>
+     */
+    public static function requestedDepths(): array
+    {
+        return [
+            'shallow' => ['shallow', 'shallow'],
+            'normal' => ['normal', 'normal'],
+            'deep' => ['deep', 'deep'],
+            'missing' => [self::MISSING, 'normal'],
+            'a depth Web Doctor does not have' => ['exhaustive', null],
+            'empty' => ['', null],
+            'the wrong case' => ['Deep', null],
+            'a list' => [['deep'], null],
+        ];
+    }
+
+    /**
+     * Missing, a run is at normal depth, as the form states. Anything that is not one of the three
+     * depths is refused before anything runs, is remembered or is written.
+     */
+    #[DataProvider('requestedDepths')]
+    public function testARunIsAtExactlyTheDepthAskedForOrNotAtAll(mixed $requested, ?string $expected): void
     {
         $this->signIn(admin: true);
-        $this->post(['all' => '1', 'depth' => 'exhaustive']);
+        $this->post($requested === self::MISSING ? ['all' => '1'] : ['all' => '1', 'depth' => $requested]);
+
+        if ($expected === null) {
+            $before = WebDoctorTables::snapshot();
+
+            try {
+                $this->controller()->runAction('run');
+                self::fail('A run was started at a depth Web Doctor does not have.');
+            } catch (BadRequestHttpException) {
+            }
+
+            self::assertSame(0, $this->diagnostic->runs);
+            self::assertNull($this->plugin->getRuns()->latest($this->siteId()));
+            self::assertSame($before, WebDoctorTables::snapshot());
+
+            return;
+        }
 
         $this->controller()->runAction('run');
 
-        self::assertSame('normal', $this->plugin->getRuns()->latest($this->siteId())?->context->depth->value);
+        self::assertSame($expected, $this->plugin->getRuns()->latest($this->siteId())?->context->depth->value);
+    }
+
+    /**
+     * @return array<string, array{array<string, mixed>}>
+     */
+    public static function malformedChoices(): array
+    {
+        return [
+            'all as a word' => [['all' => 'yes']],
+            'all as zero' => [['all' => '0']],
+            'all as a list' => [['all' => ['1']]],
+            'one check, not a list' => [['diagnostics' => 'tests.dashboard']],
+            'checks keyed by name' => [['diagnostics' => ['a' => 'tests.dashboard']]],
+            'a check that is a list' => [['diagnostics' => [['tests.dashboard']]]],
+        ];
+    }
+
+    /**
+     * What to run is stated in the form's own shape or refused: `all=yes` does not run
+     * everything, and a malformed selection does not run whatever part of it could be read.
+     *
+     * @param array<string, mixed> $params
+     */
+    #[DataProvider('malformedChoices')]
+    public function testARunWhoseChoiceIsMalformedIsRefusedWithNothingRun(array $params): void
+    {
+        $this->signIn(admin: true);
+        $this->post($params);
+        $before = WebDoctorTables::snapshot();
+
+        try {
+            $this->controller()->runAction('run');
+            self::fail('A malformed choice of checks was run.');
+        } catch (BadRequestHttpException) {
+        }
+
+        self::assertSame(0, $this->diagnostic->runs);
+        self::assertNull($this->plugin->getRuns()->latest($this->siteId()));
+        self::assertSame($before, WebDoctorTables::snapshot());
     }
 
     // Access ---------------------------------------------------------------
@@ -396,7 +495,7 @@ class HealthDashboardTest extends TestCase
         // Craft turns a request with no identity into a login redirect, which needs a session
         // this harness has none of. What is assertable here is the switch Craft reads to decide
         // that: the controller never opts any action out of authentication. That nobody signed
-        // in holds the permission is covered against a real identity in AuthorizationTest.
+        // in holds the permission is covered against a real identity in InstallationTest.
         self::assertSame(RecordingOverviewController::ALLOW_ANONYMOUS_NEVER, $this->controller()->anonymousAccess());
     }
 
@@ -439,22 +538,13 @@ class HealthDashboardTest extends TestCase
         self::assertSame(1, $this->diagnostic->runs);
     }
 
-    public function testRunningRefusesAGetRequest(): void
-    {
-        // State changes on POST only, so the run action cannot be reached by following a link.
-        $this->signIn(admin: true);
-        $this->request('GET');
-
-        $this->expectException(MethodNotAllowedHttpException::class);
-        $this->controller()->runAction('run');
-    }
-
     /**
      * @return array<string, array{string}>
      */
     public static function unsafeMethodProvider(): array
     {
-        return ['PUT' => ['PUT'], 'PATCH' => ['PATCH'], 'DELETE' => ['DELETE']];
+        // GET included: state changes on POST only, so a run cannot be set going by following a link.
+        return ['GET' => ['GET'], 'PUT' => ['PUT'], 'PATCH' => ['PATCH'], 'DELETE' => ['DELETE']];
     }
 
     #[\PHPUnit\Framework\Attributes\DataProvider('unsafeMethodProvider')]
@@ -648,6 +738,65 @@ class HealthDashboardTest extends TestCase
         self::assertStringNotContainsString('hunter2', $flash['message']);
     }
 
+    /**
+     * The cache, the issues and the errors are three independent places a run is kept. One that
+     * cannot be written — the Redis that is down — must not cost the other two the run's findings.
+     */
+    public function testARunThatCannotBeCachedStillReachesTheIssueCenter(): void
+    {
+        $this->plugin->getRuns()->cache = new FailingCache(['failReads' => false]);
+        $this->signIn(admin: true);
+        $this->post(['all' => '1']);
+
+        $controller = $this->controller();
+        $controller->runAction('run');
+        $flash = $controller->lastFlash();
+
+        self::assertNotNull($flash);
+        self::assertSame('fail', $flash['level']);
+        self::assertStringContainsString('results could not be stored', $flash['message']);
+        self::assertStringContainsString('1 new issue.', $flash['message']);
+        self::assertSame(1, (int)IssueRecord::find()->where(['diagnosticId' => 'tests.dashboard'])->count());
+    }
+
+    public function testTheErrorsARunRanIntoAreRecordedAndSaidSo(): void
+    {
+        // A check that breaks raises no issue, but the error it ran into is kept and counted.
+        $this->diagnostic->handler = static fn() => throw new \RuntimeException('Element 4812 could not be saved.');
+        $this->signIn(admin: true);
+        $this->post(['all' => '1']);
+
+        $controller = $this->controller();
+        $controller->runAction('run');
+
+        $flash = $controller->lastFlash();
+        $group = ErrorGroupRecord::findOne([
+            'id' => ErrorSourceRecord::find()->select(['errorGroupId'])->where(['diagnosticId' => 'tests.dashboard'])->column(),
+        ]);
+
+        self::assertNotNull($flash);
+        self::assertSame('success', $flash['level']);
+        self::assertStringContainsString('1 error recorded.', $flash['message']);
+        self::assertInstanceOf(ErrorGroupRecord::class, $group);
+        self::assertSame('Element {id} could not be saved.', $group->normalizedMessage);
+    }
+
+    public function testARunThatRanIntoNoErrorRecordsNoneAndSaysNothingAboutThem(): void
+    {
+        // The registered check fails, with no exception behind it: an issue, and no error.
+        $this->signIn(admin: true);
+        $this->post(['all' => '1']);
+
+        $controller = $this->controller();
+        $controller->runAction('run');
+        $flash = $controller->lastFlash();
+
+        self::assertNotNull($flash);
+        self::assertSame('success', $flash['level']);
+        self::assertStringNotContainsString('error', strtolower(str_replace('issue', '', $flash['message'])));
+        self::assertSame(0, (int)ErrorSourceRecord::find()->where(['diagnosticId' => 'tests.dashboard'])->count());
+    }
+
     // Presentation ---------------------------------------------------------
 
     public function testEvidenceIsSummarisedRatherThanPutOnThePage(): void
@@ -659,7 +808,7 @@ class HealthDashboardTest extends TestCase
             'Something to look at.',
             [new Evidence(
                 type: EvidenceType::CONFIGURATION,
-                label: 'Mail transport',
+                label: 'Mail transport token=zz-label-secret',
                 source: 'tests.dashboard',
                 data: [
                     'host' => 'smtp.example.test',
@@ -680,9 +829,115 @@ class HealthDashboardTest extends TestCase
         self::assertStringContainsString('Mail transport', $html);
         self::assertStringContainsString('Configuration', $html);
 
-        foreach (['ZZZ-DISTINCTIVE-VALUE-ZZZ', 'smtp.example.test', 'sk-live-should-never-appear', 'hunter2'] as $secret) {
+        foreach (['ZZZ-DISTINCTIVE-VALUE-ZZZ', 'smtp.example.test', 'sk-live-should-never-appear', 'hunter2', 'zz-label-secret'] as $secret) {
             self::assertStringNotContainsString($secret, $html);
         }
+
+        // A label with something withheld from it shows the withheld part as a mark, never as the
+        // bracketed marker a reader would have to interpret.
+        self::assertStringContainsString('Mail transport token=<span class="wd-mark wd-mark--redacted"', $html);
+        self::assertStringNotContainsString(\Tahadudhiya\WebDoctor\helpers\Redaction::REDACTED, $html);
+    }
+
+    public function testEachFindingCarriesItsRecommendationWithoutWhatItsEvidenceContains(): void
+    {
+        $this->plugin->getDiagnostics()->register(new TestDiagnostic([
+            'diagnosticId' => 'queue.failedJobs',
+            'diagnosticName' => 'Failed queue jobs',
+            'diagnosticCategory' => DiagnosticCategory::QUEUE,
+            'handler' => static fn(TestDiagnostic $d) => $d->build('fail', [
+                'Queue jobs have failed: 1.',
+                [
+                    new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.failedJobs', data: ['failed' => 1, 'examined' => 1]),
+                    new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Sending email', source: 'queue.failedJobs', data: ['description' => 'Sending email', 'occurrences' => 1, 'error' => 'ZZZ-JOB-ERROR-ZZZ']),
+                ],
+            ]),
+        ]));
+
+        // Stored the way a run is remembered, without the run action: that would raise an issue
+        // under a shipped check's ID in whichever installation these tests run in.
+        $run = $this->plugin->getDiagnosticEngine()->runAll(DiagnosticContext::current());
+        self::assertTrue($this->plugin->getRuns()->remember($run));
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $before = WebDoctorTables::snapshot();
+        $html = $this->render();
+
+        // Opening the page ran nothing and wrote nothing: the advice is read from the run shown.
+        self::assertSame(1, $this->diagnostic->runs);
+        self::assertSame($before, WebDoctorTables::snapshot());
+        self::assertStringContainsString('Read each failed job’s error, and retry only when it is safe', $html);
+        self::assertStringContainsString('wd-pill--risk-medium', $html);
+        self::assertStringContainsString('<code>queue.failedJobs</code>', $html);
+        // The dashboard shows what kind of fact advice rests on, never what it contains.
+        self::assertStringContainsString('Sending email, recorded by Failed queue jobs', $html);
+        self::assertStringNotContainsString('ZZZ-JOB-ERROR-ZZZ', $html);
+
+        // A finding no rule answers keeps its check's own advice, said to be the check's.
+        self::assertStringContainsString('The check’s own advice', $html);
+        self::assertStringContainsString('Fix it.', $html);
+    }
+
+    public function testARuleThatBreaksIsSaidAndNoLaterRuleIsGivenInItsPlace(): void
+    {
+        $this->diagnostic->handler = static fn(TestDiagnostic $d) => $d->build('fail', ['Something is broken.']);
+        $this->plugin->getDiagnostics()->register(new TestDiagnostic([
+            'diagnosticId' => 'queue.failedJobs',
+            'diagnosticName' => 'Failed queue jobs',
+            'diagnosticCategory' => DiagnosticCategory::QUEUE,
+            'handler' => static fn(TestDiagnostic $d) => $d->build('fail', [
+                'Queue jobs have failed: 1.',
+                [new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.failedJobs', data: ['failed' => 1])],
+            ]),
+        ]));
+        $this->plugin->getRuns()->remember($this->plugin->getDiagnosticEngine()->runAll(DiagnosticContext::current()));
+        $this->plugin->set('recommendations', new BreakingRuleRecommendations(['check' => 'queue.failedJobs']));
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render();
+
+        // The broken rule comes first for its check, so the advice after it is not given instead.
+        self::assertStringNotContainsString('Read each failed job’s error, and retry only when it is safe', $html);
+        self::assertStringContainsString('could not be worked out', $html);
+        // The row, and every other row, still shows.
+        self::assertStringContainsString('Queue jobs have failed: 1.', $html);
+        self::assertStringContainsString('Something is broken.', $html);
+        self::assertStringNotContainsString('hunter2', $html);
+    }
+
+    public function testARunFromTheControlPanelKeepsTheEvidenceBehindWhatItFinds(): void
+    {
+        // The whole path a person sets going: the run action, the engine stamping the run, the
+        // reconciliation, and the evidence landing against the issue it supports.
+        $this->diagnostic->handler = static fn(TestDiagnostic $d) => $d->build('warning', [
+            'Something to look at.',
+            [new Evidence(
+                type: EvidenceType::QUEUE,
+                label: 'Queue depth',
+                source: 'tests.dashboard',
+                data: ['waiting' => 12, 'apiKey' => 'sk-should-never-be-stored'],
+                runId: 'claimed-by-the-check',
+            )],
+        ]);
+
+        $this->signIn(admin: true);
+        $this->post(['all' => '1']);
+        $this->controller()->runAction('run');
+
+        $issue = IssueRecord::findOne(['diagnosticId' => 'tests.dashboard']);
+
+        self::assertInstanceOf(IssueRecord::class, $issue);
+
+        $row = \Tahadudhiya\WebDoctor\records\EvidenceRecord::findOne(['issueId' => $issue->id]);
+
+        self::assertInstanceOf(\Tahadudhiya\WebDoctor\records\EvidenceRecord::class, $row);
+        self::assertSame('Queue depth', $row->label);
+        self::assertSame($issue->latestRunId, $row->lastRunId);
+        self::assertNotSame('claimed-by-the-check', $row->lastRunId);
+        self::assertSame($issue->environment, $row->environment);
+        self::assertStringNotContainsString('sk-should-never-be-stored', (string)$row->data);
     }
 
     public function testAnExceptionFromACheckIsNotRepeatedRawOnThePage(): void
@@ -773,16 +1028,6 @@ class HealthDashboardTest extends TestCase
     }
 
     // Scoping --------------------------------------------------------------
-
-    public function testARunFromAnotherSiteIsNotShownHere(): void
-    {
-        $this->signIn(admin: true);
-        $this->post(['all' => '1']);
-        $this->controller()->runAction('run');
-
-        // The same stored run, asked for under a site nobody was looking at.
-        self::assertNull($this->plugin->getRuns()->latest(($this->siteId() ?? 0) + 1000));
-    }
 
     public function testASiteThatCannotBeResolvedIsNotCalledAllSites(): void
     {

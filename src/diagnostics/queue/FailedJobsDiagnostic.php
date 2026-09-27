@@ -31,10 +31,12 @@ use Throwable;
  * form of it: merging two unrelated failures would produce a wrong story, and leaving them
  * apart only produces a longer one.
  *
- * Error text is shown on the same terms Craft itself shows it — in development mode, or to an
- * administrator. Web Doctor does not become the way around that, and it redacts what it does
- * show regardless: being allowed to see an error is not the same as being shown a credential
- * that happened to be inside one.
+ * Error text is read on the same terms Craft itself shows it — in development mode, or when an
+ * administrator runs the check — so a run somebody else starts records only whether there was an
+ * error. What is recorded is evidence from then on, and Web Doctor shows evidence contents to
+ * whoever holds "View evidence"; granting that is granting this. It redacts what it records
+ * regardless: being allowed to see an error is not the same as being shown a credential that
+ * happened to be inside one.
  */
 class FailedJobsDiagnostic extends QueueDiagnostic
 {
@@ -72,7 +74,7 @@ class FailedJobsDiagnostic extends QueueDiagnostic
         if ($total === 0) {
             return $this->pass(
                 Craft::t('web-doctor', 'No queue jobs have failed.'),
-                [$this->evidence(EvidenceType::QUEUE_JOB, Craft::t('web-doctor', 'Failed jobs'), ['failed' => 0])],
+                [$this->evidence(EvidenceType::QUEUE, Craft::t('web-doctor', 'Failed jobs'), ['failed' => 0])],
             );
         }
 
@@ -82,7 +84,7 @@ class FailedJobsDiagnostic extends QueueDiagnostic
         $complete = $examined === $total;
 
         $evidence = [
-            $this->evidence(EvidenceType::QUEUE_JOB, Craft::t('web-doctor', 'Failed jobs'), [
+            $this->evidence(EvidenceType::QUEUE, Craft::t('web-doctor', 'Failed jobs'), [
                 // `failed` is every failure there is; the rest describe the sample that was
                 // looked at. A queue with thousands of failures is exactly the one where
                 // reading them all would be worst, so the difference is stated rather than
@@ -119,6 +121,8 @@ class FailedJobsDiagnostic extends QueueDiagnostic
             $description = $complete
                 ? Craft::t('web-doctor', 'Some of these are the same job failing repeatedly, which points at a condition that has not gone away rather than at a one-off.')
                 : Craft::t('web-doctor', 'Of the {examined} most recent failures examined, some are the same job failing repeatedly, which points at a condition that has not gone away. The rest were not read.', ['examined' => $examined]);
+        } elseif ($examined === 0) {
+            $description = Craft::t('web-doctor', 'Work the site was asked to do has not been done, and it will not be retried on its own. Their errors are not read at this depth.');
         } else {
             $description = $complete
                 ? Craft::t('web-doctor', 'Work the site was asked to do has not been done, and it will not be retried on its own.')
@@ -126,9 +130,10 @@ class FailedJobsDiagnostic extends QueueDiagnostic
         }
 
         return $this->fail(
-            $complete
-                ? Craft::t('web-doctor', 'Queue jobs have failed: {count}.', ['count' => $total])
-                : Craft::t('web-doctor', 'Queue jobs have failed: {count}, of which the {examined} most recent were examined.', ['count' => $total, 'examined' => $examined]),
+            match (true) {
+                $complete, $examined === 0 => Craft::t('web-doctor', 'Queue jobs have failed: {count}.', ['count' => $total]),
+                default => Craft::t('web-doctor', 'Queue jobs have failed: {count}, of which the {examined} most recent were examined.', ['count' => $total, 'examined' => $examined]),
+            },
             $evidence,
             recommendation: Craft::t('web-doctor', 'Look at the recorded error for each job, fix what it names, then retry the jobs from Utilities → Queue Manager.'),
             severity: $repeated !== [] || $total > 5 ? Severity::HIGH : Severity::MEDIUM,
@@ -150,13 +155,13 @@ class FailedJobsDiagnostic extends QueueDiagnostic
      */
     protected function groupFailures(Queue $queue, int $limit): array
     {
-        $rows = $this->failedJobs($queue)
+        $rows = $this->onQueueDb($queue, fn($db): array => $this->failedJobs($queue)
             ->select(['description', 'error', 'dateFailed'])
             // Most recent first, and `id` breaks the tie so two rows failing in the same second
             // never come back in a different order on a later run.
             ->orderBy(['dateFailed' => SORT_DESC, 'id' => SORT_DESC])
             ->limit($limit)
-            ->all();
+            ->all($db));
 
         $showErrors = $this->mayShowErrors();
         $groups = [];
@@ -202,7 +207,7 @@ class FailedJobsDiagnostic extends QueueDiagnostic
      */
     protected function totalFailed(Queue $queue): int
     {
-        return (int)$this->failedJobs($queue)->count('*');
+        return (int)$this->onQueueDb($queue, fn($db) => $this->failedJobs($queue)->count('*', $db));
     }
 
     /**
@@ -217,9 +222,10 @@ class FailedJobsDiagnostic extends QueueDiagnostic
     /**
      * Whether the error a job recorded may be shown.
      *
-     * The same terms Craft applies in its own queue listing. Web Doctor reads the queue table
-     * directly — Craft's listing puts failures last, so a bounded read of it returns none — and
-     * reading it directly must not become a way around the rule that comes with it.
+     * The same terms Craft applies in its own queue listing, for the person running the check. Web
+     * Doctor reads the queue table directly — Craft's listing puts failures last, so a bounded read
+     * of it returns none — and a run by somebody Craft would not show the errors to must not read
+     * them. Once read they are evidence, shown under "View evidence" like any other.
      */
     private function mayShowErrors(): bool
     {

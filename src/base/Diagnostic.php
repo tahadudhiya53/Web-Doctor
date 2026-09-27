@@ -131,9 +131,9 @@ abstract class Diagnostic extends Component implements DiagnosticInterface
      *
      * @param Evidence[] $evidence
      */
-    protected function unknown(string $summary, array $evidence = []): DiagnosticResult
+    protected function unknown(string $summary, array $evidence = [], string $description = ''): DiagnosticResult
     {
-        return $this->result(DiagnosticStatus::UNKNOWN, $summary, evidence: $evidence);
+        return $this->result(DiagnosticStatus::UNKNOWN, $summary, evidence: $evidence, description: $description);
     }
 
     /**
@@ -176,9 +176,11 @@ abstract class Diagnostic extends Component implements DiagnosticInterface
      * Records a fact, attributed to this diagnostic.
      *
      * @param array<array-key, mixed> $data
+     * @param array<array-key, mixed> $metadata How the fact was gathered, rather than the fact.
+     * @param string|null $reference Where the fact can be found again.
      */
-    protected function evidence(EvidenceType $type, string $label, array $data = []): Evidence
+    protected function evidence(EvidenceType $type, string $label, array $data = [], array $metadata = [], ?string $reference = null): Evidence
     {
-        return new Evidence(type: $type, label: $label, source: $this->id(), data: $data);
+        return new Evidence(type: $type, label: $label, source: $this->id(), data: $data, metadata: $metadata, reference: $reference);
     }
 }

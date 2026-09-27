@@ -3,12 +3,13 @@
 namespace Tahadudhiya\WebDoctor\Tests\integration;
 
 use Craft;
-use craft\console\Application as ConsoleApplication;
 use craft\elements\User;
 use craft\web\View;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\WebDoctor\console\controllers\WebDoctorController;
 use Tahadudhiya\WebDoctor\models\Settings;
+use Tahadudhiya\WebDoctor\records\IssueEventRecord;
+use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\Tests\_support\TestUser;
 use Tahadudhiya\WebDoctor\WebDoctor;
@@ -34,7 +35,7 @@ class InstallationTest extends TestCase
         // installed package.
         $this->plugin = new WebDoctor('web-doctor', Craft::$app, WebDoctor::config() + [
             'name' => 'Web Doctor',
-            'version' => '1.0.0',
+            'version' => '5.0.0',
             'developer' => 'Taha Dudhiya',
         ]);
     }
@@ -64,19 +65,13 @@ class InstallationTest extends TestCase
         return $user;
     }
 
-    public function testCraftIsRunning(): void
+    public function testEveryComponentResolvesToItsService(): void
     {
-        self::assertInstanceOf(ConsoleApplication::class, Craft::$app);
-    }
-
-    public function testThePluginBootstrapsWithoutError(): void
-    {
-        self::assertSame('web-doctor', $this->plugin->id);
-    }
-
-    public function testComponentsResolveToTheirServices(): void
-    {
-        self::assertInstanceOf(Permissions::class, $this->plugin->getPermissions());
+        foreach (WebDoctor::config()['components'] as $id => $definition) {
+            if (class_exists($definition['class'])) {
+                self::assertInstanceOf($definition['class'], $this->plugin->get($id), $id);
+            }
+        }
     }
 
     public function testSettingsResolveAndValidate(): void
@@ -132,10 +127,41 @@ class InstallationTest extends TestCase
         $view->setTemplateMode(View::TEMPLATE_MODE_CP);
 
         // Loading compiles the template and everything it extends, so a broken tag or an
-        // unknown filter fails here rather than in front of a user.
-        self::assertSame('web-doctor/_index', $view->getTwig()->load('web-doctor/_index')->getTemplateName());
-        self::assertSame('web-doctor/_dashboard', $view->getTwig()->load('web-doctor/_dashboard')->getTemplateName());
-        self::assertSame('web-doctor/_settings', $view->getTwig()->load('web-doctor/_settings')->getTemplateName());
+        // unknown filter fails here rather than in front of a user. Every template, so one added
+        // later is held to this without anybody having to remember to list it.
+        $root = dirname(__DIR__, 2) . '/src/templates/';
+        $templates = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS));
+        $loaded = 0;
+
+        /** @var \SplFileInfo $file */
+        foreach ($templates as $file) {
+            if ($file->getExtension() !== 'twig') {
+                continue;
+            }
+
+            $name = 'web-doctor/' . substr($file->getPathname(), strlen($root), -5);
+            self::assertSame($name, $view->getTwig()->load($name)->getTemplateName());
+            $loaded++;
+        }
+
+        self::assertGreaterThanOrEqual(13, $loaded);
+    }
+
+    public function testNoTemplateInterpolatesWhereItMeantToTranslate(): void
+    {
+        // Twig reads `#{…}` inside a double-quoted string as interpolation, so a phrase such as
+        // "Issue #{id}" handed to |t fails for want of a variable called id — or, where variables
+        // are not strict, renders a phrase with a hole in it. Single quotes are literal.
+        $root = dirname(__DIR__, 2) . '/src/templates/';
+        $offenders = [];
+
+        foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS)) as $file) {
+            if (preg_match_all('/"[^"\n]*#\{[^"\n]*"\s*\|\s*t\(/', (string)file_get_contents($file->getPathname()), $matches) > 0) {
+                $offenders[] = substr($file->getPathname(), strlen($root)) . ': ' . implode(', ', $matches[0]);
+            }
+        }
+
+        self::assertSame([], $offenders);
     }
 
     public function testTheSettingsFormRendersItsField(): void
@@ -197,21 +223,166 @@ class InstallationTest extends TestCase
     {
         $this->plugin->getPermissions()->register();
 
-        $permissions = Craft::$app->getUserPermissions()->getAllPermissions();
-        $headings = array_column($permissions, 'heading');
+        $registered = [];
+        $collect = static function(array $permissions) use (&$collect, &$registered): void {
+            foreach ($permissions as $name => $permission) {
+                $registered[] = $name;
+                $collect($permission['nested'] ?? []);
+            }
+        };
 
-        self::assertContains('Web Doctor', $headings);
+        foreach (Craft::$app->getUserPermissions()->getAllPermissions() as $group) {
+            if (($group['heading'] ?? null) === 'Web Doctor') {
+                $collect($group['permissions']);
+            }
+        }
+
+        $expected = [Permissions::VIEW, Permissions::RUN, Permissions::VIEW_ISSUES, Permissions::MANAGE_ISSUES, Permissions::VIEW_EVIDENCE, Permissions::INVESTIGATE_ISSUES];
+        // Every test registers the handler again, so the heading can appear more than once.
+        $registered = array_values(array_unique($registered));
+        sort($expected);
+        sort($registered);
+
+        self::assertSame($expected, $registered);
     }
 
-    public function testNothingIsInstalledIntoTheDatabaseYet(): void
+    public function testWebDoctorOwnsExactlyTheTablesItsRecordsDeclare(): void
     {
-        // Web Doctor owns no tables at this point. This is what fails first if one appears
-        // without the install migration that is supposed to create and drop it.
-        $tables = array_filter(
-            Craft::$app->getDb()->getSchema()->getTableNames(),
-            static fn(string $table): bool => str_starts_with($table, 'webdoctor_'),
+        // What fails first if a table appears that no record class accounts for — or if one a
+        // record expects was never created.
+        self::assertSame($this->declaredTables(), $this->ownedTables());
+    }
+
+    public function testEveryTableWebDoctorCreatesIsAlsoOneItRemoves(): void
+    {
+        // Uninstalling must leave the database as Web Doctor found it. Read from the migration's
+        // own source rather than by running it, because running it would drop the issues of
+        // whoever's installation these tests are running in.
+        $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
+
+        foreach (['IssueRecord', 'IssueEventRecord', 'EvidenceRecord', 'InvestigationRecord', 'InvestigationStepRecord', 'RootCauseRecord', 'ErrorGroupRecord', 'ErrorSourceRecord'] as $record) {
+            self::assertMatchesRegularExpression(
+                sprintf('/createTable\(\s*%s::TABLE\b/', $record),
+                $source,
+                "$record's table is never created.",
+            );
+            self::assertMatchesRegularExpression(
+                sprintf('/dropTableIfExists\(\s*%s::TABLE\s*\)/', $record),
+                $source,
+                "$record's table is never dropped.",
+            );
+        }
+    }
+
+    public function testDeletingASiteDropsTheReferenceRatherThanTheIssue(): void
+    {
+        // Most findings are about the installation and merely stamped with whichever site was in
+        // view, so cascading would erase a database problem because an unrelated site was
+        // removed. Read from the migration because deleting a real site is not a test's to do.
+        $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
+
+        foreach (['IssueRecord', 'EvidenceRecord', 'InvestigationRecord', 'ErrorGroupRecord'] as $record) {
+            self::assertMatchesRegularExpression(
+                "/addForeignKey\\([^;]*{$record}::TABLE,\\s*\\['siteId'\\][^;]*'SET NULL'/s",
+                $source,
+                "$record's site reference must be dropped, not cascaded.",
+            );
+        }
+        self::assertStringNotContainsString("['siteId'], Table::SITES, ['id'], 'CASCADE'", $source);
+    }
+
+    public function testTheInstalledForeignKeysDeleteWhatTheyShouldAndNothingElse(): void
+    {
+        // Read from the database itself rather than the migration's source, so what is asserted
+        // is the schema a site actually has.
+        $db = Craft::$app->getDb();
+
+        if (!$db->getIsMysql()) {
+            self::markTestSkipped('Reads MySQL’s information schema.');
+        }
+
+        $rows = (new \craft\db\Query())
+            ->select(['k.TABLE_NAME', 'k.COLUMN_NAME', 'k.REFERENCED_TABLE_NAME', 'r.DELETE_RULE'])
+            ->from(['k' => 'information_schema.KEY_COLUMN_USAGE'])
+            ->innerJoin(['r' => 'information_schema.REFERENTIAL_CONSTRAINTS'], '[[r.CONSTRAINT_NAME]] = [[k.CONSTRAINT_NAME]] AND [[r.CONSTRAINT_SCHEMA]] = [[k.CONSTRAINT_SCHEMA]]')
+            ->where(['k.TABLE_SCHEMA' => $db->getSchema()->defaultSchema ?? $db->createCommand('SELECT DATABASE()')->queryScalar()])
+            ->andWhere(['like', 'k.TABLE_NAME', $db->tablePrefix . 'webdoctor_%', false])
+            ->all();
+
+        $rules = [];
+        $prefix = strlen((string)$db->tablePrefix);
+
+        foreach ($rows as $row) {
+            $row = array_change_key_case($row, CASE_UPPER);
+            $rules[substr((string)$row['TABLE_NAME'], $prefix) . '.' . $row['COLUMN_NAME']] = $row['DELETE_RULE'];
+        }
+
+        ksort($rules);
+
+        self::assertSame([
+            // An error's sources say something only about it; an error outlives the issue it
+            // was related to.
+            'webdoctor_error_groups.siteId' => 'SET NULL',
+            'webdoctor_error_sources.errorGroupId' => 'CASCADE',
+            'webdoctor_error_sources.issueId' => 'SET NULL',
+            'webdoctor_evidence.issueId' => 'CASCADE',
+            'webdoctor_evidence.siteId' => 'SET NULL',
+            // An investigation explains its issue and goes with it; its steps go with it in turn.
+            // A step's reference to some other issue is only a reference.
+            'webdoctor_investigation_steps.investigationId' => 'CASCADE',
+            'webdoctor_investigation_steps.relatedIssueId' => 'SET NULL',
+            'webdoctor_investigations.issueId' => 'CASCADE',
+            'webdoctor_investigations.siteId' => 'SET NULL',
+            'webdoctor_investigations.startedBy' => 'SET NULL',
+            'webdoctor_issue_events.issueId' => 'CASCADE',
+            'webdoctor_issue_events.userId' => 'SET NULL',
+            'webdoctor_issues.siteId' => 'SET NULL',
+            'webdoctor_issues.statusChangedBy' => 'SET NULL',
+            // A cause is what an investigation concluded, so it goes with it.
+            'webdoctor_root_causes.investigationId' => 'CASCADE',
+        ], $rules);
+    }
+
+    /**
+     * The tables Web Doctor's record classes say it has, as the database spells them.
+     *
+     * @return list<string>
+     */
+    private function declaredTables(): array
+    {
+        $tables = array_map(
+            static fn(string $table): string => trim($table, '{}%'),
+            [
+                IssueRecord::TABLE,
+                IssueEventRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\EvidenceRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\InvestigationRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\InvestigationStepRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\ErrorGroupRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\ErrorSourceRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\RootCauseRecord::TABLE,
+            ],
         );
 
-        self::assertSame([], array_values($tables));
+        sort($tables);
+
+        return $tables;
+    }
+
+    /**
+     * The tables that actually exist under Web Doctor's prefix.
+     *
+     * @return list<string>
+     */
+    private function ownedTables(): array
+    {
+        $tables = array_values(array_filter(
+            Craft::$app->getDb()->getSchema()->getTableNames(),
+            static fn(string $table): bool => str_starts_with($table, 'webdoctor_'),
+        ));
+
+        sort($tables);
+
+        return $tables;
     }
 }

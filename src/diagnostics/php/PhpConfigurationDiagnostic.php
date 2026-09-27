@@ -167,7 +167,10 @@ class PhpConfigurationDiagnostic extends Diagnostic
             'max_execution_time' => $read('max_execution_time'),
             'upload_max_filesize' => $read('upload_max_filesize'),
             'post_max_size' => $read('post_max_size'),
-            'opcache' => extension_loaded('Zend OPcache') || extension_loaded('opcache'),
+            // In use, not merely loaded: an opcode cache switched off for this SAPI caches nothing,
+            // so what it would do with comments does not arise.
+            'opcache' => (extension_loaded('Zend OPcache') || extension_loaded('opcache'))
+                && App::phpConfigValueAsBool(PHP_SAPI === 'cli' ? 'opcache.enable_cli' : 'opcache.enable'),
             'opcache.save_comments' => App::phpConfigValueAsBool('opcache.save_comments'),
         ];
     }

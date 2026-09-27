@@ -2,13 +2,11 @@
 
 namespace Tahadudhiya\WebDoctor\services;
 
-use Craft;
 use Tahadudhiya\WebDoctor\base\DiagnosticInterface;
 use Tahadudhiya\WebDoctor\diagnostics\CoreDiagnostics;
 use Tahadudhiya\WebDoctor\events\RegisterDiagnosticsEvent;
 use Tahadudhiya\WebDoctor\helpers\DiagnosticMeta;
-use Tahadudhiya\WebDoctor\helpers\Redaction;
-use Tahadudhiya\WebDoctor\WebDoctor;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Throwable;
 use yii\base\Component;
 use yii\base\InvalidArgumentException;
@@ -147,7 +145,7 @@ class Diagnostics extends Component
             try {
                 $this->register($diagnostic);
             } catch (Throwable $e) {
-                Craft::error(Redaction::redactString($e->getMessage()), WebDoctor::LOG_CATEGORY);
+                SafeException::log('A diagnostic Web Doctor ships with could not be registered', $e);
             }
         }
     }
@@ -214,7 +212,15 @@ class Diagnostics extends Component
         }
 
         $event = new RegisterDiagnosticsEvent();
-        $this->trigger(self::EVENT_REGISTER_DIAGNOSTICS, $event);
+
+        // A handler that throws costs its own diagnostics and those of the handlers after it,
+        // never the ones already contributed or Web Doctor's own. Uncaught, it would escape this
+        // first read, and every later read would find the registry already loaded without them.
+        try {
+            $this->trigger(self::EVENT_REGISTER_DIAGNOSTICS, $event);
+        } catch (Throwable $e) {
+            SafeException::log('A plugin failed while contributing diagnostics', $e);
+        }
 
         foreach ($event->diagnostics as $diagnostic) {
             // One plugin's mistake must not take the registry down with it. `Throwable` rather
@@ -231,9 +237,9 @@ class Diagnostics extends Component
 
                 $this->register($diagnostic);
             } catch (Throwable $e) {
-                // Through the same redaction as everything else Web Doctor writes down: the
-                // message quotes an ID that came from another plugin.
-                Craft::error(Redaction::redactString($e->getMessage()), WebDoctor::LOG_CATEGORY);
+                // Through the one sanitised form of an exception: the message quotes an ID that
+                // came from another plugin.
+                SafeException::log('A contributed diagnostic could not be registered', $e);
             }
         }
     }

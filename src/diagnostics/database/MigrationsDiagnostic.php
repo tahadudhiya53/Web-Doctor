@@ -56,7 +56,7 @@ class MigrationsDiagnostic extends Diagnostic
         }
 
         $evidence = [
-            $this->evidence(EvidenceType::CONFIGURATION, Craft::t('web-doctor', 'Migration state'), [
+            $this->evidence(EvidenceType::DATABASE, Craft::t('web-doctor', 'Migration state'), [
                 'schemaVersionCompatible' => $schemaCompatible,
                 'pendingMigrations' => $pending,
                 'codeSchemaVersion' => Craft::$app->schemaVersion,

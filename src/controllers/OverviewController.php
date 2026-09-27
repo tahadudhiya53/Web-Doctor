@@ -5,12 +5,16 @@ namespace Tahadudhiya\WebDoctor\controllers;
 use Craft;
 use craft\web\Controller;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
+use Tahadudhiya\WebDoctor\helpers\RequestInput;
 use Tahadudhiya\WebDoctor\models\Dashboard;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
+use Tahadudhiya\WebDoctor\models\DiagnosticRun;
+use Tahadudhiya\WebDoctor\models\ErrorRecording;
 use Tahadudhiya\WebDoctor\models\HealthSummary;
+use Tahadudhiya\WebDoctor\models\IssueReconciliation;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\services\Permissions;
-use Tahadudhiya\WebDoctor\web\assets\dashboard\DashboardAsset;
+use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
 use yii\web\Response;
@@ -47,7 +51,7 @@ class OverviewController extends Controller
     public function actionIndex(): Response
     {
         $plugin = $this->plugin();
-        $siteId = $this->currentSiteId();
+        $siteId = DiagnosticContext::currentSiteId();
         $failure = null;
 
         try {
@@ -58,12 +62,40 @@ class OverviewController extends Controller
         } catch (Throwable $e) {
             // The registry is partly other people's code and the stored run is partly the
             // cache's. Either can fail, and the reader is owed a page that says so.
-            $this->logFailure('The health dashboard could not be assembled', $e);
+            SafeException::log('The health dashboard could not be assembled', $e);
             $dashboard = Dashboard::build([], null);
             $failure = Craft::t('web-doctor', 'Web Doctor could not read the last diagnostic run. The details are in Craft’s logs.');
         }
 
-        $this->getView()->registerAssetBundle(DashboardAsset::class);
+        // The way from a symptom to the recipe for it, for somebody who may read what a recipe found.
+        // A registry that cannot be read costs the dashboard this pointer and nothing else.
+        $recipes = [];
+
+        if ($plugin->getPermissions()->canViewIssues()) {
+            try {
+                $recipes = $plugin->getRecipes()->all();
+            } catch (Throwable $e) {
+                SafeException::log('The recipes could not be read for the dashboard', $e);
+            }
+        }
+
+        // Chosen from rules, reading what is already on the page. A rule that cannot be applied
+        // costs its row the recommendation, and anything else costs the dashboard its
+        // recommendations rather than the reader the dashboard.
+        $recommendations = [];
+
+        try {
+            foreach ($dashboard->rows as $row) {
+                if ($row['result'] !== null) {
+                    $recommendations[$row['id']] = $plugin->getRecommendations()->forResult($row['result']);
+                }
+            }
+        } catch (Throwable $e) {
+            SafeException::log('The dashboard\'s recommendations could not be chosen', $e);
+            $recommendations = [];
+        }
+
+        $this->getView()->registerAssetBundle(ControlPanelAsset::class);
 
         return $this->renderTemplate('web-doctor/_index', [
             'title' => $plugin->getSettings()->pluginName,
@@ -75,6 +107,8 @@ class OverviewController extends Controller
             'canRun' => $plugin->getPermissions()->canRun(),
             'siteLabel' => $this->siteLabel($dashboard->run?->context->siteId ?? $siteId),
             'failure' => $failure,
+            'recipes' => $recipes,
+            'recommendations' => $recommendations,
         ]);
     }
 
@@ -92,12 +126,19 @@ class OverviewController extends Controller
         $this->requirePermission(Permissions::RUN);
 
         $plugin = $this->plugin();
+        // Read before the boundary below, which turns failures into a notice: a malformed depth
+        // is a refused request, not a run at some other depth.
+        $depth = RequestInput::depth($this->request->getBodyParam('depth'));
+        $all = RequestInput::flag($this->request->getBodyParam('all'));
+        $requested = RequestInput::names($this->request->getBodyParam('diagnostics'));
 
         try {
             $selected = [];
 
-            if (!$this->request->getBodyParam('all')) {
-                $selected = $this->selectedIds($plugin->getDiagnostics()->ids());
+            if (!$all) {
+                // Among the checks that exist: a request can choose, but cannot introduce one. A check
+                // removed since the page was drawn is dropped rather than refusing the rest.
+                $selected = array_values(array_intersect($plugin->getDiagnostics()->ids(), $requested));
 
                 if ($selected === []) {
                     $this->setFailFlash(Craft::t('web-doctor', 'No registered checks were selected, so nothing was run.'));
@@ -106,7 +147,7 @@ class OverviewController extends Controller
                 }
             }
 
-            $context = DiagnosticContext::current($this->depth());
+            $context = DiagnosticContext::current($depth);
             $engine = $plugin->getDiagnosticEngine();
 
             $run = $selected === []
@@ -115,71 +156,81 @@ class OverviewController extends Controller
         } catch (Throwable $e) {
             // The engine contains a diagnostic that throws; nothing contains the engine itself,
             // the registry that hands it the checks, or the context that identifies the run.
-            $this->logFailure('A diagnostic run could not be completed', $e);
+            SafeException::log('A diagnostic run could not be completed', $e);
             $this->setFailFlash(Craft::t('web-doctor', 'The checks could not be run. The details are in Craft’s logs.'));
 
             return $this->redirectToPostedUrl();
         }
 
-        // A run that cannot be stored is still a run that happened, and its results are already
-        // in hand — so the failure is reported rather than turned into a failed request.
+        // What follows keeps the run in three places, and each is independent of the others: a
+        // run that cannot be cached is still a run that happened, and the issues and errors it
+        // found are still worth keeping. So each failure is reported, and none stops the rest.
+        $problems = [];
+
         if (!$plugin->getRuns()->remember($run)) {
-            $this->setFailFlash(Craft::t('web-doctor', 'The checks ran, but the results could not be stored. Check that Craft’s cache is writable.'));
+            $problems[] = Craft::t('web-doctor', 'The results could not be stored, so the dashboard still shows the previous run. Check that Craft’s cache is writable.');
+        }
+
+        // Reported rather than swallowed: an Issue Center silently one run out of date is worse
+        // than one that says it could not be brought up to date.
+        try {
+            $reconciliation = $plugin->getIssues()->reconcile($run);
+        } catch (Throwable $e) {
+            $reconciliation = null;
+            SafeException::log('The Issue Center could not be brought up to date after a diagnostic run', $e);
+            $problems[] = Craft::t('web-doctor', 'The issue list could not be updated.');
+        }
+
+        // After the issues, so the errors are related to issues as this run left them.
+        try {
+            $errors = $plugin->getErrors()->record($run);
+        } catch (Throwable $e) {
+            $errors = null;
+            SafeException::log('The errors a diagnostic run recorded could not be grouped', $e);
+            $problems[] = Craft::t('web-doctor', 'The errors the checks ran into could not be recorded.');
+        }
+
+        $summary = $this->summary($run, $reconciliation, $errors);
+
+        if ($problems !== []) {
+            $this->setFailFlash(Craft::t('web-doctor', 'The checks ran, but not everything could be kept.') . ' ' . implode(' ', $problems) . ' ' . Craft::t('web-doctor', 'The details are in Craft’s logs.') . ' ' . $summary);
 
             return $this->redirectToPostedUrl();
         }
 
-        $this->setSuccessFlash(Craft::t('web-doctor', '{count, plural, =1{1 check ran.} other{# checks ran.}}', ['count' => $run->count()]));
+        $this->setSuccessFlash($summary);
 
         return $this->redirectToPostedUrl();
     }
 
     /**
-     * Which checks the request asked for, reduced to the ones that exist.
-     *
-     * One field, read explicitly and matched against the registry, so a request can choose among
-     * the checks that exist but cannot introduce one. The registry's order is kept.
-     *
-     * @param string[] $registered
-     * @return string[]
+     * What a run found, in a sentence or two, saying only what there is to say.
      */
-    private function selectedIds(array $registered): array
+    private function summary(DiagnosticRun $run, ?IssueReconciliation $reconciliation, ?ErrorRecording $errors): string
     {
-        $requested = $this->request->getBodyParam('diagnostics');
+        $parts = [Craft::t('web-doctor', '{count, plural, =1{1 check ran.} other{# checks ran.}}', ['count' => $run->count()])];
 
-        if (!is_array($requested)) {
-            return [];
+        if ($reconciliation !== null) {
+            $parts[] = Craft::t('web-doctor', '{opened, plural, =0{No new issues.} =1{1 new issue.} other{# new issues.}}', ['opened' => $reconciliation->opened]);
+
+            if ($reconciliation->recurred > 0) {
+                $parts[] = Craft::t('web-doctor', '{count, plural, =1{1 resolved issue came back.} other{# resolved issues came back.}}', ['count' => $reconciliation->recurred]);
+            }
+
+            if ($reconciliation->resolved > 0) {
+                $parts[] = Craft::t('web-doctor', '{count, plural, =1{1 issue resolved.} other{# issues resolved.}}', ['count' => $reconciliation->resolved]);
+            }
         }
 
-        $requested = array_filter($requested, static fn(mixed $id): bool => is_string($id));
-
-        return array_values(array_intersect($registered, $requested));
-    }
-
-    /**
-     * How far the run should go. A depth Web Doctor does not have is the normal one, rather than
-     * a failed request over a query string.
-     */
-    private function depth(): DiagnosticDepth
-    {
-        $requested = $this->request->getBodyParam('depth');
-
-        return is_string($requested)
-            ? DiagnosticDepth::tryFrom($requested) ?? DiagnosticDepth::NORMAL
-            : DiagnosticDepth::NORMAL;
-    }
-
-    /**
-     * The site being looked at, where Craft can say. A run is remembered against it, so a
-     * multi-site installation never shows one site's findings under another's name.
-     */
-    private function currentSiteId(): ?int
-    {
-        try {
-            return Craft::$app->getSites()->getCurrentSite()->id;
-        } catch (Throwable) {
-            return null;
+        if ($errors !== null && $errors->groups > 0) {
+            $parts[] = Craft::t('web-doctor', '{count, plural, =1{1 error recorded.} other{# errors recorded.}}', ['count' => $errors->groups]);
         }
+
+        if ($errors !== null && $errors->omitted > 0) {
+            $parts[] = Craft::t('web-doctor', '{omitted, plural, =1{1 more distinct error was not recorded, because as many are kept as the limit allows.} other{# more distinct errors were not recorded, because as many are kept as the limit allows.}}', ['omitted' => $errors->omitted]);
+        }
+
+        return implode(' ', $parts);
     }
 
     /**
@@ -202,17 +253,6 @@ class OverviewController extends Controller
         }
 
         return $name ?? Craft::t('web-doctor', 'Site #{id} (no longer available)', ['id' => $siteId]);
-    }
-
-    /**
-     * Records a failure of Web Doctor's own through the same sanitised representation everything
-     * else goes through, so the log cannot become the boundary that leaks what the page does not.
-     */
-    private function logFailure(string $what, Throwable $exception): void
-    {
-        $safe = SafeException::from($exception);
-
-        Craft::error(sprintf('%s. %s at %s', $what, $safe->summary(), $safe->origin), WebDoctor::LOG_CATEGORY);
     }
 
     /**

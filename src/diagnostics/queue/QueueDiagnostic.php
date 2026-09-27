@@ -90,6 +90,25 @@ abstract class QueueDiagnostic extends Diagnostic
     }
 
     /**
+     * Runs a read on the queue's own connection, on its primary, as Craft's `Queue` reads.
+     *
+     * A queue can be given a database of its own (`'db' => 'queueDb'`), and a read of the
+     * application's default connection would count some other table — reporting a stalled queue as
+     * empty. A replica can lag behind jobs the primary already holds, which is why Craft reads the
+     * primary.
+     *
+     * @template T
+     * @param callable(\yii\db\Connection): T $read
+     * @return T
+     */
+    protected function onQueueDb(Queue $queue, callable $read): mixed
+    {
+        $db = $queue->db;
+
+        return $db->usePrimary(static fn() => $read($db));
+    }
+
+    /**
      * Which channel this queue writes to.
      *
      * Craft derives this from the queue's own `channel`, falling back to the application

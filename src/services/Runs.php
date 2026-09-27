@@ -3,7 +3,9 @@
 namespace Tahadudhiya\WebDoctor\services;
 
 use Craft;
+use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
 use yii\base\Component;
@@ -31,7 +33,7 @@ class Runs extends Component
      * serialized object, and an old one deserialized into new classes would be worse than no
      * run at all — so the key changes and the old entry is simply never asked for again.
      */
-    private const FORMAT = 1;
+    private const FORMAT = 2;
 
     /**
      * @var CacheInterface|null Where runs are kept. Settable so a caller — a test, or a site
@@ -56,7 +58,8 @@ class Runs extends Component
             // time passed. The dashboard shows how old it is and lets the reader judge.
             return $this->cache()->set($this->key($run->context->environment, $run->context->siteId), $run, 0);
         } catch (Throwable $e) {
-            Craft::warning(sprintf('The latest diagnostic run could not be stored: %s', $e->getMessage()), WebDoctor::LOG_CATEGORY);
+            // Through the sanitised representation: a cache driver's error can quote its own DSN.
+            Craft::warning(sprintf('The latest diagnostic run could not be stored: %s', SafeException::from($e)->summary()), WebDoctor::LOG_CATEGORY);
 
             return false;
         }
@@ -75,7 +78,7 @@ class Runs extends Component
         try {
             $stored = $this->cache()->get($this->key($environment ?? $this->environment(), $siteId));
         } catch (Throwable $e) {
-            Craft::warning(sprintf('The latest diagnostic run could not be read: %s', $e->getMessage()), WebDoctor::LOG_CATEGORY);
+            Craft::warning(sprintf('The latest diagnostic run could not be read: %s', SafeException::from($e)->summary()), WebDoctor::LOG_CATEGORY);
 
             return null;
         }
@@ -93,7 +96,7 @@ class Runs extends Component
 
     private function environment(): string
     {
-        return $this->environment ??= Craft::$app->env;
+        return $this->environment ??= DiagnosticContext::currentEnvironment();
     }
 
     private function cache(): CacheInterface

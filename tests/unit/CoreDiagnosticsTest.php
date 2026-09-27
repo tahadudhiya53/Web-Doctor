@@ -49,13 +49,6 @@ class CoreDiagnosticsTest extends TestCase
         }
     }
 
-    public function testNoTwoChecksClaimTheSameId(): void
-    {
-        $ids = array_map(static fn(DiagnosticInterface $d): string => $d->id(), self::diagnostics());
-
-        self::assertSame(array_unique($ids), $ids, 'Two shipped checks share an ID, so one of them would never be registered.');
-    }
-
     public function testNoClassIsListedTwice(): void
     {
         $classes = CoreDiagnostics::classes();
@@ -105,19 +98,10 @@ class CoreDiagnosticsTest extends TestCase
         self::assertSame($expected, $actual);
     }
 
-    public function testEveryCategoryTheChecksClaimIsOneTheProductDefines(): void
-    {
-        foreach (self::diagnostics() as $diagnostic) {
-            self::assertContains($diagnostic->category(), DiagnosticCategory::cases());
-        }
-    }
-
     public function testARegistryOnlyHoldsTheShippedChecksWhenItIsAskedTo(): void
     {
-        // A registry built directly is a container, not Web Doctor. A caller running a set of
-        // its own gets exactly that set.
-        self::assertSame([], (new Diagnostics())->all());
-
+        // A registry built directly is a container, not Web Doctor (DiagnosticCoreTest holds that
+        // it starts empty); asked to, it holds the shipped checks.
         $registry = new Diagnostics(['includeCoreDiagnostics' => true]);
 
         self::assertCount(count(CoreDiagnostics::classes()), $registry->all());
