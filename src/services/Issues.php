@@ -351,6 +351,101 @@ class Issues extends Component
     }
 
     /**
+     * Sets an issue repairing while a repair somebody confirmed is carried out.
+     *
+     * Only an open issue that is not already being repaired: a resolved issue has nothing left to
+     * repair, a dismissed one is somebody's decision not to act, and one being repaired already is
+     * one repair at a time. Read with a lock, so a decision committed a moment ago is the one
+     * checked rather than the one this request first saw.
+     *
+     * @return IssueStatus Where it stood, so {@see self::endRepair()} can put it back.
+     * @throws Refusal if the issue does not exist or cannot be repaired as it stands.
+     */
+    public function beginRepair(int $issueId, string $repairName, ?int $userId = null): IssueStatus
+    {
+        $transaction = Craft::$app->getDb()->beginTransaction();
+
+        try {
+            $record = Savepoint::committed(IssueRecord::find()->where(['id' => $issueId]))[0] ?? null;
+
+            if (!$record instanceof IssueRecord) {
+                throw new Refusal(Craft::t('web-doctor', 'No issue exists with the ID {id}.', ['id' => $issueId]));
+            }
+
+            $from = IssueStatus::tryFrom((string)$record->status) ?? IssueStatus::NEW;
+            $refusal = self::repairRefusal($from);
+
+            if ($refusal !== null) {
+                throw new Refusal($refusal);
+            }
+
+            $record->status = IssueStatus::REPAIRING->value;
+            $record->statusChangedAt = $this->forDb(new DateTimeImmutable());
+            $record->statusChangedBy = $userId;
+
+            $this->save($record);
+            $this->logEvent($record, IssueEventType::REPAIR_STARTED, from: $from, to: IssueStatus::REPAIRING, note: $repairName, userId: $userId);
+
+            $transaction->commit();
+        } catch (Throwable $e) {
+            $transaction->rollBack();
+
+            throw $e;
+        }
+
+        return $from;
+    }
+
+    /**
+     * Puts an issue back where it stood once its repair has finished, cleanly or not: a repair that
+     * ran is not a problem that went away, and only the check that found it can say it has gone.
+     *
+     * Only while it is still repairing. A run that observed it clear in the meantime, or a person who
+     * moved it on, has said something newer about it, which this does not overwrite.
+     */
+    public function endRepair(int $issueId, IssueStatus $restore, string $note, ?int $userId = null): void
+    {
+        $transaction = Craft::$app->getDb()->beginTransaction();
+
+        try {
+            $record = Savepoint::committed(IssueRecord::find()->where(['id' => $issueId]))[0] ?? null;
+
+            if ($record instanceof IssueRecord && $record->status === IssueStatus::REPAIRING->value) {
+                // Never back to repairing itself, which would leave it there for good.
+                $restore = $restore === IssueStatus::REPAIRING ? IssueStatus::CONFIRMED : $restore;
+
+                $record->status = $restore->value;
+                $record->statusChangedAt = $this->forDb(new DateTimeImmutable());
+                $record->statusChangedBy = $userId;
+
+                $this->save($record);
+                $this->logEvent($record, IssueEventType::REPAIR_FINISHED, from: IssueStatus::REPAIRING, to: $restore, note: $note, userId: $userId);
+            }
+
+            $transaction->commit();
+        } catch (Throwable $e) {
+            $transaction->rollBack();
+
+            throw $e;
+        }
+    }
+
+    /**
+     * Why an issue in this status cannot be repaired, or null where it can.
+     */
+    public static function repairRefusal(IssueStatus $status): ?string
+    {
+        return match (true) {
+            $status === IssueStatus::REPAIRING => Craft::t('web-doctor', 'This issue is already being repaired. Wait for that repair to finish.'),
+            $status === IssueStatus::RESOLVED => Craft::t('web-doctor', 'This issue is resolved, so there is nothing to repair.'),
+            $status->isDismissal() => Craft::t('web-doctor', 'This issue is set to “{status}”, which is a decision not to act on it. Change its status first if that decision no longer stands.', [
+                'status' => $status->label(),
+            ]),
+            default => null,
+        };
+    }
+
+    /**
      * The issues matching a filter, one page of them.
      */
     public function find(IssueFilter $filter): IssueList

@@ -119,10 +119,11 @@ class StoragePathsDiagnostic extends Diagnostic
 
     /**
      * The directories Craft depends on being able to write to, asked for without being created.
+     * Public so the repair that creates missing ones acts on exactly the directories this reports.
      *
      * @return array<string, string>
      */
-    protected function paths(): array
+    public function paths(): array
     {
         $path = Craft::$app->getPath();
 
@@ -150,7 +151,7 @@ class StoragePathsDiagnostic extends Diagnostic
      *
      * @return 'missing'|'notADirectory'|'notWritable'|'writable'|'unknown'
      */
-    protected function stateOf(string $path): string
+    public function stateOf(string $path): string
     {
         if (!file_exists($path)) {
             $parent = dirname($path);

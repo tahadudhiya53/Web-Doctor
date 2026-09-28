@@ -19,6 +19,8 @@ use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\Recipes;
 use Tahadudhiya\WebDoctor\services\Recommendations;
+use Tahadudhiya\WebDoctor\services\RepairActions;
+use Tahadudhiya\WebDoctor\services\Repairs;
 use Tahadudhiya\WebDoctor\services\RootCauses;
 use Tahadudhiya\WebDoctor\services\Runs;
 use yii\base\Event;
@@ -35,6 +37,8 @@ use yii\base\Event;
  * @property-read Permissions $permissions
  * @property-read Recipes $recipes
  * @property-read Recommendations $recommendations
+ * @property-read RepairActions $repairActions
+ * @property-read Repairs $repairs
  * @property-read RootCauses $rootCauses
  * @property-read Runs $runs
  * @property-read Settings $settings
@@ -74,6 +78,9 @@ class WebDoctor extends Plugin
                 // As with the diagnostics: the registry the plugin hands out holds Web Doctor's own.
                 'recipes' => ['class' => Recipes::class, 'includeCoreRecipes' => true],
                 'recommendations' => ['class' => Recommendations::class],
+                // As with the diagnostics: the registry the plugin hands out holds Web Doctor's own.
+                'repairActions' => ['class' => RepairActions::class, 'includeCoreActions' => true],
+                'repairs' => ['class' => Repairs::class],
                 'rootCauses' => ['class' => RootCauses::class],
                 'runs' => ['class' => Runs::class],
             ],
@@ -203,6 +210,32 @@ class WebDoctor extends Plugin
     }
 
     /**
+     * Every repair action Web Doctor can carry out.
+     */
+    public function getRepairActions(): RepairActions
+    {
+        return $this->get('repairActions');
+    }
+
+    /**
+     * Carries out repairs somebody previewed and confirmed, and keeps the record of each.
+     */
+    public function getRepairs(): Repairs
+    {
+        /** @var Repairs $repairs */
+        $repairs = $this->get('repairs');
+
+        // Tied to this plugin instance's actions, Issue Center and evidence, for the reason the
+        // engine is tied to its registry.
+        $repairs->actions ??= $this->getRepairActions();
+        $repairs->issues ??= $this->getIssues();
+        $repairs->evidence ??= $this->getEvidence();
+        $repairs->permissions ??= $this->getPermissions();
+
+        return $repairs;
+    }
+
+    /**
      * Weighs what an investigation found against the known causes, and keeps what it concluded.
      */
     public function getRootCauses(): RootCauses
@@ -277,6 +310,7 @@ class WebDoctor extends Plugin
             $event->rules['web-doctor'] = 'web-doctor/overview/index';
             $event->rules['web-doctor/issues'] = 'web-doctor/issues/index';
             $event->rules['web-doctor/issues/<issueId:\d+>/investigations/<investigationId:\d+>'] = 'web-doctor/investigations/detail';
+            $event->rules['web-doctor/issues/<issueId:\d+>/repairs/<repairId:\d+>'] = 'web-doctor/repairs/detail';
             // Numeric only, so the route cannot be reached with something that is not an ID and
             // the controller never has to decide what a non-numeric issue means.
             $event->rules['web-doctor/issues/<issueId:\d+>'] = 'web-doctor/issues/detail';

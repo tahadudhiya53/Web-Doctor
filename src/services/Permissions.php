@@ -53,6 +53,14 @@ class Permissions extends Component
      */
     public const INVESTIGATE_ISSUES = 'webDoctor:investigateIssues';
 
+    /**
+     * @var string Carrying out a repair: previewing what it would change and confirming it. Separate
+     * from every other permission because it is the one that changes the installation, and separate
+     * from {@see self::MANAGE_ISSUES} because deciding where an issue stands is not changing the site.
+     * A repair also needs whatever Craft itself requires for the same action.
+     */
+    public const RUN_REPAIRS = 'webDoctor:runRepairs';
+
     public function register(): void
     {
         Event::on(UserPermissions::class, UserPermissions::EVENT_REGISTER_PERMISSIONS, function(RegisterUserPermissionsEvent $event) {
@@ -87,6 +95,10 @@ class Permissions extends Component
                             self::INVESTIGATE_ISSUES => [
                                 'label' => Craft::t('web-doctor', 'Investigate issues'),
                                 'info' => Craft::t('web-doctor', 'Runs the checks related to an issue, or a recipe for a symptom, and records what they find.'),
+                            ],
+                            self::RUN_REPAIRS => [
+                                'label' => Craft::t('web-doctor', 'Run repairs'),
+                                'info' => Craft::t('web-doctor', 'Previews and carries out the repairs Web Doctor offers for an issue. Each one changes this installation, is confirmed first, and also needs whatever Craft requires for the same action.'),
                             ],
                         ],
                     ],
@@ -123,6 +135,11 @@ class Permissions extends Component
     public function canInvestigate(): bool
     {
         return $this->can(self::INVESTIGATE_ISSUES);
+    }
+
+    public function canRunRepairs(): bool
+    {
+        return $this->can(self::RUN_REPAIRS);
     }
 
     /**

@@ -76,12 +76,13 @@ abstract class QueueDiagnostic extends Diagnostic
 
     /**
      * A query over this queue's own jobs, scoped the way Craft scopes them in
-     * `Queue::_createJobQuery()`.
+     * `Queue::_createJobQuery()`. Public so the repair that retries failed jobs acts on exactly the
+     * rows these checks count.
      */
-    protected function jobs(Queue $queue): Query
+    public static function jobs(Queue $queue): Query
     {
         $query = (new Query())->from([$queue->tableName]);
-        $channel = $this->channel($queue);
+        $channel = self::channelOf($queue);
 
         // With no channel to scope by, the whole table is read rather than none of it: a count
         // that is a superset in an exotic multi-channel setup is far better than a zero that
@@ -101,7 +102,7 @@ abstract class QueueDiagnostic extends Diagnostic
      * @param callable(\yii\db\Connection): T $read
      * @return T
      */
-    protected function onQueueDb(Queue $queue, callable $read): mixed
+    public static function onQueueDb(Queue $queue, callable $read): mixed
     {
         $db = $queue->db;
 
@@ -115,7 +116,7 @@ abstract class QueueDiagnostic extends Diagnostic
      * component ID it is registered under. `Queue::channel()` is private, so the same derivation
      * is done here — read-only, and over components Craft has already built.
      */
-    private function channel(Queue $queue): ?string
+    public static function channelOf(Queue $queue): ?string
     {
         if ($queue->channel !== null) {
             return $queue->channel;
