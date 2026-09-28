@@ -118,6 +118,8 @@ class PluginTest extends TestCase
             'issues' => \Tahadudhiya\WebDoctor\services\Issues::class,
             'permissions' => Permissions::class,
             'recommendations' => \Tahadudhiya\WebDoctor\services\Recommendations::class,
+            'repairActions' => \Tahadudhiya\WebDoctor\services\RepairActions::class,
+            'repairs' => \Tahadudhiya\WebDoctor\services\Repairs::class,
             'rootCauses' => \Tahadudhiya\WebDoctor\services\RootCauses::class,
             'runs' => \Tahadudhiya\WebDoctor\services\Runs::class,
         ];
@@ -226,6 +228,24 @@ class PluginTest extends TestCase
         self::assertArrayHasKey(Permissions::INVESTIGATE_ISSUES, $issues['nested'] ?? []);
     }
 
+    public function testRunningRepairsIsItsOwnPermissionSeparateFromEveryOther(): void
+    {
+        // A repair is the one thing Web Doctor does that changes the installation. Being allowed to
+        // read an issue, decide where it stands, see its evidence or investigate it must not carry
+        // with it being allowed to change the site — so it is a leaf of its own, granted by nothing
+        // else, and says that Craft's own permission for the same action is needed too.
+        $issues = (new Permissions())->definitions()[Permissions::VIEW]['nested'][Permissions::VIEW_ISSUES] ?? null;
+
+        self::assertIsArray($issues);
+        self::assertArrayHasKey(Permissions::RUN_REPAIRS, $issues['nested'] ?? []);
+        self::assertArrayNotHasKey('nested', $issues['nested'][Permissions::RUN_REPAIRS]);
+        self::assertStringContainsString('Craft requires', $issues['nested'][Permissions::RUN_REPAIRS]['info'] ?? '');
+
+        foreach ([Permissions::MANAGE_ISSUES, Permissions::VIEW_EVIDENCE, Permissions::INVESTIGATE_ISSUES] as $other) {
+            self::assertArrayNotHasKey(Permissions::RUN_REPAIRS, $issues['nested'][$other]['nested'] ?? []);
+        }
+    }
+
     public function testOnlyPermissionsWithSomethingBehindThemAreDeclared(): void
     {
         // Permissions arrive with the features they guard. Declaring one early would offer an
@@ -237,6 +257,7 @@ class PluginTest extends TestCase
             Permissions::MANAGE_ISSUES,
             Permissions::VIEW_EVIDENCE,
             Permissions::INVESTIGATE_ISSUES,
+            Permissions::RUN_REPAIRS,
         ], $this->allPermissions());
     }
 }

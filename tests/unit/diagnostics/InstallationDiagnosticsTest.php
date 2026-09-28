@@ -492,7 +492,7 @@ class InstallationDiagnosticsTest extends TestCase
 
             public bool $pathsThrow = false;
 
-            protected function paths(): array
+            public function paths(): array
             {
                 if ($this->pathsThrow) {
                     throw new RuntimeException('No storage path configured');
@@ -506,7 +506,7 @@ class InstallationDiagnosticsTest extends TestCase
                 ];
             }
 
-            protected function stateOf(string $path): string
+            public function stateOf(string $path): string
             {
                 return $this->states[$path] ?? 'writable';
             }

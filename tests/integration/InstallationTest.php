@@ -237,7 +237,7 @@ class InstallationTest extends TestCase
             }
         }
 
-        $expected = [Permissions::VIEW, Permissions::RUN, Permissions::VIEW_ISSUES, Permissions::MANAGE_ISSUES, Permissions::VIEW_EVIDENCE, Permissions::INVESTIGATE_ISSUES];
+        $expected = [Permissions::VIEW, Permissions::RUN, Permissions::VIEW_ISSUES, Permissions::MANAGE_ISSUES, Permissions::VIEW_EVIDENCE, Permissions::INVESTIGATE_ISSUES, Permissions::RUN_REPAIRS];
         // Every test registers the handler again, so the heading can appear more than once.
         $registered = array_values(array_unique($registered));
         sort($expected);
@@ -260,7 +260,7 @@ class InstallationTest extends TestCase
         // whoever's installation these tests are running in.
         $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
 
-        foreach (['IssueRecord', 'IssueEventRecord', 'EvidenceRecord', 'InvestigationRecord', 'InvestigationStepRecord', 'RootCauseRecord', 'ErrorGroupRecord', 'ErrorSourceRecord'] as $record) {
+        foreach (['IssueRecord', 'IssueEventRecord', 'EvidenceRecord', 'InvestigationRecord', 'InvestigationStepRecord', 'RootCauseRecord', 'ErrorGroupRecord', 'ErrorSourceRecord', 'RepairRecord'] as $record) {
             self::assertMatchesRegularExpression(
                 sprintf('/createTable\(\s*%s::TABLE\b/', $record),
                 $source,
@@ -274,6 +274,26 @@ class InstallationTest extends TestCase
         }
     }
 
+    public function testTheRepairsTableHasWhatAPreviewIsBoundByAndOneLockAtATime(): void
+    {
+        // Read from the database itself: what binds a preview to its confirmation has to exist as a
+        // column, and the lock that keeps one repair of a kind at a time has to be unique.
+        $db = Craft::$app->getDb();
+        $schema = $db->getTableSchema(\Tahadudhiya\WebDoctor\records\RepairRecord::TABLE, true);
+
+        self::assertNotNull($schema);
+
+        foreach (['fingerprint', 'definitionFingerprint', 'findingRunId', 'environment', 'siteId', 'issueId', 'lockKey', 'issueStatusBefore', 'status', 'verificationStatus'] as $column) {
+            self::assertArrayHasKey($column, $schema->columns, $column);
+        }
+
+        self::assertFalse($schema->columns['definitionFingerprint']->allowNull);
+        self::assertFalse($schema->columns['fingerprint']->allowNull);
+
+        $unique = $db->getSchema()->findUniqueIndexes($schema);
+        self::assertContains(['lockKey'], array_values($unique));
+    }
+
     public function testDeletingASiteDropsTheReferenceRatherThanTheIssue(): void
     {
         // Most findings are about the installation and merely stamped with whichever site was in
@@ -281,7 +301,7 @@ class InstallationTest extends TestCase
         // removed. Read from the migration because deleting a real site is not a test's to do.
         $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
 
-        foreach (['IssueRecord', 'EvidenceRecord', 'InvestigationRecord', 'ErrorGroupRecord'] as $record) {
+        foreach (['IssueRecord', 'EvidenceRecord', 'InvestigationRecord', 'ErrorGroupRecord', 'RepairRecord'] as $record) {
             self::assertMatchesRegularExpression(
                 "/addForeignKey\\([^;]*{$record}::TABLE,\\s*\\['siteId'\\][^;]*'SET NULL'/s",
                 $source,
@@ -338,6 +358,11 @@ class InstallationTest extends TestCase
             'webdoctor_issue_events.userId' => 'SET NULL',
             'webdoctor_issues.siteId' => 'SET NULL',
             'webdoctor_issues.statusChangedBy' => 'SET NULL',
+            // A repair is a record of something done to the installation, so it outlives its issue.
+            'webdoctor_repairs.executedBy' => 'SET NULL',
+            'webdoctor_repairs.issueId' => 'SET NULL',
+            'webdoctor_repairs.previewedBy' => 'SET NULL',
+            'webdoctor_repairs.siteId' => 'SET NULL',
             // A cause is what an investigation concluded, so it goes with it.
             'webdoctor_root_causes.investigationId' => 'CASCADE',
         ], $rules);
@@ -361,6 +386,7 @@ class InstallationTest extends TestCase
                 \Tahadudhiya\WebDoctor\records\ErrorGroupRecord::TABLE,
                 \Tahadudhiya\WebDoctor\records\ErrorSourceRecord::TABLE,
                 \Tahadudhiya\WebDoctor\records\RootCauseRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\RepairRecord::TABLE,
             ],
         );
 

@@ -26,8 +26,11 @@ use Tahadudhiya\WebDoctor\models\ErrorSignature;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
 use Tahadudhiya\WebDoctor\models\IssueList;
+use Tahadudhiya\WebDoctor\models\Prerequisite;
+use Tahadudhiya\WebDoctor\models\RepairReport;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic;
+use yii\base\InvalidArgumentException as YiiInvalidArgumentException;
 
 /**
  * The value objects Web Doctor's domain is made of: the context that identifies a run, the
@@ -1664,6 +1667,87 @@ class DiagnosticModelTest extends TestCase
         self::assertFalse($beyond->hasNextPage());
         self::assertSame(0, $beyond->firstPosition());
         self::assertSame(0, $beyond->lastPosition());
+    }
+
+    // Repairs ----------------------------------------------------------------
+
+    public function testARepairReportIsBoundedAsItIsBuiltAndCountsWhatItLeavesOut(): void
+    {
+        $items = array_map(static fn(int $i): string => "Change $i " . str_repeat('x', RepairReport::MAX_ITEM_LENGTH), range(1, RepairReport::MAX_ITEMS + 7));
+        $state = array_map(static fn(int $i): Evidence => new Evidence(EvidenceType::QUEUE, "State $i", 'test'), range(1, RepairReport::MAX_STATE + 2));
+
+        $report = new RepairReport(str_repeat('s', RepairReport::MAX_SUMMARY_LENGTH + 50), $items, $state, omitted: 3);
+
+        self::assertCount(RepairReport::MAX_ITEMS, $report->items);
+        // What the report was told was already left out, plus what it had to leave out itself.
+        self::assertSame(3 + 7, $report->omitted);
+        self::assertSame(RepairReport::MAX_ITEM_LENGTH, mb_strlen($report->items[0]));
+        self::assertSame(RepairReport::MAX_SUMMARY_LENGTH, mb_strlen($report->summary));
+        self::assertCount(RepairReport::MAX_STATE, $report->state);
+        self::assertSame('State 1', $report->state[0]->label);
+    }
+
+    public function testARepairFingerprintIsOfTheWholeStateAndOnlyAcceptedInItsOwnShape(): void
+    {
+        // Computed from everything a repair would act on, so a change past the bounded list a reader
+        // sees still changes it; the same state always gives the same fingerprint.
+        $jobs = range(1, RepairReport::MAX_ITEMS + 10);
+        $changedPastTheList = $jobs;
+        $changedPastTheList[RepairReport::MAX_ITEMS + 5] = 999;
+
+        self::assertSame(RepairReport::fingerprintOf($jobs), RepairReport::fingerprintOf($jobs));
+        self::assertNotSame(RepairReport::fingerprintOf($jobs), RepairReport::fingerprintOf($changedPastTheList));
+        self::assertSame(RepairReport::fingerprintOf($jobs), (new RepairReport('x', fingerprint: RepairReport::fingerprintOf($jobs)))->fingerprint);
+        self::assertNull((new RepairReport('x', fingerprint: 'not a fingerprint'))->fingerprint);
+    }
+
+    public function testARepairReportReadsBackAsItWasStoredAndSomethingElseReadsAsEmpty(): void
+    {
+        $report = new RepairReport(
+            'Retries two jobs.',
+            ['Job #1', 'Job #2'],
+            [new Evidence(EvidenceType::QUEUE, 'Failed jobs', 'queue.retryFailedJobs', ['failed' => 2])],
+            RepairReport::fingerprintOf([1, 2]),
+        );
+
+        $read = RepairReport::fromArray((array)json_decode(Evidence::encode($report), true));
+
+        self::assertSame($report->jsonSerialize(), $read->jsonSerialize());
+        self::assertSame(['failed' => 2], $read->state[0]->data);
+
+        $junk = RepairReport::fromArray(['summary' => ['not text'], 'items' => 'nope', 'state' => [1, 'x'], 'omitted' => '5']);
+
+        self::assertSame('', $junk->summary);
+        self::assertSame([], $junk->items);
+        self::assertSame([], $junk->state);
+        self::assertSame(0, $junk->omitted);
+        self::assertNull($junk->fingerprint);
+    }
+
+    public function testAPrerequisiteIsCheckedOrAcknowledgedAndOnlyAPersonMeetsTheSecond(): void
+    {
+        $checked = Prerequisite::checked('parentsWritable', 'The parent is writable.', true);
+        $acknowledged = Prerequisite::acknowledged('safeToRepeat', 'Each job is safe to run again.');
+
+        self::assertFalse($checked->needsAcknowledging());
+        self::assertTrue($checked->met);
+        self::assertTrue($acknowledged->needsAcknowledging());
+        self::assertFalse($acknowledged->met);
+
+        // Read back, an acknowledged one is never met by what was stored, and neither is a checked
+        // one whose stored answer is anything but true.
+        self::assertFalse(Prerequisite::fromArray(['met' => true] + $acknowledged->jsonSerialize())?->met);
+        self::assertFalse(Prerequisite::fromArray(['met' => 'yes'] + $checked->jsonSerialize())?->met);
+        self::assertTrue(Prerequisite::fromArray($checked->jsonSerialize())?->met);
+        self::assertNull(Prerequisite::fromArray(['id' => 'x', 'kind' => 'guessed']));
+        self::assertNull(Prerequisite::fromArray(['kind' => 'checked']));
+    }
+
+    public function testAPrerequisiteNeedsAnIdAFormCanNameIt(): void
+    {
+        $this->expectException(YiiInvalidArgumentException::class);
+
+        Prerequisite::acknowledged('safe to repeat', 'Each job is safe to run again.');
     }
 
     /**

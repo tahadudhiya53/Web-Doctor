@@ -36,6 +36,11 @@ history rather than two reports.
   about it, chosen by a fixed rule from the evidence behind it: the problem, the evidence, the
   likely cause where one was weighed, the action, its risk and why, what to have in place first,
   and which checks to run again to tell whether it worked.
+- **Repairs, previewed and confirmed** — for the two findings Web Doctor can safely put right
+  itself through Craft's own API — missing storage directories, and failed queue jobs — an issue's
+  page offers a repair. Nothing changes until you have seen exactly what would change and confirmed
+  it; everything is read again before it runs; and a repair that ran does not resolve the issue.
+  There is no "fix everything".
 - **Errors grouped rather than listed** — every exception a check runs into is recognised by its
   type, its message with the values that change between occurrences taken out, where it was thrown
   and the exceptions behind it, so the same error seen again is counted against one group, with
@@ -46,8 +51,9 @@ history rather than two reports.
 - **Manual runs** — every check or a selection of them, at a chosen depth. Opening the dashboard
   runs nothing.
 - **Diagnostic depth** (shallow / normal / deep) so a run can be bounded.
-- **Six permissions**, so reading results, running checks, reading issues, changing them,
-  reading what their evidence contains and investigating them are each granted separately.
+- **Seven permissions**, so reading results, running checks, reading issues, changing them,
+  reading what their evidence contains, investigating them and repairing them are each granted
+  separately.
 - **Environment- and site-scoped results**, so one environment's answers are never shown as
   another's.
 - **`php craft webdoctor/status`** for confirming an installation from a script.
@@ -145,6 +151,7 @@ Under a **Web Doctor** heading in a user group's permissions:
 | Manage issues | `webDoctor:manageIssues` | Changing where an issue stands |
 | View evidence | `webDoctor:viewEvidence` | Reading what an issue's evidence contains, and what an error said and where it was thrown |
 | Investigate issues | `webDoctor:investigateIssues` | Starting an investigation of an issue, or running a recipe |
+| Run repairs | `webDoctor:runRepairs` | Previewing and carrying out a repair of an issue |
 
 A non-admin also needs Craft's own **Access Web Doctor** permission (under "Access the control
 panel") to reach the section at all.
@@ -157,6 +164,10 @@ failed queue job's error is read only when the checks run in dev mode or are run
 Craft shows it; once read it is evidence, so granting "View evidence" grants reading it.
 Reading a finished investigation, and the Recipes page, needs only "View issues". Admins pass, as
 they do elsewhere in Craft.
+
+"Run repairs" is the only permission that lets somebody change the installation, and it is granted
+by nothing else. A repair also needs whatever Craft itself requires for the same action: retrying
+queue jobs needs access to Craft's Queue Manager utility, exactly as retrying them in Craft does.
 
 ## Running checks from code
 
@@ -496,7 +507,9 @@ checks found. Each is laid out in the order a reader acts on it:
 - **Verification** — what shows it worked, and which checks to run again, the one that found the
   problem first. An issue is still resolved only when that check runs again and no longer reports
   it;
-- **Automatic repair** — always "not available": Web Doctor does not carry anything out.
+- **Automatic repair** — never automatic. Where Web Doctor has a repair for the advice, the issue's
+  page says so and offers it with a preview (see Repairs below); otherwise the action is done by
+  hand.
 
 Nothing is composed on the spot. Each recommendation is written out in one list, selected by the
 evidence the check records, and where a check can report more than one kind of problem, the check's
@@ -526,6 +539,65 @@ evidence of is not advised on from what remains; the issue's own page advises on
 Recommendations are worked out again each time a page is shown and are not stored. Showing them
 reads the finding's evidence and, on an issue's page, its newest investigation's causes; it runs no
 check and writes nothing.
+
+### Repairs
+
+For a few findings Web Doctor can carry out the fix itself, through Craft's own API. It offers two:
+
+| Repair | For | Risk | What it does |
+|---|---|---|---|
+| Create the missing storage directories | `storage.paths` reporting a missing directory | Low | Creates the directories the check names as missing, empty, with Craft's own directory helper and the directory permissions Craft is configured to use. Nothing that exists is touched. |
+| Retry the failed queue jobs | `queue.failedJobs` reporting failed jobs | Medium | Puts up to 50 of this queue's oldest failed jobs back in the queue with Craft's own retry — the one Utilities → Queue Manager uses. Whatever runs the queue then runs them. |
+
+Applying project config, running migrations, changing file permissions and deleting anything are
+deliberately not offered: each can remove data, replace configuration made elsewhere, or reach
+beyond the installation, and Craft's own tools for them already show what they will do.
+
+A repair takes two steps. **Preview this repair**, on the issue's page, reads the installation live
+and shows exactly what would change, the state it read, its risk and why, and what has to be true
+first. It changes nothing. **Carry out this repair**, on the preview's page, is the confirmation:
+
+- every prerequisite only a person can know — that a job is safe to run twice, that what its error
+  names has been dealt with — has to be ticked, exactly those shown and each once;
+- a high-risk repair also needs the name of the environment it will change typed exactly, with no
+  change of case or spacing (neither shipped repair is high-risk);
+- a preview can be confirmed for 15 minutes, only once, and only in the environment it was made in.
+  Previewing the same repair again replaces your earlier preview, which stays in the history as
+  "Replaced by a newer preview".
+
+Before anything is changed, Web Doctor then establishes, itself — not relying on the page that asked
+— that you are signed in, hold "Run repairs" and have Craft's own permission for the same action;
+that the issue is still open and neither dismissed nor already being repaired; that it was recorded
+in this environment, on a site that still exists, and has not been found again since the preview;
+that the repair still answers its latest finding; that nothing else of the same kind is being
+carried out here; that every prerequisite it can check still holds; that the repair itself — its
+name, risk, reasons, prerequisites and how it is verified — is the one you previewed; and that what
+it would act on is still exactly what the preview showed. If anything has changed, nothing is
+carried out and you are asked to preview it again. What a repair acts on always comes from the
+installation, read live — never from anything a request sends. A failed job retried by somebody else, or one that failed
+again, since the preview is enough to stop it. A job that ran out of memory is never retried — raise
+its memory limit first.
+
+While a repair runs the issue shows **Repairing**; when it finishes, cleanly or not, the issue goes
+back to where it stood, and its history records both. **A repair that ran does not resolve the
+issue.** It is recorded as "Awaiting verification", and the issue resolves only when the check
+that found the problem runs again and no longer reports it — the repair's page lists the checks to
+run. A repair that fails part-way is recorded as failed, with its kind of error (never its message)
+and a note that it may have made some of its changes.
+
+A repair's ending, its lock being released and its issue being put back are written together, once.
+If that cannot be written, none of it is: the repair is left "Being carried out", holding its place,
+and after an hour it is read as stopped — the next preview or confirmation ends it as "Stopped
+without an ending", never as succeeded, and puts the issue back. A repair ended that way whose
+request later finishes changes nothing. An issue left "Repairing" with no repair under way is put back
+the same way, so an issue can never be stuck.
+
+Every preview, repair and refusal is written to Craft's log with the repair, the issue, the
+environment and the user. Repairs are kept in `webdoctor_repairs` — the preview, the prerequisites
+as read, what was acknowledged, what it did, the state before and after, and who previewed and
+carried it out — and outlive the issue they were for. Nothing in that history is deleted: expired
+and replaced previews stay, and a row that cannot be read back in full can be read but is never
+carried out.
 
 ### Errors
 
@@ -574,7 +646,8 @@ them, up to the limit, and says how many more it did not record.
 Issues, their history and their evidence live in three tables: `webdoctor_issues`,
 `webdoctor_issue_events` and `webdoctor_evidence`. Investigations and their timelines live in
 `webdoctor_investigations` and `webdoctor_investigation_steps`, and the causes each weighed in
-`webdoctor_root_causes`. Evidence and investigations are deleted with the issue they support, and
+`webdoctor_root_causes`. Repairs live in `webdoctor_repairs`, and are kept when their issue is
+deleted. Evidence and investigations are deleted with the issue they support, and
 causes with their investigation. Errors live in `webdoctor_error_groups`, with the checks that
 ran into each in `webdoctor_error_sources`; an error outlives the issues it relates to, and deleting
 an issue only drops the link.
@@ -642,8 +715,16 @@ subtract nothing, and the floor is 0.
   reported by `queue.failedJobs` as evidence, not grouped as an error.
 - **Investigations do not read logs.** Where logs would help, the plan says so.
 - **Recommendations cover Web Doctor's own checks.** A check contributed by another plugin gets
-  none. They are not stored, so there is no record of what was recommended when, and no repair is
-  carried out for any of them.
+  none. They are not stored, so there is no record of what was recommended when.
+- **Two repairs, and no verification yet.** Web Doctor can create missing storage directories and
+  retry failed queue jobs. A carried-out repair stays "Awaiting verification": nothing re-runs the
+  checks for you afterwards, and nothing marks it verified. Repairs run synchronously, in the
+  request that confirms them, and other plugins cannot yet contribute repairs.
+- **A preview is confirmed in the language it was made in.** What a repair says about itself is part
+  of what you confirm, so a preview made in one control panel language and confirmed in another is
+  refused and has to be made again. Web Doctor ships in English only.
+- **No upgrade path yet.** Web Doctor is unreleased: its schema is created by its install migration
+  alone, and a schema change is applied by reinstalling, which drops what it stored.
 - **`email.configuration` reads Craft's mail settings.** A mailer replaced wholesale in
   `config/app.php` is not what it inspects.
 - **Checks establish what they say and no more.** `filesystem.volumes` proves a volume can be

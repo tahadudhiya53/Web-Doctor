@@ -2181,7 +2181,11 @@ class IssueCenterTest extends TestCase
         sort($sorted);
         self::assertSame($sorted, $positions);
 
-        foreach (['Medium risk', 'Sending email, recorded by Example check', '<code>queue.failedJobs</code>', 'rather than from a weighed cause', 'Not available.', 'safe to run again'] as $expected) {
+        // Web Doctor has a repair for failed jobs, so the advice points to it rather than calling itself
+        // by-hand only — but this reader may not run repairs, so it is never offered as theirs to run.
+        self::assertStringNotContainsString('Web Doctor can carry this out once you have previewed and confirmed it', $html);
+
+        foreach (['Medium risk', 'Sending email, recorded by Example check', '<code>queue.failedJobs</code>', 'rather than from a weighed cause', 'Web Doctor has a repair for this, but it cannot be carried out here now', 'Retry the failed queue jobs', 'safe to run again'] as $expected) {
             self::assertStringContainsString($expected, $html);
         }
 

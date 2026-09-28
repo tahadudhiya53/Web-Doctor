@@ -13,7 +13,9 @@ use Tahadudhiya\WebDoctor\enums\IssueEventType;
 use Tahadudhiya\WebDoctor\enums\IssueResolution;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\RepairRisk;
+use Tahadudhiya\WebDoctor\enums\RepairStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\enums\VerificationStatus;
 
 /**
  * The words Web Doctor's domain is made of: what happened to a check (status), how much it
@@ -150,6 +152,33 @@ class VocabularyTest extends TestCase
         self::assertSame($explanations, array_unique($explanations));
     }
 
+    public function testOnlyAHighRiskRepairTakesATypedConfirmation(): void
+    {
+        // Every repair is confirmed; only the one that rewrites data asks for the environment's
+        // name to be typed, so the extra step keeps its meaning rather than becoming a reflex.
+        self::assertSame(
+            [RepairRisk::HIGH],
+            array_values(array_filter(RepairRisk::cases(), static fn(RepairRisk $r): bool => $r->requiresTypedConfirmation())),
+        );
+    }
+
+    public function testARepairSaysWhetherItRanAndNeverWhetherItWorked(): void
+    {
+        // Whether a repair worked is verification's answer, so nothing in the repair's own status
+        // says "fixed", and the only verification state a finished repair can reach by itself is
+        // "awaiting". Verified and verification-failed arrive with whatever verifies.
+        self::assertSame(['previewed', 'running', 'succeeded', 'failed', 'superseded'], RepairStatus::values());
+        self::assertSame(
+            [RepairStatus::SUCCEEDED, RepairStatus::FAILED],
+            array_values(array_filter(RepairStatus::cases(), static fn(RepairStatus $s): bool => $s->wasExecuted())),
+        );
+        self::assertSame(['none', 'pending'], VerificationStatus::values());
+
+        foreach (VerificationStatus::cases() as $status) {
+            self::assertStringContainsString('run', strtolower($status->explanation()));
+        }
+    }
+
     public function testEveryWordInTheVocabularyIsLabelledAndSpeltOnce(): void
     {
         $vocabularies = [
@@ -164,6 +193,8 @@ class VocabularyTest extends TestCase
             InvestigationStepType::cases(),
             ConditionRole::cases(),
             RepairRisk::cases(),
+            RepairStatus::cases(),
+            VerificationStatus::cases(),
         ];
 
         foreach ($vocabularies as $cases) {

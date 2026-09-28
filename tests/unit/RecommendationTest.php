@@ -649,12 +649,12 @@ class RecommendationTest extends TestCase
         $check = new class(['state' => $state]) extends StoragePathsDiagnostic {
             public string $state = 'writable';
 
-            protected function paths(): array
+            public function paths(): array
             {
                 return ['storage' => '/site/storage', 'logs' => '/site/storage/logs'];
             }
 
-            protected function stateOf(string $path): string
+            public function stateOf(string $path): string
             {
                 return $path === '/site/storage/logs' ? $this->state : 'writable';
             }

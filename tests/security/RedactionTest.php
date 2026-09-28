@@ -629,6 +629,34 @@ class RedactionTest extends TestCase
         self::assertStringContainsString('mail.example.com', $json);
     }
 
+    public function testNothingARepairShowsOrStoresCanCarryACredential(): void
+    {
+        // A repair's preview and outcome quote what it read — a job's description, a path, what a
+        // check it relies on said — and a prerequisite's detail quotes what was found. Each is built
+        // straight from the text here, so nothing earlier helps, and read back from what it stored.
+        $report = new \Tahadudhiya\WebDoctor\models\RepairReport(
+            summary: 'Retries jobs: password=hunter2-summary',
+            items: ['Job #4: Sync to https://api:hunter2-item@example.com/feed'],
+            state: [new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.retryFailedJobs', data: [
+                'toRetry' => [['id' => 4, 'description' => 'token=hunter2-state']],
+            ])],
+        );
+        $prerequisite = \Tahadudhiya\WebDoctor\models\Prerequisite::checked('jobsFailed', 'Jobs api_key=hunter2-description failed.', true, 'secret=hunter2-detail');
+
+        $json = (string)json_encode([
+            $report,
+            $prerequisite,
+            \Tahadudhiya\WebDoctor\models\RepairReport::fromArray((array)json_decode((string)json_encode($report), true)),
+        ]);
+
+        foreach (['hunter2-summary', 'hunter2-item', 'hunter2-state', 'hunter2-description', 'hunter2-detail'] as $secret) {
+            self::assertStringNotContainsString($secret, $json);
+        }
+
+        self::assertStringContainsString('example.com', $json);
+        self::assertStringContainsString('Retries jobs', $json);
+    }
+
     /**
      * The environment's credentials are read once per process; a test that changes the
      * environment has to make the helper read it again, and put it back afterwards.
