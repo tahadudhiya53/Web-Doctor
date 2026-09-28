@@ -11,6 +11,7 @@ use Tahadudhiya\WebDoctor\records\InvestigationRecord;
 use Tahadudhiya\WebDoctor\records\InvestigationStepRecord;
 use Tahadudhiya\WebDoctor\records\IssueEventRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
+use Tahadudhiya\WebDoctor\records\RepairRecord;
 use Tahadudhiya\WebDoctor\records\RootCauseRecord;
 
 /**
@@ -32,6 +33,7 @@ class Install extends Migration
         $this->createRootCausesTable();
         $this->createErrorGroupsTable();
         $this->createErrorSourcesTable();
+        $this->createRepairsTable();
 
         return true;
     }
@@ -41,6 +43,7 @@ class Install extends Migration
         // Whatever points at an issue first: dropping the target of a foreign key before the key
         // itself leaves the table that holds it unusable. Steps and root causes point at
         // investigations as well, and an error's sources at both the error and an issue.
+        $this->dropTableIfExists(RepairRecord::TABLE);
         $this->dropTableIfExists(ErrorSourceRecord::TABLE);
         $this->dropTableIfExists(ErrorGroupRecord::TABLE);
         $this->dropTableIfExists(RootCauseRecord::TABLE);
@@ -415,5 +418,78 @@ class Install extends Migration
         $this->addForeignKey(null, ErrorSourceRecord::TABLE, ['errorGroupId'], ErrorGroupRecord::TABLE, ['id'], 'CASCADE', null);
         // An error outlives the issue it was related to; deleting the issue drops the link.
         $this->addForeignKey(null, ErrorSourceRecord::TABLE, ['issueId'], IssueRecord::TABLE, ['id'], 'SET NULL', null);
+    }
+
+    /**
+     * One repair of an issue, from the preview somebody was shown to what it did. A preview is kept
+     * so that what is confirmed is exactly what was shown, and confirmed at most once.
+     */
+    private function createRepairsTable(): void
+    {
+        $this->createTable(RepairRecord::TABLE, [
+            'id' => $this->primaryKey(),
+            'issueId' => $this->integer(),
+            // The issue and its check as they read when it was previewed, so a repair whose issue
+            // has since been deleted still says what it was done for.
+            'issueTitle' => $this->string(255)->notNull(),
+            'diagnosticId' => $this->string(100)->notNull(),
+            // The run whose finding the preview was made from. A later finding is a new reading the
+            // person has not seen, so the preview no longer stands for it.
+            'findingRunId' => $this->string(36),
+            // The action, and what it said about itself then: its name, its risk and why, and how
+            // to tell whether it worked. The action can change or go afterwards.
+            'action' => $this->string(100)->notNull(),
+            'actionName' => $this->string(255)->notNull(),
+            'risk' => $this->string(16)->notNull(),
+            'riskReason' => $this->text(),
+            'status' => $this->string(16)->notNull(),
+            'verificationStatus' => $this->string(16)->notNull(),
+            'verifyWith' => $this->text(),
+            'verificationNote' => $this->text(),
+            'environment' => $this->string(255)->notNull(),
+            'siteId' => $this->integer(),
+            // What it would do and the state before, redacted and bounded by the report and its
+            // evidence — a medium text column holds it with room to spare where a text column
+            // might not. The fingerprint is of the whole state, not the bounded list.
+            'preview' => $this->mediumText(),
+            'fingerprint' => $this->char(64)->notNull(),
+            // What the action said about itself — its name, risk, prerequisites and verification —
+            // hashed, so a changed definition is caught though the installation's state is not.
+            'definitionFingerprint' => $this->char(64)->notNull(),
+            'prerequisites' => $this->text(),
+            'acknowledged' => $this->text(),
+            // What it did and the state after, bounded the same way.
+            'outcome' => $this->mediumText(),
+            'failure' => $this->text(),
+            // Where the issue stood before it was set to repairing, so it can be put back.
+            'issueStatusBefore' => $this->string(32),
+            // Held only while it runs: two repairs of the same kind in the same place cannot hold
+            // it at once. MySQL admits any number of NULLs under a unique index, so finished and
+            // waiting repairs never collide.
+            'lockKey' => $this->char(64),
+            'previewedBy' => $this->integer(),
+            'executedBy' => $this->integer(),
+            'previewedAt' => $this->dateTime()->notNull(),
+            'startedAt' => $this->dateTime(),
+            'finishedAt' => $this->dateTime(),
+            'durationMs' => $this->float(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+            'uid' => $this->uid(),
+        ]);
+
+        $this->createIndex(null, RepairRecord::TABLE, ['lockKey'], true);
+        // An issue's repairs, newest first, and the pruning of its unconfirmed previews.
+        $this->createIndex(null, RepairRecord::TABLE, ['issueId', 'previewedAt']);
+        $this->createIndex(null, RepairRecord::TABLE, ['action']);
+        $this->createIndex(null, RepairRecord::TABLE, ['siteId']);
+
+        // A repair is a record of something done to the installation, so it outlives the issue it
+        // was done for: deleting the issue drops the link, and `issueTitle` keeps saying what it was.
+        $this->addForeignKey(null, RepairRecord::TABLE, ['issueId'], IssueRecord::TABLE, ['id'], 'SET NULL', null);
+        // A deleted site drops the reference and keeps the record, as the issue itself does.
+        $this->addForeignKey(null, RepairRecord::TABLE, ['siteId'], Table::SITES, ['id'], 'SET NULL', null);
+        $this->addForeignKey(null, RepairRecord::TABLE, ['previewedBy'], Table::USERS, ['id'], 'SET NULL', null);
+        $this->addForeignKey(null, RepairRecord::TABLE, ['executedBy'], Table::USERS, ['id'], 'SET NULL', null);
     }
 }

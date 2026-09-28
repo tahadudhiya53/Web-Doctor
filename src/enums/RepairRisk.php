@@ -31,6 +31,15 @@ enum RepairRisk: string
         };
     }
 
+    /**
+     * Whether confirming a repair at this level takes more than a click: the person types the name
+     * of the environment it will change, so it cannot be carried out against production by reflex.
+     */
+    public function requiresTypedConfirmation(): bool
+    {
+        return $this === self::HIGH;
+    }
+
     /** What the level means, the same wherever it is shown. */
     public function explanation(): string
     {

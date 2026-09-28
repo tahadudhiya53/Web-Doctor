@@ -8,8 +8,9 @@ use Craft;
  * Where an issue stands. Two cases are deliberately not a person's to set.
  *
  * `RESOLVED` is established by a later run of the check that raised the issue, never asserted —
- * a button that set it would make the word mean "somebody clicked resolved". `REPAIRING` belongs
- * to whatever performs a repair, and nothing does yet.
+ * a button that set it would make the word mean "somebody clicked resolved". `REPAIRING` is held
+ * only while Web Doctor carries out a repair somebody confirmed, and the issue goes back to where it
+ * stood when the repair finishes: a repair that ran is not a problem that went away.
  *
  * Somebody who has decided an issue needs no action says so with `IGNORED` or `WONT_FIX`, which
  * are honest about being judgements rather than outcomes and require a reason for that reason.
@@ -25,7 +26,7 @@ enum IssueStatus: string
     /** Looked at and accepted as real. */
     case CONFIRMED = 'confirmed';
 
-    /** A repair is under way. Reserved: nothing performs repairs yet. */
+    /** Web Doctor is carrying out a repair. Set and cleared by the repair, never by hand. */
     case REPAIRING = 'repairing';
 
     /** The check that raised it no longer reports the problem. Never set by hand. */

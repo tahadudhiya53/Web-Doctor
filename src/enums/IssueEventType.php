@@ -29,6 +29,12 @@ enum IssueEventType: string
     /** The check that raised it ran again and no longer reports the problem. */
     case RESOLVED = 'resolved';
 
+    /** Web Doctor began carrying out a repair somebody confirmed. */
+    case REPAIR_STARTED = 'repairStarted';
+
+    /** The repair finished — cleanly or not — and the issue went back to where it stood. */
+    case REPAIR_FINISHED = 'repairFinished';
+
     public function label(): string
     {
         return match ($this) {
@@ -37,6 +43,8 @@ enum IssueEventType: string
             self::CHANGED => Craft::t('web-doctor', 'Finding changed'),
             self::STATUS_CHANGED => Craft::t('web-doctor', 'Status changed'),
             self::RESOLVED => Craft::t('web-doctor', 'Observed clear'),
+            self::REPAIR_STARTED => Craft::t('web-doctor', 'Repair started'),
+            self::REPAIR_FINISHED => Craft::t('web-doctor', 'Repair finished'),
         };
     }
 
