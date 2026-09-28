@@ -1,0 +1,95 @@
+{#
+    The issue page's way into a repair: what Web Doctor could carry out for the latest finding, why
+    it would or would not be allowed here, the control that previews one for somebody who may, and
+    the repairs already made. Previewing changes nothing; confirming happens on the preview's page.
+#}
+
+{% import "web-doctor/_macros" as shared %}
+
+<div class="pane" id="repairs">
+    <h2>{{ "Repairs"|t('web-doctor') }}</h2>
+
+    {% if repairsFailure %}
+        <p class="error">{{ repairsFailure }}</p>
+    {% else %}
+        <p class="light">
+            {{ "A repair is something Web Doctor can carry out for you with Craft’s own tools. Nothing is changed until you have previewed exactly what would change and confirmed it, and a repair that ran does not resolve the issue: the check that found the problem has to run again and no longer report it."|t('web-doctor') }}
+        </p>
+
+        {% for action in repairActions %}
+            <section class="wd-repair-offer">
+                <h3 class="wd-recommendation__title">
+                    <span class="wd-pill wd-pill--risk-{{ action.risk.value }}">{{ action.risk.label() }}</span>
+                    {{ shared.text(action.name) }}
+                </h3>
+                <p>{{ shared.text(action.description) }}</p>
+                <p><strong>{{ "Risk"|t('web-doctor') }}:</strong> {{ shared.text(action.riskReason) }}</p>
+                <p class="light">{{ action.risk.explanation() }}</p>
+                <p class="light">
+                    {{ "Verified by running again:"|t('web-doctor') }}
+                    {% for id in action.verifyWith %}<code>{{ id }}</code>{{ not loop.last ? ', ' }}{% endfor %}.
+                </p>
+
+                {% if canRunRepairs %}
+                    {% if repairRefusal %}
+                        <p class="warning">{{ repairRefusal }}</p>
+                    {% elseif not action.authorized %}
+                        <p class="warning">{{ shared.text(action.authorization) }}</p>
+                    {% else %}
+                        <form method="post" accept-charset="UTF-8" class="wd-toolbar" data-wd-run-form>
+                            {{ csrfInput() }}
+                            {{ actionInput('web-doctor/repairs/prepare') }}
+                            {{ redirectInput('web-doctor/issues/' ~ issue.id ~ '#repairs') }}
+                            <input type="hidden" name="issueId" value="{{ issue.id }}">
+                            <input type="hidden" name="repairAction" value="{{ action.id }}">
+
+                            <button type="submit" class="btn">{{ "Preview this repair"|t('web-doctor') }}</button>
+
+                            <p class="wd-run-status" role="status" aria-live="polite" data-wd-run-status hidden>
+                                {{ "Reading what it would change…"|t('web-doctor') }}
+                            </p>
+                            <p class="light wd-toolbar__note">{{ "Previewing reads the installation and changes nothing. You confirm on the next page."|t('web-doctor') }}</p>
+                        </form>
+                    {% endif %}
+                {% endif %}
+            </section>
+        {% else %}
+            {% if issue.status.value == 'resolved' %}
+                <p class="light">{{ "This issue is resolved, so there is nothing to repair."|t('web-doctor') }}</p>
+            {% else %}
+                <p class="light">{{ "Web Doctor has no repair for this finding. The recommendations above are carried out by hand."|t('web-doctor') }}</p>
+            {% endif %}
+        {% endfor %}
+
+        {% if repairs|length %}
+            <h3 class="wd-plan__heading">{{ "Repairs of this issue"|t('web-doctor') }}</h3>
+            <div class="wd-table-scroll">
+            <table class="data fullwidth wd-repairs">
+                <thead>
+                    <tr>
+                        <th scope="col">{{ "Previewed"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Repair"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Risk"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Status"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Verification"|t('web-doctor') }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for repair in repairs %}
+                        <tr>
+                            <td class="wd-col-narrow"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '/repairs/' ~ repair.id) }}">{{ repair.previewedAt|datetime('short') }}</a></td>
+                            <td>{{ shared.text(repair.actionName) }}</td>
+                            <td class="wd-col-narrow"><span class="wd-pill wd-pill--risk-{{ repair.risk.value }}">{{ repair.risk.label() }}</span></td>
+                            <td class="wd-col-narrow"><span class="wd-pill wd-pill--repair-{{ repair.status.value }}">{{ repair.statusLabel() }}</span></td>
+                            <td class="wd-col-narrow">{{ repair.status.wasExecuted() ? repair.verificationStatus.label() : '—' }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+            {% if repairs|length >= repairLimit %}
+                <p class="light">{{ "Showing the most recent {count}."|t('web-doctor', { count: repairLimit }) }}</p>
+            {% endif %}
+        {% endif %}
+    {% endif %}
+</div>

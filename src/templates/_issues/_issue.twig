@@ -43,13 +43,15 @@
     {% elseif issue.status.value == 'resolved' %}
         <p class="light">{{ "This issue is resolved, so there is nothing to act on."|t('web-doctor') }}</p>
     {% else %}
-        <p class="light">{{ "Chosen from Web Doctor’s fixed list of recommendations by the evidence behind the latest finding and, once the issue has been investigated, by the causes the latest investigation held likely or firmer. Nothing here is carried out for you."|t('web-doctor') }}</p>
+        <p class="light">{{ "Chosen from Web Doctor’s fixed list of recommendations by the evidence behind the latest finding and, once the issue has been investigated, by the causes the latest investigation held likely or firmer. Nothing here is carried out unless you preview and confirm a repair below."|t('web-doctor') }}</p>
         {% if not canViewEvidence %}
             <p class="light">{{ "You can see what kind of fact each recommendation rests on. What those facts contain needs the “View evidence” permission."|t('web-doctor') }}</p>
         {% endif %}
-        {{ rec.list(recommendations, canViewEvidence, 'issue', issue.recommendation) }}
+        {{ rec.list(recommendations, canViewEvidence, 'issue', issue.recommendation, repairsByRule) }}
     {% endif %}
 </div>
+
+{% include "web-doctor/_issues/_repairs" %}
 
 <div class="pane">
     <h2>{{ "Where this came from"|t('web-doctor') }}</h2>

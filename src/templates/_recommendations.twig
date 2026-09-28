@@ -7,9 +7,11 @@
 
 {#
     `where` says which page it is on — 'issue', 'investigation' or 'dashboard' — which decides where a
-    cause is linked to and whether facts can be followed to the evidence on the same page.
+    cause is linked to and whether facts can be followed to the evidence on the same page. `repairs`
+    is given only on the issue page: the repairs offered there, keyed by the recommendation each
+    carries out.
 #}
-{% macro recommendation(r, canViewEvidence, where) %}
+{% macro recommendation(r, canViewEvidence, where, repairs) %}
     {% import "web-doctor/_macros" as shared %}
     <section class="wd-recommendation" id="recommendation-{{ r.diagnosticId|replace({ '.': '-' }) }}-{{ r.ruleId|replace({ '.': '-' }) }}">
         <h3 class="wd-recommendation__title">
@@ -91,9 +93,16 @@
         </p>
 
         <h4 class="wd-recommendation__heading">{{ "Automatic repair"|t('web-doctor') }}</h4>
+        {% set repair = repairs is null ? null : (repairs[r.ruleId] ?? null) %}
         <p class="light">
-            {%- if r.automaticRepair -%}
-                {{ "Available."|t('web-doctor') }}
+            {%- if repair and repair.available -%}
+                {{ "Not automatic, but Web Doctor can carry this out once you have previewed and confirmed it:"|t('web-doctor') }}
+                <a href="#repairs">{{ shared.text(repair.name) }}</a>.
+            {%- elseif repair -%}
+                {{ "Web Doctor has a repair for this, but it cannot be carried out here now:"|t('web-doctor') }}
+                <a href="#repairs">{{ shared.text(repair.name) }}</a>.
+            {%- elseif repairs is null -%}
+                {{ "Not available. Web Doctor never repairs anything on its own; where it can carry out a repair, the issue’s page offers it with a preview."|t('web-doctor') }}
             {%- else -%}
                 {{ "Not available. Web Doctor does not carry this out; it is done by hand."|t('web-doctor') }}
             {%- endif -%}
@@ -106,14 +115,14 @@
     are none. A rule that could not be applied is said, never read as no rule applying. `advice` is
     the check's own words, shown where no rule answers the finding, labelled as the check's.
 #}
-{% macro list(set, canViewEvidence, where, advice) %}
+{% macro list(set, canViewEvidence, where, advice, repairs = null) %}
     {% import _self as rec %}
     {% import "web-doctor/_macros" as shared %}
     {% if set.failed|length %}
         <p class="error">{{ "{count, plural, =1{A recommendation} other{# recommendations}} for this finding could not be worked out. The details are in Craft’s logs."|t('web-doctor', { count: set.failed|length }) }}</p>
     {% endif %}
     {% for r in set.recommendations %}
-        {{ rec.recommendation(r, canViewEvidence, where) }}
+        {{ rec.recommendation(r, canViewEvidence, where, repairs) }}
     {% endfor %}
     {% if set.partialEvidence %}
         <p class="light">{{ "Only part of this check’s evidence was kept in this investigation, so Web Doctor does not choose a recommendation from what remains. The issue’s own page recommends from its latest finding."|t('web-doctor') }}</p>

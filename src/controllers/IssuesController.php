@@ -4,6 +4,7 @@ namespace Tahadudhiya\WebDoctor\controllers;
 
 use Craft;
 use craft\web\Controller;
+use Tahadudhiya\WebDoctor\base\RepairActionInterface;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
@@ -13,11 +14,13 @@ use Tahadudhiya\WebDoctor\models\ErrorGroup;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\Investigation;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
+use Tahadudhiya\WebDoctor\models\RepairOffer;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\models\StoredEvidence;
 use Tahadudhiya\WebDoctor\services\Investigations;
 use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
+use Tahadudhiya\WebDoctor\services\Repairs;
 use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
@@ -217,6 +220,29 @@ class IssuesController extends Controller
             }
         }
 
+        // Read on its own for the same reason. What a repair could do is worked out from the latest
+        // finding without reading or changing anything else; the preview is a separate request.
+        $repairsFailure = null;
+        $repairActions = [];
+        $repairRefusal = null;
+        $repairs = [];
+
+        if ($evidenceFailure !== null) {
+            $repairsFailure = Craft::t('web-doctor', 'Nothing can be offered for repair while the evidence behind this issue cannot be read.');
+        } else {
+            try {
+                $repairRefusal = $plugin->getRepairs()->refusal($issue);
+                $repairActions = $this->repairOffers(
+                    $plugin->getRepairs()->available($issue, array_map(static fn(StoredEvidence $stored): Evidence => $stored->evidence, $latestEvidence)),
+                    $repairRefusal === null && $plugin->getPermissions()->canRunRepairs(),
+                );
+                $repairs = $plugin->getRepairs()->forIssue($issue->id);
+            } catch (Throwable $e) {
+                SafeException::log('An issue\'s repairs could not be read', $e);
+                $repairsFailure = Craft::t('web-doctor', 'Web Doctor could not read the repairs of this issue. The details are in Craft’s logs.');
+            }
+        }
+
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
 
         return $this->renderTemplate('web-doctor/_issues/_detail', [
@@ -247,6 +273,14 @@ class IssuesController extends Controller
             'errorsFailure' => $errorsFailure,
             'recommendations' => $recommendations,
             'recommendationsFailure' => $recommendationsFailure,
+            'repairActions' => $repairActions,
+            // Which recommendations a repair offered here carries out, so the advice can point to it.
+            'repairsByRule' => $repairsFailure === null ? $this->repairsByRule($repairActions) : null,
+            'repairRefusal' => $repairRefusal,
+            'repairs' => $repairs,
+            'repairsFailure' => $repairsFailure,
+            'repairLimit' => Repairs::HISTORY_LIMIT,
+            'canRunRepairs' => $plugin->getPermissions()->canRunRepairs(),
         ]);
     }
 
@@ -302,6 +336,47 @@ class IssuesController extends Controller
             : Craft::t('web-doctor', 'Issue updated.'));
 
         return $this->redirectToPostedUrl();
+    }
+
+    /**
+     * The repairs that answer this finding, as this reader is shown them.
+     *
+     * @param list<RepairActionInterface> $actions Those that apply to the latest finding.
+     * @param bool $mayRun Whether the issue can be repaired here and this reader may run repairs.
+     * @return list<RepairOffer>
+     */
+    private function repairOffers(array $actions, bool $mayRun): array
+    {
+        return array_map(static function(RepairActionInterface $action) use ($mayRun): RepairOffer {
+            try {
+                $authorized = $action->isAuthorized();
+            } catch (Throwable $e) {
+                SafeException::log('Whether Craft allows a repair could not be established', $e);
+                $authorized = false;
+            }
+
+            return RepairOffer::of($action, $mayRun, $authorized);
+        }, $actions);
+    }
+
+    /**
+     * The repairs offered, keyed by the recommendation each carries out. The advice says "preview it
+     * below" only for one this reader could preview now.
+     *
+     * @param list<RepairOffer> $offers
+     * @return array<string, RepairOffer>
+     */
+    private function repairsByRule(array $offers): array
+    {
+        $out = [];
+
+        foreach ($offers as $offer) {
+            if ($offer->recommendation !== null) {
+                $out[$offer->recommendation] ??= $offer;
+            }
+        }
+
+        return $out;
     }
 
     /**

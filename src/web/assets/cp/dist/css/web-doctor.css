@@ -838,3 +838,58 @@
 .wd-result__recommendations .wd-recommendation:first-of-type {
     margin-top: 8px;
 }
+
+/* Repairs ------------------------------------------------------------------ */
+
+/* Where a repair stands says whether it ran, never whether it worked, so a carried-out repair is
+   not green: that is verification's to earn. */
+.wd-pill--repair-previewed { background: #5b6570; }
+.wd-pill--repair-running { background: #1553b6; }
+.wd-pill--repair-succeeded { background: #1d2a35; }
+.wd-pill--repair-failed { background: #b00020; }
+.wd-pill--verification-pending { color: #8a5200; background: transparent; border: 1px solid #8a5200; }
+.wd-pill--verification-none { background: #d5d9de; color: #1d2a35; }
+
+.wd-repair-offer {
+    margin: 16px 0 0;
+    padding: 16px 0 0;
+    border-top: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.15));
+}
+
+.wd-repair-offer p,
+.wd-repair__items li,
+.wd-prerequisites li {
+    overflow-wrap: anywhere;
+}
+
+.wd-prerequisites .wd-pill {
+    margin-right: 6px;
+}
+
+.wd-repair__acknowledge {
+    margin: 0 0 16px;
+    padding: 0;
+    border: 0;
+}
+
+.wd-repair__acknowledge legend {
+    margin: 0 0 8px;
+    font-weight: bold;
+}
+
+.wd-repair__acknowledge .field {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    margin: 0 0 8px;
+}
+
+.wd-repair__acknowledge label {
+    overflow-wrap: anywhere;
+}
+
+.wd-repair__confirm [type="submit"]:focus-visible,
+.wd-repair__acknowledge .checkbox:focus-visible {
+    outline: 2px solid #1553b6;
+    outline-offset: 2px;
+}
