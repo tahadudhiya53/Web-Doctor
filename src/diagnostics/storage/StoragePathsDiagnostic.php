@@ -145,20 +145,27 @@ class StoragePathsDiagnostic extends Diagnostic
      * the two need different fixes, and calling a file "missing" sends somebody to create a
      * directory that cannot be created.
      *
-     * A path whose parent cannot be read is reported as unknown rather than missing: `file_exists()`
-     * answers false both for "not there" and for "not allowed to look", and reporting the second
-     * as the first would send somebody to create a directory that is already there.
+     * A path under a directory that cannot be read is reported as unknown rather than missing:
+     * `file_exists()` answers false both for "not there" and for "not allowed to look", and reporting
+     * the second as the first would send somebody to create a directory that is already there. That
+     * holds for any directory above it, not only its parent — one that cannot be entered hides
+     * everything below it.
      *
      * @return 'missing'|'notADirectory'|'notWritable'|'writable'|'unknown'
      */
     public function stateOf(string $path): string
     {
         if (!file_exists($path)) {
-            $parent = dirname($path);
+            // The nearest directory above it that can be seen. Whether anything exists inside it can
+            // only be told from inside it, so one that cannot be entered makes every answer below it
+            // false, whether or not the path is there.
+            $above = dirname($path);
 
-            // Whether something exists inside a directory can only be told from inside it: a parent
-            // that cannot be entered makes file_exists() answer false either way.
-            return is_dir($parent) && (!is_readable($parent) || !is_executable($parent)) ? 'unknown' : 'missing';
+            while (!file_exists($above) && dirname($above) !== $above) {
+                $above = dirname($above);
+            }
+
+            return is_dir($above) && (!is_readable($above) || !is_executable($above)) ? 'unknown' : 'missing';
         }
 
         if (!is_dir($path)) {

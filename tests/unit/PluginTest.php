@@ -122,6 +122,8 @@ class PluginTest extends TestCase
             'repairs' => \Tahadudhiya\WebDoctor\services\Repairs::class,
             'rootCauses' => \Tahadudhiya\WebDoctor\services\RootCauses::class,
             'runs' => \Tahadudhiya\WebDoctor\services\Runs::class,
+            'verificationActions' => \Tahadudhiya\WebDoctor\services\VerificationActions::class,
+            'verifications' => \Tahadudhiya\WebDoctor\services\Verifications::class,
         ];
 
         self::assertSame($expected, array_intersect_key($classes, $expected));

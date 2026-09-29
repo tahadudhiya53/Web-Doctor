@@ -54,9 +54,10 @@ class Permissions extends Component
     public const INVESTIGATE_ISSUES = 'webDoctor:investigateIssues';
 
     /**
-     * @var string Carrying out a repair: previewing what it would change and confirming it. Separate
-     * from every other permission because it is the one that changes the installation, and separate
-     * from {@see self::MANAGE_ISSUES} because deciding where an issue stands is not changing the site.
+     * @var string Carrying out a repair: previewing what it would change, confirming it, and verifying
+     * it afterwards. Separate from every other permission because it is the one that changes the
+     * installation, and separate from {@see self::MANAGE_ISSUES} because deciding where an issue
+     * stands is not changing the site.
      * A repair also needs whatever Craft itself requires for the same action.
      */
     public const RUN_REPAIRS = 'webDoctor:runRepairs';
@@ -98,7 +99,7 @@ class Permissions extends Component
                             ],
                             self::RUN_REPAIRS => [
                                 'label' => Craft::t('web-doctor', 'Run repairs'),
-                                'info' => Craft::t('web-doctor', 'Previews and carries out the repairs Web Doctor offers for an issue. Each one changes this installation, is confirmed first, and also needs whatever Craft requires for the same action.'),
+                                'info' => Craft::t('web-doctor', 'Previews, carries out and verifies the repairs Web Doctor offers for an issue. Each repair changes this installation, is confirmed first, and also needs whatever Craft requires for the same action; verifying one runs its checks again and changes nothing.'),
                             ],
                         ],
                     ],

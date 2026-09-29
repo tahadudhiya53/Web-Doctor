@@ -15,6 +15,7 @@
 - Added five recipes: 500 Error Doctor, Email Doctor, Queue Doctor, Database Doctor and Deployment Doctor.
 - Added recommendations for every warning and failure a built-in check reports, each with its risk and how to verify it.
 - Added repairs for missing storage directories and failed queue jobs. Each is previewed, confirmed and checked again before it runs, uses Craft’s own API, and leaves the issue awaiting verification rather than resolved.
+- Added repair verification. A repair is verified as soon as it is carried out, and again on request: the check that found the problem and the checks around it run again, what the repair did is checked still to hold, the evidence before and after is compared, and new problems and errors are looked for. The result is Verified, Verification failed or Inconclusive, with the reasons; only a verified repair resolves the issue, as “Repair verified”.
 - Added the “View Web Doctor”, “Run diagnostics”, “View issues”, “Manage issues”, “View evidence”, “Investigate issues” and “Run repairs” permissions.
 - Added the `webdoctor/status` console command.
 - Added plugin settings, which can be overridden from `config/web-doctor.php`.
@@ -26,3 +27,5 @@
 - Malformed request values (IDs, depths, pages, filters) are refused rather than coerced.
 - A repair checks the signed-in user’s permissions itself, and Craft’s own permission for the same action, whatever page asked for it.
 - A repair runs only if the repair and the installation’s state are both exactly what was previewed, and only for the exact acknowledgements shown.
+- A retried queue job is treated as having run only when Craft’s queue reported that it ran without an error; a job that merely left the queue is not.
+- Verifying a repair checks the signed-in user’s permission itself, and one issue is verified at a time.

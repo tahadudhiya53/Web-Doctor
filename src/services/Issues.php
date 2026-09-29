@@ -14,6 +14,7 @@ use Tahadudhiya\WebDoctor\enums\IssueEventType;
 use Tahadudhiya\WebDoctor\enums\IssueResolution;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\enums\VerificationStatus;
 use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
@@ -66,8 +67,12 @@ class Issues extends Component
      * Done as one transaction. A run that is half-reconciled — new issues raised but nothing
      * resolved — would show a reader problems that the same run had already established were
      * gone.
+     *
+     * @param list<string> $leaveOpen Fingerprints this reconciliation must not resolve, whatever the
+     * run found: a repair's verification settles its own issue itself, because only a verified repair
+     * may resolve it, and a check gone quiet while the verification could not tell is not that.
      */
-    public function reconcile(DiagnosticRun $run): IssueReconciliation
+    public function reconcile(DiagnosticRun $run, array $leaveOpen = []): IssueReconciliation
     {
         $environment = $run->context->environment;
         $siteId = $run->context->siteId;
@@ -108,7 +113,7 @@ class Issues extends Component
                 };
             }
 
-            $resolved = $this->resolveCleared($run, array_keys($findings), array_keys($conclusive));
+            $resolved = $this->resolveCleared($run, [...array_keys($findings), ...$leaveOpen], array_keys($conclusive));
 
             $transaction->commit();
         } catch (Throwable $e) {
@@ -428,6 +433,115 @@ class Issues extends Component
 
             throw $e;
         }
+    }
+
+    /**
+     * Applies a repair's verification to its issue and records it in the history, as one act, and
+     * returns the answer that stands.
+     *
+     * Verified resolves an open issue on those grounds, or makes an already resolved one's grounds
+     * that; a failed verification opens a resolved issue again; an inconclusive one changes nothing.
+     * A person's decision to ignore an issue stands whatever a verification says.
+     *
+     * Read with a lock, so the issue is the one standing now. If it changed while the verification
+     * ran — a repair of it began, or a later run recorded a finding on it — the verification's answer
+     * describes a state that has gone, and inconclusive is what stands.
+     *
+     * @param string|null $expectedRunId The run the issue's latest finding was from when the
+     * verification began.
+     * @param IssueStatus $expectedStatus Where the issue stood when the verification began.
+     * @param callable(VerificationStatus): string $note The history's note for the answer that stands.
+     */
+    public function recordVerification(int $issueId, VerificationStatus $result, ?string $expectedRunId, IssueStatus $expectedStatus, callable $note, string $runId, ?int $userId = null): VerificationStatus
+    {
+        if (!$result->isResult()) {
+            throw new InvalidArgumentException(sprintf('"%s" is not a verification\'s answer.', $result->value));
+        }
+
+        $transaction = Craft::$app->getDb()->beginTransaction();
+
+        try {
+            $record = Savepoint::committed(IssueRecord::find()->where(['id' => $issueId]))[0] ?? null;
+
+            if (!$record instanceof IssueRecord) {
+                $transaction->commit();
+
+                return VerificationStatus::INCONCLUSIVE;
+            }
+
+            $from = IssueStatus::tryFrom((string)$record->status) ?? IssueStatus::NEW;
+            // A failed verification's own run records the finding on the issue — which moves its
+            // latest run, and reopens it if it was resolved — so only a repair beginning counts as
+            // a change against that answer. Any other answer has to find the issue as it left it:
+            // the same finding, and the same status, nobody having decided anything meanwhile.
+            $changed = $from === IssueStatus::REPAIRING
+                || ($result !== VerificationStatus::FAILED && ($record->latestRunId !== $expectedRunId || $from !== $expectedStatus));
+            $stands = $changed ? VerificationStatus::INCONCLUSIVE : $result;
+            $now = $this->forDb(new DateTimeImmutable());
+
+            if ($stands === VerificationStatus::VERIFIED && ($from->isOpen() || $from === IssueStatus::RESOLVED)) {
+                $record->status = IssueStatus::RESOLVED->value;
+                $record->resolution = IssueResolution::VERIFIED->value;
+                $record->resolvedAt = $from === IssueStatus::RESOLVED ? $record->resolvedAt : $now;
+                $record->resolvedByRunId = $runId;
+                $record->statusNote = null;
+                $this->save($record);
+
+                if ($from !== IssueStatus::RESOLVED) {
+                    $this->logEvent($record, IssueEventType::RESOLVED, from: $from, to: IssueStatus::RESOLVED, runId: $runId, userId: $userId);
+                }
+            } elseif ($stands === VerificationStatus::FAILED && $from === IssueStatus::RESOLVED) {
+                $record->status = IssueStatus::NEW->value;
+                $record->resolution = IssueResolution::NONE->value;
+                $record->resolvedAt = null;
+                $record->resolvedByRunId = null;
+                $record->statusNote = null;
+                $record->statusChangedAt = null;
+                $record->statusChangedBy = null;
+                $this->save($record);
+                $this->logEvent($record, IssueEventType::RECURRED, from: $from, to: IssueStatus::NEW, runId: $runId, userId: $userId);
+            }
+
+            $to = IssueStatus::tryFrom((string)$record->status) ?? $from;
+            $this->logEvent($record, IssueEventType::REPAIR_VERIFIED, from: $to, to: $to, note: $note($stands), runId: $runId, userId: $userId);
+
+            $transaction->commit();
+        } catch (Throwable $e) {
+            $transaction->rollBack();
+
+            throw $e;
+        }
+
+        return $stands;
+    }
+
+    /**
+     * Which of these issues appeared at or after a moment: first detected then, or found again then
+     * after having been resolved. A moment is whole seconds, so one in the same second counts — the
+     * cautious reading, since what is asked is whether something could be new.
+     *
+     * @param list<int> $issueIds
+     * @return list<int>
+     */
+    public function appearedSince(array $issueIds, DateTimeInterface $since): array
+    {
+        if ($issueIds === []) {
+            return [];
+        }
+
+        $at = $this->forDb($since);
+        $first = IssueRecord::find()->select(['id'])->where(['id' => $issueIds])->andWhere(['>=', 'firstDetected', $at])->column();
+        $recurred = IssueEventRecord::find()
+            ->select(['issueId'])
+            ->distinct()
+            ->where(['issueId' => $issueIds, 'type' => IssueEventType::RECURRED->value])
+            ->andWhere(['>=', 'dateCreated', $at])
+            ->column();
+
+        $ids = array_values(array_unique(array_map('intval', [...$first, ...$recurred])));
+        sort($ids);
+
+        return $ids;
     }
 
     /**

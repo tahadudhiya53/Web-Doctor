@@ -1163,7 +1163,7 @@ class RecipeTest extends TestCase
                 parent::__construct();
             }
 
-            public function reconcile(DiagnosticRun $run): IssueReconciliation
+            public function reconcile(DiagnosticRun $run, array $leaveOpen = []): IssueReconciliation
             {
                 if ($this->failure === 'reconcile') {
                     throw new RuntimeException('The issue table is gone.');

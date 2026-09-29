@@ -893,3 +893,38 @@
     outline: 2px solid #1553b6;
     outline-offset: 2px;
 }
+
+/* Verification ------------------------------------------------------------- */
+
+/* Only a verification earns green; a failed one is red, and one that could not tell is neither. */
+.wd-pill--verification-verified { background: #1f6b30; }
+.wd-pill--verification-verification_failed { background: #b00020; }
+.wd-pill--verification-inconclusive { background: #5b3bb0; }
+.wd-pill--condition-held { background: #1f6b30; }
+.wd-pill--condition-notHeld { background: #b00020; }
+.wd-pill--condition-undetermined { background: #5b3bb0; }
+
+.wd-verification {
+    margin: 16px 0 0;
+    padding: 16px 0 0;
+    border-top: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.15));
+}
+
+.wd-verification p,
+.wd-verification li,
+.wd-verification td {
+    overflow-wrap: anywhere;
+}
+
+.wd-verification__state {
+    margin: 8px 0;
+}
+
+.wd-verification__state > summary {
+    cursor: pointer;
+}
+
+/* Four columns of prose cannot share a phone's width; the table scrolls inside its wrapper instead. */
+.wd-verification__checks {
+    min-width: 640px;
+}

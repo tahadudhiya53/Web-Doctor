@@ -6,11 +6,15 @@ use Craft;
 use craft\helpers\UrlHelper;
 use craft\web\Controller;
 use Tahadudhiya\WebDoctor\enums\RepairStatus;
+use Tahadudhiya\WebDoctor\enums\VerificationStatus;
 use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\helpers\RequestInput;
+use Tahadudhiya\WebDoctor\models\Repair;
 use Tahadudhiya\WebDoctor\models\SafeException;
+use Tahadudhiya\WebDoctor\models\Verification;
 use Tahadudhiya\WebDoctor\services\Permissions;
+use Tahadudhiya\WebDoctor\services\Verifications;
 use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
@@ -20,7 +24,7 @@ use yii\web\NotFoundHttpException;
 use yii\web\Response;
 
 /**
- * Previewing a repair, confirming it, and reading what it did.
+ * Previewing a repair, confirming it, verifying it, and reading what it did.
  *
  * Reading needs what reading an issue needs. Previewing and confirming each need Web Doctor's own
  * permission to run repairs *and* whatever Craft itself requires for the same action, and each is a
@@ -28,6 +32,11 @@ use yii\web\Response;
  * checks them again itself, against Craft's signed-in user, along with everything else — the issue's
  * state, the environment, the prerequisites, the confirmation, whether the preview still holds —
  * and its refusals are shown to the person who asked.
+ *
+ * A repair carried out cleanly is verified straight away, in the same request, and can be verified
+ * again from its page — a retried job, say, can only be told to have worked once it has run.
+ * Verifying needs what carrying a repair out needs from Web Doctor, and nothing from Craft: it only
+ * runs checks, which change nothing.
  */
 class RepairsController extends Controller
 {
@@ -134,10 +143,81 @@ class RepairsController extends Controller
         } elseif ($repair->failure !== null) {
             $this->setFailFlash(Craft::t('web-doctor', 'The repair failed part-way. See below for what is known.'));
         } else {
-            $this->setSuccessFlash(Craft::t('web-doctor', 'Repair carried out. It is not yet verified: run the checks listed to see whether the problem is gone.'));
+            $this->flashVerification($this->verifyNow($repair, $issueId), true);
         }
 
+        return $this->redirect($back . '#verification');
+    }
+
+    /**
+     * Verifies a carried-out repair again: runs its checks and records what they find. Changes
+     * nothing in the installation.
+     */
+    public function actionVerify(): Response
+    {
+        $this->requirePostRequest();
+        $this->requirePermission(Permissions::RUN_REPAIRS);
+
+        $issueId = RequestInput::id($this->request->getRequiredBodyParam('issueId'));
+        $repairId = RequestInput::id($this->request->getRequiredBodyParam('repairId'));
+        $back = UrlHelper::cpUrl(sprintf('web-doctor/issues/%d/repairs/%d#verification', $issueId, $repairId));
+
+        try {
+            $verification = $this->plugin()->getVerifications()->verify($repairId, $issueId);
+        } catch (Refusal $e) {
+            $this->setFailFlash($e->getMessage());
+
+            return $this->redirect($back);
+        } catch (Throwable $e) {
+            SafeException::log('A repair could not be verified', $e);
+            $this->setFailFlash(Craft::t('web-doctor', 'The repair could not be verified. The details are in Craft’s logs.'));
+
+            return $this->redirect($back);
+        }
+
+        $this->flashVerification($verification, false);
+
         return $this->redirect($back);
+    }
+
+    /**
+     * Verifies a repair just carried out. Whatever stops it, the repair stands as carried out and
+     * awaiting verification, which the page says; the reason goes with it.
+     */
+    private function verifyNow(Repair $repair, int $issueId): Verification|string
+    {
+        try {
+            return $this->plugin()->getVerifications()->verify($repair->id, $issueId);
+        } catch (Refusal $e) {
+            return $e->getMessage();
+        } catch (Throwable $e) {
+            SafeException::log('A repair just carried out could not be verified', $e);
+
+            return Craft::t('web-doctor', 'The details are in Craft’s logs.');
+        }
+    }
+
+    /**
+     * Says what a verification concluded. "Carried out" leads only where the repair was carried
+     * out in this request.
+     */
+    private function flashVerification(Verification|string $verification, bool $justCarriedOut): void
+    {
+        if (is_string($verification)) {
+            $this->setSuccessFlash(Craft::t('web-doctor', 'Repair carried out. It is not yet verified: it could not be verified now. {reason}', ['reason' => $verification]));
+
+            return;
+        }
+
+        match ($verification->result) {
+            VerificationStatus::VERIFIED => $this->setSuccessFlash($justCarriedOut
+                ? Craft::t('web-doctor', 'Repair carried out and verified: the check that found the problem ran again and no longer reports it.')
+                : Craft::t('web-doctor', 'Verified: the check that found the problem ran again and no longer reports it.')),
+            VerificationStatus::FAILED => $this->setFailFlash(Craft::t('web-doctor', 'Repair completed, but verification failed: the check that found the problem still reports it. The issue stays open.')),
+            default => $this->setSuccessFlash($justCarriedOut
+                ? Craft::t('web-doctor', 'Repair carried out. It is not yet verified: verification was inconclusive. The reasons are below; verify again once they have changed.')
+                : Craft::t('web-doctor', 'Verification was inconclusive. The reasons are below; verify again once they have changed.')),
+        };
     }
 
     /**
@@ -174,6 +254,18 @@ class RepairsController extends Controller
             $refusal = Craft::t('web-doctor', 'Web Doctor could not establish whether this issue can be repaired. The details are in Craft’s logs.');
         }
 
+        $verifications = [];
+        $verificationsFailure = null;
+        $verifyRefusal = null;
+
+        try {
+            $verifications = $plugin->getVerifications()->forRepair($repair->id);
+            $verifyRefusal = $plugin->getVerifications()->refusal($repair, $issue);
+        } catch (Throwable $e) {
+            SafeException::log('A repair\'s verifications could not be read', $e);
+            $verificationsFailure = Craft::t('web-doctor', 'This repair’s verifications could not be read. The details are in Craft’s logs.');
+        }
+
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
 
         return $this->renderTemplate('web-doctor/_repairs/_detail', [
@@ -189,6 +281,10 @@ class RepairsController extends Controller
             // What a repair read and changed is the installation's internals, as evidence is. Whoever
             // may carry one out has to see what they are confirming.
             'canViewDetails' => $canRun || $plugin->getPermissions()->canViewEvidence(),
+            'verifications' => $verifications,
+            'verificationsFailure' => $verificationsFailure,
+            'verifyRefusal' => $verifyRefusal,
+            'verificationLimit' => Verifications::HISTORY_LIMIT,
         ]);
     }
 

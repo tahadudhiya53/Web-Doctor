@@ -13,6 +13,7 @@ use Tahadudhiya\WebDoctor\records\IssueEventRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\records\RepairRecord;
 use Tahadudhiya\WebDoctor\records\RootCauseRecord;
+use Tahadudhiya\WebDoctor\records\VerificationRecord;
 
 /**
  * Creates the tables Web Doctor owns.
@@ -34,6 +35,7 @@ class Install extends Migration
         $this->createErrorGroupsTable();
         $this->createErrorSourcesTable();
         $this->createRepairsTable();
+        $this->createVerificationsTable();
 
         return true;
     }
@@ -42,7 +44,9 @@ class Install extends Migration
     {
         // Whatever points at an issue first: dropping the target of a foreign key before the key
         // itself leaves the table that holds it unusable. Steps and root causes point at
-        // investigations as well, and an error's sources at both the error and an issue.
+        // investigations as well, an error's sources at both the error and an issue, and a
+        // verification at its repair.
+        $this->dropTableIfExists(VerificationRecord::TABLE);
         $this->dropTableIfExists(RepairRecord::TABLE);
         $this->dropTableIfExists(ErrorSourceRecord::TABLE);
         $this->dropTableIfExists(ErrorGroupRecord::TABLE);
@@ -443,7 +447,8 @@ class Install extends Migration
             'risk' => $this->string(16)->notNull(),
             'riskReason' => $this->text(),
             'status' => $this->string(16)->notNull(),
-            'verificationStatus' => $this->string(16)->notNull(),
+            // The latest verification's answer; `verification_failed` is longer than a status.
+            'verificationStatus' => $this->string(32)->notNull(),
             'verifyWith' => $this->text(),
             'verificationNote' => $this->text(),
             'environment' => $this->string(255)->notNull(),
@@ -491,5 +496,56 @@ class Install extends Migration
         $this->addForeignKey(null, RepairRecord::TABLE, ['siteId'], Table::SITES, ['id'], 'SET NULL', null);
         $this->addForeignKey(null, RepairRecord::TABLE, ['previewedBy'], Table::USERS, ['id'], 'SET NULL', null);
         $this->addForeignKey(null, RepairRecord::TABLE, ['executedBy'], Table::USERS, ['id'], 'SET NULL', null);
+    }
+
+    /**
+     * One row per verification of a repair: which checks ran and what each said, what the repair
+     * should have left true, the evidence before and after, the errors met, and the answer.
+     */
+    private function createVerificationsTable(): void
+    {
+        $this->createTable(VerificationRecord::TABLE, [
+            'id' => $this->primaryKey(),
+            'repairId' => $this->integer()->notNull(),
+            'issueId' => $this->integer(),
+            // The check and the repair action as they were verified, so the row still reads after
+            // either has changed.
+            'diagnosticId' => $this->string(100)->notNull(),
+            'action' => $this->string(100)->notNull(),
+            'environment' => $this->string(255)->notNull(),
+            'siteId' => $this->integer(),
+            // The run the checks made, which is the run the Issue Center records their findings under.
+            'runId' => $this->string(36)->notNull(),
+            'result' => $this->string(32)->notNull(),
+            'failures' => $this->text(),
+            // Each check as it answered, the conditions as they were read, the evidence before and
+            // after, and the errors: redacted and bounded as evidence is, so medium text holds them.
+            'checks' => $this->mediumText(),
+            'conditions' => $this->text(),
+            'originalState' => $this->mediumText(),
+            'currentState' => $this->mediumText(),
+            'comparison' => $this->text(),
+            'errors' => $this->text(),
+            'verifiedBy' => $this->integer(),
+            'startedAt' => $this->dateTime()->notNull(),
+            'finishedAt' => $this->dateTime()->notNull(),
+            'durationMs' => $this->float(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+            'uid' => $this->uid(),
+        ]);
+
+        // A repair's verifications, newest first, and their pruning.
+        $this->createIndex(null, VerificationRecord::TABLE, ['repairId', 'startedAt']);
+        $this->createIndex(null, VerificationRecord::TABLE, ['issueId']);
+        $this->createIndex(null, VerificationRecord::TABLE, ['siteId']);
+
+        // A verification says something only about its repair, so it goes with it; repairs are
+        // never deleted by Web Doctor, so in practice it stays. It outlives its issue as the repair
+        // does.
+        $this->addForeignKey(null, VerificationRecord::TABLE, ['repairId'], RepairRecord::TABLE, ['id'], 'CASCADE', null);
+        $this->addForeignKey(null, VerificationRecord::TABLE, ['issueId'], IssueRecord::TABLE, ['id'], 'SET NULL', null);
+        $this->addForeignKey(null, VerificationRecord::TABLE, ['siteId'], Table::SITES, ['id'], 'SET NULL', null);
+        $this->addForeignKey(null, VerificationRecord::TABLE, ['verifiedBy'], Table::USERS, ['id'], 'SET NULL', null);
     }
 }

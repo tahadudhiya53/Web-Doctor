@@ -12,6 +12,7 @@ use Tahadudhiya\WebDoctor\records\IssueEventRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\records\RepairRecord;
 use Tahadudhiya\WebDoctor\records\RootCauseRecord;
+use Tahadudhiya\WebDoctor\records\VerificationRecord;
 
 /**
  * Everything Web Doctor keeps, reduced to one comparable value per table: how many rows, and a
@@ -27,7 +28,7 @@ final class WebDoctorTables
     {
         $out = [];
 
-        foreach ([IssueRecord::TABLE, IssueEventRecord::TABLE, EvidenceRecord::TABLE, InvestigationRecord::TABLE, InvestigationStepRecord::TABLE, RootCauseRecord::TABLE, ErrorGroupRecord::TABLE, ErrorSourceRecord::TABLE, RepairRecord::TABLE] as $table) {
+        foreach ([IssueRecord::TABLE, IssueEventRecord::TABLE, EvidenceRecord::TABLE, InvestigationRecord::TABLE, InvestigationStepRecord::TABLE, RootCauseRecord::TABLE, ErrorGroupRecord::TABLE, ErrorSourceRecord::TABLE, RepairRecord::TABLE, VerificationRecord::TABLE] as $table) {
             $rows = (new \craft\db\Query())->from($table)->orderBy(['id' => SORT_ASC])->all(Craft::$app->getDb());
             $out[$table] = ['rows' => count($rows), 'digest' => md5((string)json_encode($rows))];
         }

@@ -35,6 +35,9 @@ enum IssueEventType: string
     /** The repair finished — cleanly or not — and the issue went back to where it stood. */
     case REPAIR_FINISHED = 'repairFinished';
 
+    /** A repair of it was verified, whatever the verification concluded. */
+    case REPAIR_VERIFIED = 'repairVerified';
+
     public function label(): string
     {
         return match ($this) {
@@ -45,6 +48,7 @@ enum IssueEventType: string
             self::RESOLVED => Craft::t('web-doctor', 'Observed clear'),
             self::REPAIR_STARTED => Craft::t('web-doctor', 'Repair started'),
             self::REPAIR_FINISHED => Craft::t('web-doctor', 'Repair finished'),
+            self::REPAIR_VERIFIED => Craft::t('web-doctor', 'Repair verification'),
         };
     }
 

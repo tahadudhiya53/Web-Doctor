@@ -20,6 +20,7 @@ use Tahadudhiya\WebDoctor\models\RecommendationCase;
 use Tahadudhiya\WebDoctor\models\RepairContext;
 use Tahadudhiya\WebDoctor\models\RepairReport;
 use Tahadudhiya\WebDoctor\rules\RootCauseRules;
+use Tahadudhiya\WebDoctor\verifications\RetriedJobsSettled;
 use Throwable;
 
 /**
@@ -183,6 +184,8 @@ class RetryFailedJobs extends RepairAction
             $stillFailedNow = (bool)QueueDiagnostic::onQueueDb($queue, static fn($db) => QueueDiagnostic::jobs($queue)->andWhere(['id' => $id, 'fail' => true])->exists($db));
 
             if ($stillFailedNow) {
+                // Noted first, so a worker that picks the job up at once is still seen to run it.
+                RetriedJobsSettled::watch($queue, $id);
                 $queue->retry((string)$id);
                 $retriedIds[] = $id;
             }

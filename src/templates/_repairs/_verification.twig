@@ -1,0 +1,137 @@
+{#
+    One verification of a repair: its answer and every reason it is not a clean one, which checks ran
+    and what each said, what the repair should have left true, the evidence before and after, and the
+    errors the checks met. What evidence contains, and the conditions' details, are the installation's
+    internals, shown only to somebody who may carry out repairs or see evidence.
+#}
+
+{% macro verification(v, issue, canViewDetails) %}
+    {% import "web-doctor/_macros" as shared %}
+    {% import "web-doctor/_investigations/_investigation" as inv %}
+
+    <section class="wd-verification" id="verification-{{ v.id }}">
+        <h3 class="wd-recommendation__title">
+            <span class="wd-pill wd-pill--verification-{{ v.result.value }}">{{ v.result.label() }}</span>
+            {{ v.finishedAt|datetime('short') }}
+        </h3>
+
+        {% if v.result.value == 'verification_failed' %}
+            <p class="error"><strong>{{ "Repair completed, but verification failed."|t('web-doctor') }}</strong></p>
+        {% endif %}
+        <p>{{ v.summary() }}</p>
+
+        {% if v.failures|length %}
+            <ul class="wd-plan__list wd-verification__reasons">
+                {% for reason in v.failures %}
+                    <li>{{ shared.text(reason) }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <h4 class="wd-recommendation__heading">{{ "Checks run"|t('web-doctor') }}</h4>
+        <div class="wd-table-scroll">
+        <table class="data fullwidth wd-verification__checks">
+            <thead>
+                <tr>
+                    <th scope="col">{{ "Check"|t('web-doctor') }}</th>
+                    <th scope="col">{{ "Why"|t('web-doctor') }}</th>
+                    <th scope="col">{{ "Result"|t('web-doctor') }}</th>
+                    <th scope="col">{{ "What it said"|t('web-doctor') }}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for check in v.checks %}
+                    <tr>
+                        <td>{{ shared.text(check.name) }}<div class="light"><code>{{ check.diagnosticId }}</code></div></td>
+                        <td><strong>{{ v.roleLabel(check.role) }}</strong><div class="light">{{ shared.text(check.reason) }}</div></td>
+                        <td class="wd-col-narrow">
+                            {% if check.status %}
+                                <span class="wd-pill wd-pill--{{ check.status.value }}">{{ check.status.label() }}</span>
+                            {% else %}
+                                <span class="wd-pill wd-pill--skipped">{{ "Not run"|t('web-doctor') }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {{ shared.text(check.summary) }}
+                            {% if check.persists %}
+                                <div class="error">{{ "Still reports the problem being verified."|t('web-doctor') }}</div>
+                            {% elseif check.appeared is same as(true) %}
+                                <div class="warning">{{ "A problem that appeared since the repair."|t('web-doctor') }}</div>
+                            {% elseif check.appeared is same as(false) %}
+                                <div class="light">{{ "A problem already reported before the repair."|t('web-doctor') }}</div>
+                            {% endif %}
+                            {% if check.issueId and check.issueId != issue.id %}
+                                <div><a href="{{ cpUrl('web-doctor/issues/' ~ check.issueId) }}">{{ 'Issue #{id}'|t('web-doctor', { id: check.issueId }) }}</a></div>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+
+        {% if v.conditions|length %}
+            <h4 class="wd-recommendation__heading">{{ "What the repair should have left true"|t('web-doctor') }}</h4>
+            <ul class="wd-plan__list wd-prerequisites">
+                {% for c in v.conditions %}
+                    <li>
+                        <span class="wd-pill wd-pill--condition-{{ c.state }}">{{ c.label() }}</span>
+                        {{ shared.text(c.description) }}
+                        {% if c.detail and canViewDetails %}<div class="light">{{ shared.text(c.detail) }}</div>{% endif %}
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <h4 class="wd-recommendation__heading">{{ "Evidence before and after"|t('web-doctor') }}</h4>
+        <p class="light">{{ "The finding the issue last recorded before these checks ran, compared with what the check that found the problem recorded now."|t('web-doctor') }}</p>
+        <dl class="wd-meta">
+            <div><dt>{{ "Still the same"|t('web-doctor') }}</dt><dd>{{ v.comparison.persisting|length }}</dd></div>
+            <div><dt>{{ "No longer recorded"|t('web-doctor') }}</dt><dd>{{ v.comparison.gone|length }}</dd></div>
+            <div><dt>{{ "Newly recorded"|t('web-doctor') }}</dt><dd>{{ v.comparison.appeared|length }}</dd></div>
+        </dl>
+        {% for heading, facts in { ("No longer recorded"|t('web-doctor')): v.comparison.gone, ("Still the same"|t('web-doctor')): v.comparison.persisting, ("Newly recorded"|t('web-doctor')): v.comparison.appeared } %}
+            {% if facts|length %}
+                <p class="wd-verification__facts"><strong>{{ heading }}:</strong>
+                    {% for fact in facts %}{{ shared.text(fact.label) }}{{ not loop.last ? '; ' }}{% endfor %}
+                </p>
+            {% endif %}
+        {% endfor %}
+
+        {% if canViewDetails %}
+            {% if v.originalState|length %}
+                <details class="wd-verification__state">
+                    <summary>{{ "Before: {count, plural, =1{one piece} other{# pieces}} of evidence"|t('web-doctor', { count: v.originalCount }) }}</summary>
+                    {% for item in v.evidenceItems(v.originalState) %}{{ inv.fact(item, true) }}{% endfor %}
+                    {% if v.originalCount > v.originalState|length %}<p class="light">{{ "{count, plural, =1{One more is} other{# more are}} not kept."|t('web-doctor', { count: v.originalCount - v.originalState|length }) }}</p>{% endif %}
+                </details>
+            {% endif %}
+            {% if v.currentState|length %}
+                <details class="wd-verification__state">
+                    <summary>{{ "After: {count, plural, =1{one piece} other{# pieces}} of evidence"|t('web-doctor', { count: v.currentCount }) }}</summary>
+                    {% for item in v.evidenceItems(v.currentState) %}{{ inv.fact(item, true) }}{% endfor %}
+                    {% if v.currentCount > v.currentState|length %}<p class="light">{{ "{count, plural, =1{One more is} other{# more are}} not kept."|t('web-doctor', { count: v.currentCount - v.currentState|length }) }}</p>{% endif %}
+                </details>
+            {% endif %}
+        {% else %}
+            <p class="light">{{ "What the evidence contains needs the “Run repairs” or “View evidence” permission."|t('web-doctor') }}</p>
+        {% endif %}
+
+        <h4 class="wd-recommendation__heading">{{ "Errors"|t('web-doctor') }}</h4>
+        {% if v.errors|length %}
+            <ul class="wd-plan__list">
+                {% for error in v.errors %}
+                    <li>
+                        {% if error.new is same as(true) %}<span class="wd-pill wd-pill--fail">{{ "New since the repair"|t('web-doctor') }}</span>
+                        {% elseif error.new is same as(false) %}<span class="wd-pill wd-pill--skipped">{{ "Seen before the repair"|t('web-doctor') }}</span>
+                        {% else %}<span class="wd-pill wd-pill--unknown">{{ "Cannot tell"|t('web-doctor') }}</span>{% endif %}
+                        {% if error.groupId %}<a href="{{ cpUrl('web-doctor/errors/' ~ error.groupId) }}">{{ shared.text(error.exceptionClass) }}</a>{% else %}{{ shared.text(error.exceptionClass) }}{% endif %}
+                        <span class="light">— {% for id in error.diagnosticIds %}<code>{{ id }}</code>{{ not loop.last ? ', ' }}{% endfor %}</span>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p class="light">{{ "The checks ran into no errors."|t('web-doctor') }}</p>
+        {% endif %}
+    </section>
+{% endmacro %}

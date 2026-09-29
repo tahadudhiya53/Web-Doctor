@@ -1,13 +1,14 @@
 {#
     One repair, kept apart from the control panel shell for the same reason the issue page is: what
     it would change, what has to be true first, the confirmation, what it did, and whether anything
-    has verified that it worked. What it read and changed is the installation's internals, shown to
+    has verified that it worked, with every verification of it. What it read and changed is the installation's internals, shown to
     somebody who may carry out repairs or see evidence; everybody who may read the issue sees what
     kind of repair it was and how it went.
 #}
 
 {% import "web-doctor/_macros" as shared %}
 {% import "web-doctor/_investigations/_investigation" as inv %}
+{% import "web-doctor/_repairs/_verification" as ver %}
 
 <p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '#repairs') }}">&larr; {{ shared.text(issue.title) }}</a></p>
 
@@ -204,15 +205,54 @@
 <div class="pane" id="verification">
     <h2>{{ "Verification"|t('web-doctor') }}</h2>
     {% if repair.status.wasExecuted() %}
+        {% if repair.verificationStatus.value == 'verification_failed' %}
+            <p class="error"><strong>{{ "Repair completed, but verification failed."|t('web-doctor') }}</strong></p>
+        {% endif %}
         <p><span class="wd-pill wd-pill--verification-{{ repair.verificationStatus.value }}">{{ repair.verificationStatus.label() }}</span> {{ repair.verificationStatus.explanation() }}</p>
     {% else %}
         <p class="light">{{ "Nothing has been carried out yet. Once it has, this is how to tell whether it worked."|t('web-doctor') }}</p>
     {% endif %}
     <p>{{ shared.text(repair.verificationNote) }}</p>
     <p class="light">
-        {{ "Run these checks again:"|t('web-doctor') }}
-        {% for id in repair.verifyWith %}<code>{{ id }}</code>{{ not loop.last ? ', ' }}{% endfor %}.
-        {{ "Investigating the issue runs the check that found the problem again, alongside the checks related to it."|t('web-doctor') }}
-        <a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '#investigate') }}">{{ "Investigate this issue"|t('web-doctor') }}</a>
+        {{ "Verifying runs these checks again, first the one that found the problem:"|t('web-doctor') }}
+        {% for id in repair.verifyWith %}<code>{{ id }}</code>{{ not loop.last ? ', ' }}{% endfor %}{{ "; then the rest of the problem’s area. It also reads what this repair should have left true, compares the evidence before and after, and looks for errors and problems that appeared since the repair."|t('web-doctor') }}
     </p>
+
+    {% if verificationsFailure %}
+        <p class="error">{{ verificationsFailure }}</p>
+    {% elseif repair.status.value == 'succeeded' and canRunRepairs %}
+        {% if verifyRefusal %}
+            <p class="warning">{{ shared.text(verifyRefusal) }}</p>
+        {% else %}
+            <form method="post" accept-charset="UTF-8" class="wd-toolbar" data-wd-run-form>
+                {{ csrfInput() }}
+                {{ actionInput('web-doctor/repairs/verify') }}
+                <input type="hidden" name="issueId" value="{{ issue.id }}">
+                <input type="hidden" name="repairId" value="{{ repair.id }}">
+
+                <button type="submit" class="btn">{{ verifications|length ? "Verify again"|t('web-doctor') : "Verify now"|t('web-doctor') }}</button>
+
+                <p class="wd-run-status" role="status" aria-live="polite" data-wd-run-status hidden>
+                    {{ "Running the checks… this page will reload when they finish."|t('web-doctor') }}
+                </p>
+                <p class="light wd-toolbar__note">{{ "Changes nothing in the installation. Only a verified repair resolves the issue; a failed verification opens it again, and one that cannot tell leaves it where it stands."|t('web-doctor') }}</p>
+            </form>
+        {% endif %}
+    {% elseif repair.status.value == 'succeeded' %}
+        <p class="light">{{ "Verifying a repair needs the “Run repairs” permission."|t('web-doctor') }}</p>
+    {% endif %}
+
+    {% if not repair.status.wasExecuted() %}
+        <p class="light"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '#investigate') }}">{{ "Investigate this issue"|t('web-doctor') }}</a></p>
+    {% endif %}
+
+    {% if verifications|length %}
+        <h3 class="wd-plan__heading">{{ "Verifications of this repair"|t('web-doctor') }}</h3>
+        {% for v in verifications %}
+            {{ ver.verification(v, issue, canViewDetails) }}
+        {% endfor %}
+        {% if verifications|length >= verificationLimit %}
+            <p class="light">{{ "Showing the most recent {count}."|t('web-doctor', { count: verificationLimit }) }}</p>
+        {% endif %}
+    {% endif %}
 </div>

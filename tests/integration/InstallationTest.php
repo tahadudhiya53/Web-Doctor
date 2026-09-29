@@ -260,7 +260,7 @@ class InstallationTest extends TestCase
         // whoever's installation these tests are running in.
         $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
 
-        foreach (['IssueRecord', 'IssueEventRecord', 'EvidenceRecord', 'InvestigationRecord', 'InvestigationStepRecord', 'RootCauseRecord', 'ErrorGroupRecord', 'ErrorSourceRecord', 'RepairRecord'] as $record) {
+        foreach (['IssueRecord', 'IssueEventRecord', 'EvidenceRecord', 'InvestigationRecord', 'InvestigationStepRecord', 'RootCauseRecord', 'ErrorGroupRecord', 'ErrorSourceRecord', 'RepairRecord', 'VerificationRecord'] as $record) {
             self::assertMatchesRegularExpression(
                 sprintf('/createTable\(\s*%s::TABLE\b/', $record),
                 $source,
@@ -290,6 +290,12 @@ class InstallationTest extends TestCase
         self::assertFalse($schema->columns['definitionFingerprint']->allowNull);
         self::assertFalse($schema->columns['fingerprint']->allowNull);
 
+        // Every answer a verification can give has to fit where the repair keeps the latest one.
+        self::assertGreaterThanOrEqual(
+            max(array_map('strlen', \Tahadudhiya\WebDoctor\enums\VerificationStatus::values())),
+            $schema->columns['verificationStatus']->size,
+        );
+
         $unique = $db->getSchema()->findUniqueIndexes($schema);
         self::assertContains(['lockKey'], array_values($unique));
     }
@@ -301,7 +307,7 @@ class InstallationTest extends TestCase
         // removed. Read from the migration because deleting a real site is not a test's to do.
         $source = (string)file_get_contents(dirname(__DIR__, 2) . '/src/migrations/Install.php');
 
-        foreach (['IssueRecord', 'EvidenceRecord', 'InvestigationRecord', 'ErrorGroupRecord', 'RepairRecord'] as $record) {
+        foreach (['IssueRecord', 'EvidenceRecord', 'InvestigationRecord', 'ErrorGroupRecord', 'RepairRecord', 'VerificationRecord'] as $record) {
             self::assertMatchesRegularExpression(
                 "/addForeignKey\\([^;]*{$record}::TABLE,\\s*\\['siteId'\\][^;]*'SET NULL'/s",
                 $source,
@@ -365,6 +371,12 @@ class InstallationTest extends TestCase
             'webdoctor_repairs.siteId' => 'SET NULL',
             // A cause is what an investigation concluded, so it goes with it.
             'webdoctor_root_causes.investigationId' => 'CASCADE',
+            // A verification says something only about its repair; like the repair, it outlives
+            // the issue.
+            'webdoctor_verifications.issueId' => 'SET NULL',
+            'webdoctor_verifications.repairId' => 'CASCADE',
+            'webdoctor_verifications.siteId' => 'SET NULL',
+            'webdoctor_verifications.verifiedBy' => 'SET NULL',
         ], $rules);
     }
 
@@ -387,6 +399,7 @@ class InstallationTest extends TestCase
                 \Tahadudhiya\WebDoctor\records\ErrorSourceRecord::TABLE,
                 \Tahadudhiya\WebDoctor\records\RootCauseRecord::TABLE,
                 \Tahadudhiya\WebDoctor\records\RepairRecord::TABLE,
+                \Tahadudhiya\WebDoctor\records\VerificationRecord::TABLE,
             ],
         );
 

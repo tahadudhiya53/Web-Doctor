@@ -326,6 +326,42 @@ class Repairs extends Component
         return $out;
     }
 
+    /**
+     * The repair of an issue carried out most recently, cleanly or not. A later one has changed
+     * things since any earlier one, so only this one's result can still be verified.
+     */
+    public function latestCarriedOut(int $issueId, bool $locking = false): ?Repair
+    {
+        $query = RepairRecord::find()
+            ->where(['issueId' => $issueId, 'status' => [RepairStatus::SUCCEEDED->value, RepairStatus::FAILED->value]])
+            ->orderBy(['finishedAt' => SORT_DESC, 'id' => SORT_DESC])
+            ->limit(1);
+
+        // Inside a transaction deciding something on it, a locking read: the latest committed row,
+        // not the snapshot the transaction began with, and held until the decision is written.
+        $record = $locking ? (Savepoint::committed($query)[0] ?? null) : $query->one();
+
+        return $record instanceof RepairRecord ? Repair::fromRecord($record) : null;
+    }
+
+    /**
+     * Records a verification's answer against the repair it verified. Only a repair that was carried
+     * out cleanly has one: the condition is part of the write, so no other repair can be marked.
+     *
+     * @throws InvalidArgumentException for a status that is not a verification's answer.
+     */
+    public function recordVerification(int $repairId, VerificationStatus $result): void
+    {
+        if (!$result->isResult()) {
+            throw new InvalidArgumentException(sprintf('"%s" is not a verification\'s answer.', $result->value));
+        }
+
+        Craft::$app->getDb()->createCommand()->update(RepairRecord::TABLE, [
+            'verificationStatus' => $result->value,
+            'dateUpdated' => $this->forDb(new DateTimeImmutable()),
+        ], ['id' => $repairId, 'status' => RepairStatus::SUCCEEDED->value])->execute();
+    }
+
     public function environment(): string
     {
         return $this->environment ?? DiagnosticContext::currentEnvironment();
@@ -896,7 +932,7 @@ class Repairs extends Component
     /**
      * Whether a repair of this issue is under way and recent enough not to be read as stopped.
      */
-    private function isBeingRepaired(int $issueId): bool
+    public function isBeingRepaired(int $issueId): bool
     {
         foreach (RepairRecord::find()->where(['issueId' => $issueId, 'status' => RepairStatus::RUNNING->value])->all() as $record) {
             if ($record instanceof RepairRecord && !Repair::fromRecord($record)->hasStopped()) {

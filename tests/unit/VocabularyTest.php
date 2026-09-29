@@ -165,18 +165,24 @@ class VocabularyTest extends TestCase
     public function testARepairSaysWhetherItRanAndNeverWhetherItWorked(): void
     {
         // Whether a repair worked is verification's answer, so nothing in the repair's own status
-        // says "fixed", and the only verification state a finished repair can reach by itself is
-        // "awaiting". Verified and verification-failed arrive with whatever verifies.
+        // says "fixed". A verification answers with the vocabulary's two results, or says it could
+        // not tell — and only those three are a verification's to give.
         self::assertSame(['previewed', 'running', 'succeeded', 'failed', 'superseded'], RepairStatus::values());
         self::assertSame(
             [RepairStatus::SUCCEEDED, RepairStatus::FAILED],
             array_values(array_filter(RepairStatus::cases(), static fn(RepairStatus $s): bool => $s->wasExecuted())),
         );
-        self::assertSame(['none', 'pending'], VerificationStatus::values());
+        self::assertSame(['none', 'pending', 'verified', 'verification_failed', 'inconclusive'], VerificationStatus::values());
+        self::assertSame(
+            [VerificationStatus::VERIFIED, VerificationStatus::FAILED, VerificationStatus::INCONCLUSIVE],
+            array_values(array_filter(VerificationStatus::cases(), static fn(VerificationStatus $s): bool => $s->isResult())),
+        );
 
-        foreach (VerificationStatus::cases() as $status) {
-            self::assertStringContainsString('run', strtolower($status->explanation()));
-        }
+        // A failed verification says in as many words that the repair was completed and the problem
+        // is still there, so it is never read as the repair not having run.
+        self::assertStringContainsString('completed', VerificationStatus::FAILED->explanation());
+        self::assertStringContainsString('still reports it', VerificationStatus::FAILED->explanation());
+        self::assertStringContainsString('stays open', VerificationStatus::FAILED->explanation());
     }
 
     public function testEveryWordInTheVocabularyIsLabelledAndSpeltOnce(): void
@@ -293,6 +299,10 @@ class VocabularyTest extends TestCase
 
         self::assertStringContainsString('no longer reports', $observed);
         self::assertStringContainsString('not a verification', $observed);
+
+        // The stronger claim says what earned it: a repair verified, not merely a check gone quiet.
+        self::assertSame(IssueResolution::VERIFIED, IssueResolution::tryFrom('verified'));
+        self::assertStringContainsString('repair of this issue was verified', IssueResolution::VERIFIED->explanation());
     }
 
     // --- How an investigation went.

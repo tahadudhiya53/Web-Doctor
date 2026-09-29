@@ -41,6 +41,10 @@ history rather than two reports.
   page offers a repair. Nothing changes until you have seen exactly what would change and confirmed
   it; everything is read again before it runs; and a repair that ran does not resolve the issue.
   There is no "fix everything".
+- **Repairs verified, not assumed** — once a repair has run, Web Doctor runs the check that found
+  the problem again, with the checks around it, reads whether what the repair did still holds, and
+  compares the evidence before and after. The answer is Verified, Verification failed ("repair
+  completed but verification failed") or Inconclusive, with every reason given.
 - **Errors grouped rather than listed** — every exception a check runs into is recognised by its
   type, its message with the values that change between occurrences taken out, where it was thrown
   and the exceptions behind it, so the same error seen again is counted against one group, with
@@ -151,7 +155,7 @@ Under a **Web Doctor** heading in a user group's permissions:
 | Manage issues | `webDoctor:manageIssues` | Changing where an issue stands |
 | View evidence | `webDoctor:viewEvidence` | Reading what an issue's evidence contains, and what an error said and where it was thrown |
 | Investigate issues | `webDoctor:investigateIssues` | Starting an investigation of an issue, or running a recipe |
-| Run repairs | `webDoctor:runRepairs` | Previewing and carrying out a repair of an issue |
+| Run repairs | `webDoctor:runRepairs` | Previewing, carrying out and verifying a repair of an issue |
 
 A non-admin also needs Craft's own **Access Web Doctor** permission (under "Access the control
 panel") to reach the section at all.
@@ -168,6 +172,7 @@ they do elsewhere in Craft.
 "Run repairs" is the only permission that lets somebody change the installation, and it is granted
 by nothing else. A repair also needs whatever Craft itself requires for the same action: retrying
 queue jobs needs access to Craft's Queue Manager utility, exactly as retrying them in Craft does.
+Verifying a repair needs "Run repairs" and nothing from Craft, because it only runs checks.
 
 ## Running checks from code
 
@@ -320,13 +325,14 @@ split one problem's history in two.
 | Ignored | A person, with a reason | Seen, and deliberately not acted on for now |
 | Won't fix | A person, with a reason | Seen, and deliberately never going to be acted on |
 | Resolved | Web Doctor only | The check that raised it ran again and no longer reports it |
-| Repairing | Nothing yet | Reserved for repairs, which do not exist |
+| Repairing | Web Doctor only | A repair of it is being carried out |
 
 **Nobody can mark an issue resolved.** The control panel offers no such control and the service
 refuses the request if one is made. An issue resolves when a later run of the same check reaches a
 conclusion that is not the problem, and the run that established that is recorded against it. The
 detail page says in as many words that this is an observation and not a verification: nothing has
-confirmed that the underlying cause was addressed.
+confirmed that the underlying cause was addressed. The one stronger claim is **Repair verified**,
+which an issue's resolution says only when a repair of it was verified (see Verifying a repair).
 
 Resolution also takes an *answer*, never the absence of one. A check that errored, was skipped, or
 could not tell resolves nothing — it established neither that the problem is there nor that it has
@@ -585,6 +591,44 @@ that found the problem runs again and no longer reports it — the repair's page
 run. A repair that fails part-way is recorded as failed, with its kind of error (never its message)
 and a note that it may have made some of its changes.
 
+### Verifying a repair
+
+A repair carried out cleanly is verified straight away, in the same request, and its page offers
+**Verify again** to anybody with "Run repairs" — a retried job, for one, can only be told to have
+worked once whatever runs the queue has run it. Verifying:
+
+- runs the check that found the problem, then the other checks the repair names, then the rest of
+  the problem's area — each once, in that order, with the reason shown beside it;
+- reads what that particular repair should have left true: that the directories it created are
+  still there, where it created them, and writable; or that the jobs it retried have run and none
+  failed again (see below);
+- compares the evidence the issue last recorded with what the check records now — what is still
+  the same, what is no longer recorded, and what is new — by what each fact says, never by when it
+  was seen;
+- looks for problems and errors that appeared since the repair started.
+
+Other issues its checks find or clear are recorded as any run's are. The issue being verified is
+settled by the answer alone, which is one of three:
+
+| Answer | When |
+|---|---|
+| Verified | The check that found the problem answered and reports nothing, with evidence for its answer; every other check answered; everything the repair should have left true holds; and nothing new appeared since the repair. The issue is resolved as **Repair verified**. |
+| Verification failed | The check that found the problem still reports it, or something the repair should have left true conclusively does not hold. The page says **Repair completed, but verification failed**, and the issue stays open — or opens again. |
+| Inconclusive | Anything short of both, each reason listed: a check that could not answer or is not registered here; no evidence to compare; a retried job that has not run, or whose run cannot be confirmed; no verification action for that kind of repair; a problem or error that appeared since the repair; findings that could not be recorded; or the issue changing while it was verified. It leaves the issue where it stands. |
+
+A retried job counts as having run only on Craft's word: Craft's queue signals, after a job's own
+code finished without an error, that it ran, and Web Doctor notes that in Craft's cache for jobs a
+repair retried. A job that has simply left the queue table is not taken to have run — releasing a
+job by hand removes it too — so without that note, or if the cache was cleared, the verification is
+inconclusive.
+
+Only the most recent repair carried out for an issue, cleanly, in the environment and on the site it
+was carried out for, can be verified, and one issue is verified at a time. Verifying changes nothing
+in the installation. Each verification is written to Craft's log and kept in
+`webdoctor_verifications` — the checks and what each said, the conditions as read, up to ten pieces
+of evidence before and after with the comparison, and the errors met — the most recent 20 per
+repair. What evidence contains and the conditions' details need "Run repairs" or "View evidence".
+
 A repair's ending, its lock being released and its issue being put back are written together, once.
 If that cannot be written, none of it is: the repair is left "Being carried out", holding its place,
 and after an hour it is read as stopped — the next preview or confirmation ends it as "Stopped
@@ -646,8 +690,8 @@ them, up to the limit, and says how many more it did not record.
 Issues, their history and their evidence live in three tables: `webdoctor_issues`,
 `webdoctor_issue_events` and `webdoctor_evidence`. Investigations and their timelines live in
 `webdoctor_investigations` and `webdoctor_investigation_steps`, and the causes each weighed in
-`webdoctor_root_causes`. Repairs live in `webdoctor_repairs`, and are kept when their issue is
-deleted. Evidence and investigations are deleted with the issue they support, and
+`webdoctor_root_causes`. Repairs live in `webdoctor_repairs`, and their verifications in
+`webdoctor_verifications`; both are kept when their issue is deleted. Evidence and investigations are deleted with the issue they support, and
 causes with their investigation. Errors live in `webdoctor_error_groups`, with the checks that
 ran into each in `webdoctor_error_sources`; an error outlives the issues it relates to, and deleting
 an issue only drops the link.
@@ -700,8 +744,9 @@ subtract nothing, and the floor is 0.
   a large site holds the request open.
 - **Only a control panel run records issues.** `webdoctor/status` reports the installation; it
   does not run checks, so nothing on the command line updates the Issue Center yet.
-- **An issue's resolution is an observation, not a verification.** Web Doctor can say the check
-  stopped reporting the problem. It cannot yet say the cause was addressed.
+- **An issue's resolution is an observation unless a repair of it was verified.** Without a
+  verified repair, Web Doctor can say the check stopped reporting the problem, not that the cause
+  was addressed.
 - **A check that finds several problems at once and does not distinguish them** — through the
   affected component or plugin — gets one issue covering all of them, with the current detail in
   its latest result.
@@ -716,10 +761,16 @@ subtract nothing, and the floor is 0.
 - **Investigations do not read logs.** Where logs would help, the plan says so.
 - **Recommendations cover Web Doctor's own checks.** A check contributed by another plugin gets
   none. They are not stored, so there is no record of what was recommended when.
-- **Two repairs, and no verification yet.** Web Doctor can create missing storage directories and
-  retry failed queue jobs. A carried-out repair stays "Awaiting verification": nothing re-runs the
-  checks for you afterwards, and nothing marks it verified. Repairs run synchronously, in the
-  request that confirms them, and other plugins cannot yet contribute repairs.
+- **Two repairs.** Web Doctor can create missing storage directories and retry failed queue jobs.
+  Repairs and their verifications run synchronously, in the request that asks for them, and other
+  plugins cannot yet contribute repairs or verification actions.
+- **Verification is asked for, not scheduled.** A retried job's verification stays inconclusive
+  until somebody verifies again after the queue has run it; nothing verifies it later on its own.
+- **"Appeared since the repair" is read to the second.** A problem or error first seen in the same
+  second the repair started counts as new, so the verification is inconclusive rather than verified.
+- **A retried job's run is known only where Craft's cache is shared.** A queue worker using a
+  different cache from the control panel — a separate server with its own file cache — leaves no
+  note the control panel can read, so those retries stay inconclusive. Notes last seven days.
 - **A preview is confirmed in the language it was made in.** What a repair says about itself is part
   of what you confirm, so a preview made in one control panel language and confirmed in another is
   refused and has to be made again. Web Doctor ships in English only.

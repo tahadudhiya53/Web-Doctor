@@ -7,6 +7,7 @@ use craft\base\Model;
 use craft\base\Plugin;
 use craft\console\Application as ConsoleApplication;
 use craft\events\RegisterUrlRulesEvent;
+use craft\queue\Queue;
 use craft\web\UrlManager;
 use Tahadudhiya\WebDoctor\console\controllers\WebDoctorController;
 use Tahadudhiya\WebDoctor\models\Settings;
@@ -23,6 +24,9 @@ use Tahadudhiya\WebDoctor\services\RepairActions;
 use Tahadudhiya\WebDoctor\services\Repairs;
 use Tahadudhiya\WebDoctor\services\RootCauses;
 use Tahadudhiya\WebDoctor\services\Runs;
+use Tahadudhiya\WebDoctor\services\VerificationActions;
+use Tahadudhiya\WebDoctor\services\Verifications;
+use Tahadudhiya\WebDoctor\verifications\RetriedJobsSettled;
 use yii\base\Event;
 
 /**
@@ -41,6 +45,8 @@ use yii\base\Event;
  * @property-read Repairs $repairs
  * @property-read RootCauses $rootCauses
  * @property-read Runs $runs
+ * @property-read VerificationActions $verificationActions
+ * @property-read Verifications $verifications
  * @property-read Settings $settings
  */
 class WebDoctor extends Plugin
@@ -83,6 +89,9 @@ class WebDoctor extends Plugin
                 'repairs' => ['class' => Repairs::class],
                 'rootCauses' => ['class' => RootCauses::class],
                 'runs' => ['class' => Runs::class],
+                // As with the diagnostics: the registry the plugin hands out holds Web Doctor's own.
+                'verificationActions' => ['class' => VerificationActions::class, 'includeCoreActions' => true],
+                'verifications' => ['class' => Verifications::class],
             ],
         ];
     }
@@ -91,10 +100,11 @@ class WebDoctor extends Plugin
     {
         parent::init();
 
-        // All three only attach event handlers, so they are registered immediately rather than
+        // Each only attaches event handlers, so they are registered immediately rather than
         // deferred: nothing here touches the database, the filesystem or the network, and a
         // handler that is attached before Craft finishes booting cannot be missed by whatever
         // fires first.
+        $this->registerQueueSignals();
         $this->registerConsoleCommands();
         $this->registerCpRoutes();
         $this->getPermissions()->register();
@@ -236,6 +246,35 @@ class WebDoctor extends Plugin
     }
 
     /**
+     * What each repair Web Doctor can carry out should have left true.
+     */
+    public function getVerificationActions(): VerificationActions
+    {
+        return $this->get('verificationActions');
+    }
+
+    /**
+     * Establishes whether a carried-out repair worked, and keeps the record of each attempt.
+     */
+    public function getVerifications(): Verifications
+    {
+        /** @var Verifications $verifications */
+        $verifications = $this->get('verifications');
+
+        // Tied to this plugin instance's repairs, checks, Issue Center, errors and evidence, for the
+        // reason the engine is tied to its registry.
+        $verifications->repairs ??= $this->getRepairs();
+        $verifications->actions ??= $this->getVerificationActions();
+        $verifications->registry ??= $this->getDiagnostics();
+        $verifications->engine ??= $this->getDiagnosticEngine();
+        $verifications->issues ??= $this->getIssues();
+        $verifications->errors ??= $this->getErrors();
+        $verifications->evidence ??= $this->getEvidence();
+
+        return $verifications;
+    }
+
+    /**
      * Weighs what an investigation found against the known causes, and keeps what it concluded.
      */
     public function getRootCauses(): RootCauses
@@ -320,6 +359,16 @@ class WebDoctor extends Plugin
             // A recipe ID has a diagnostic ID's shape, so only that shape reaches the controller.
             $event->rules['web-doctor/recipes/<recipeId:[a-z][a-zA-Z0-9]*(?:\.[a-z][a-zA-Z0-9]*)+>/investigations/<investigationId:\d+>'] = 'web-doctor/investigations/recipe-detail';
         });
+    }
+
+    /**
+     * Craft's own signal that a queue job ran without an error, which is the only thing that tells
+     * a retried job that ran from one released by hand. It reads the cache only for a job a repair
+     * noted, and writes nothing otherwise.
+     */
+    private function registerQueueSignals(): void
+    {
+        Event::on(Queue::class, Queue::EVENT_AFTER_EXEC, [RetriedJobsSettled::class, 'recordRun']);
     }
 
     /**
