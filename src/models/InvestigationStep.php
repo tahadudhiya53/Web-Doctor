@@ -3,13 +3,12 @@
 namespace Tahadudhiya\WebDoctor\models;
 
 use DateTimeImmutable;
-use DateTimeZone;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\InvestigationStepType;
 use Tahadudhiya\WebDoctor\enums\Severity;
 use Tahadudhiya\WebDoctor\helpers\EvidenceDisplay;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
 use Tahadudhiya\WebDoctor\records\InvestigationStepRecord;
-use Throwable;
 
 /**
  * One entry in an investigation's timeline: that it started, what it chose to look at, what one
@@ -20,6 +19,8 @@ use Throwable;
  */
 final class InvestigationStep
 {
+    use NamesUnreadable;
+
     /**
      * @param list<Evidence> $evidence What the check recorded, as much of it as was kept.
      * @param int $evidenceCount How much the check recorded, kept or not.
@@ -29,7 +30,7 @@ final class InvestigationStep
         public readonly int $id,
         public readonly int $investigationId,
         public readonly int $position,
-        public readonly InvestigationStepType $type,
+        public readonly ?InvestigationStepType $type,
         public readonly ?string $diagnosticId,
         public readonly ?string $diagnosticName,
         public readonly ?DiagnosticStatus $status,
@@ -41,35 +42,47 @@ final class InvestigationStep
         public readonly int $evidenceCount,
         public readonly bool $evidenceTruncated,
         public readonly ?float $durationMs,
-        public readonly DateTimeImmutable $occurredAt,
+        public readonly ?DateTimeImmutable $occurredAt,
+        public readonly array $unreadable = [],
     ) {
     }
 
     public static function fromRecord(InvestigationStepRecord $record): self
     {
         $evidence = [];
+        $evidenceRead = true;
 
-        if (is_string($record->evidence) && $record->evidence !== '') {
-            $decoded = json_decode($record->evidence, true);
+        if ($record->evidence !== null) {
+            $decoded = json_decode((string)$record->evidence, true);
+            $evidenceRead = is_array($decoded);
 
             foreach (is_array($decoded) ? $decoded : [] as $item) {
-                if (is_array($item)) {
-                    $evidence[] = Evidence::fromArray($item);
+                if (!is_array($item)) {
+                    $evidenceRead = false;
+
+                    continue;
                 }
+
+                $evidence[] = Evidence::fromArray($item);
             }
         }
+
+        $type = InvestigationStepType::tryFrom((string)$record->type);
+        $status = $record->status === null ? null : DiagnosticStatus::tryFrom((string)$record->status);
+        $severity = $record->severity === null ? null : Severity::tryFrom((string)$record->severity);
+        $occurredAt = StoredTime::read($record->occurredAt);
 
         return new self(
             id: (int)$record->id,
             investigationId: (int)$record->investigationId,
             position: (int)$record->position,
-            // A step this version does not know is shown as the neutral "check ran" rather than
-            // taking the whole timeline down with a ValueError.
-            type: InvestigationStepType::tryFrom((string)$record->type) ?? InvestigationStepType::CHECKED,
+            // A step this version does not know is said to be unreadable, never shown as a check
+            // that ran: it is null, named in `$unreadable`, and counted as nothing.
+            type: $type,
             diagnosticId: $record->diagnosticId,
             diagnosticName: $record->diagnosticName,
-            status: $record->status === null ? null : DiagnosticStatus::tryFrom((string)$record->status),
-            severity: $record->severity === null ? null : Severity::tryFrom((string)$record->severity),
+            status: $status,
+            severity: $severity,
             summary: $record->summary,
             note: $record->note,
             relatedIssueId: $record->relatedIssueId === null ? null : (int)$record->relatedIssueId,
@@ -77,7 +90,14 @@ final class InvestigationStep
             evidenceCount: (int)$record->evidenceCount,
             evidenceTruncated: (bool)$record->evidenceTruncated,
             durationMs: $record->durationMs === null ? null : (float)$record->durationMs,
-            occurredAt: self::time($record->occurredAt) ?? new DateTimeImmutable(),
+            occurredAt: $occurredAt,
+            unreadable: array_keys(array_filter([
+                'type' => $type === null,
+                'status' => $record->status !== null && $status === null,
+                'severity' => $record->severity !== null && $severity === null,
+                'occurredAt' => $occurredAt === null,
+                'evidence' => !$evidenceRead,
+            ])),
         );
     }
 
@@ -106,18 +126,5 @@ final class InvestigationStep
             'data' => EvidenceDisplay::tree($evidence->data),
             'metadata' => EvidenceDisplay::tree($evidence->metadata),
         ], $this->evidence);
-    }
-
-    private static function time(?string $value): ?DateTimeImmutable
-    {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        try {
-            return new DateTimeImmutable($value, new DateTimeZone('UTC'));
-        } catch (Throwable) {
-            return null;
-        }
     }
 }

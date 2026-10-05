@@ -82,7 +82,7 @@ final class VerificationCondition implements JsonSerializable
      *
      * @param array<array-key, mixed> $stored
      */
-    public static function fromArray(array $stored): self
+    public static function fromArray(array $stored): ?self
     {
         $id = is_string($stored['id'] ?? null) ? $stored['id'] : '';
         $state = $stored['state'] ?? null;
@@ -92,7 +92,8 @@ final class VerificationCondition implements JsonSerializable
         try {
             return new self($id, $description, is_string($state) ? $state : '', $detail);
         } catch (InvalidArgumentException) {
-            return new self('unreadable', Craft::t('web-doctor', 'A condition this verification recorded cannot be read.'), self::UNDETERMINED, null);
+            // Not read as undetermined, which is an answer: the verification says it cannot be read.
+            return null;
         }
     }
 

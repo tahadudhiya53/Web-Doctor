@@ -3,6 +3,7 @@
 namespace Tahadudhiya\WebDoctor\helpers;
 
 use Craft;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Throwable;
 
 /**
@@ -58,7 +59,7 @@ final class ErrorNormalizer
 
         $message = self::values($message);
 
-        return self::cut($message, self::MAX_MESSAGE_LENGTH);
+        return Text::fit($message, self::MAX_MESSAGE_LENGTH);
     }
 
     /**
@@ -150,7 +151,9 @@ final class ErrorNormalizer
     {
         try {
             $root = Craft::getAlias('@root', false);
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            // The fallback root can differ, which changes how paths group: worth knowing why.
+            SafeException::log('The installation’s root could not be read to group errors by', $e);
             $root = false;
         }
 
@@ -331,10 +334,5 @@ final class ErrorNormalizer
         $root = rtrim(str_replace('\\', '/', trim($root)), '/');
 
         return $root === '' ? null : $root;
-    }
-
-    private static function cut(string $value, int $length): string
-    {
-        return mb_strlen($value) > $length ? mb_substr($value, 0, $length - 1) . '…' : $value;
     }
 }

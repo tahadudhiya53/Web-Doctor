@@ -5,6 +5,7 @@ namespace Tahadudhiya\WebDoctor\models;
 use JsonSerializable;
 use Tahadudhiya\WebDoctor\helpers\EvidenceDisplay;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\Text;
 
 /**
  * What a repair would do or did: a line saying so, each change it names, and the state it read,
@@ -59,11 +60,11 @@ final class RepairReport implements JsonSerializable
         ?string $fingerprint = null,
         int $omitted = 0,
     ) {
-        $this->summary = self::cut(Redaction::redactString($summary), self::MAX_SUMMARY_LENGTH);
+        $this->summary = Text::fit(Redaction::redactString($summary), self::MAX_SUMMARY_LENGTH);
 
         $items = array_values(array_filter($items, 'is_string'));
         $this->items = array_map(
-            static fn(string $item): string => self::cut(Redaction::redactString($item), self::MAX_ITEM_LENGTH),
+            static fn(string $item): string => Text::fit(Redaction::redactString($item), self::MAX_ITEM_LENGTH),
             array_slice($items, 0, self::MAX_ITEMS),
         );
         $this->omitted = max(0, $omitted) + max(0, count($items) - self::MAX_ITEMS);
@@ -98,26 +99,49 @@ final class RepairReport implements JsonSerializable
 
     /**
      * Reads a stored report back through the constructor, so what was stored is held to today's
-     * bounds and redaction. Something that is not a report reads as an empty one.
+     * bounds and redaction — or null, where any part of it is not in the shape this model writes.
+     * A report read as empty would say a repair changed nothing, or would change nothing.
      *
      * @param array<array-key, mixed> $stored
      */
-    public static function fromArray(array $stored): self
+    public static function fromArray(array $stored): ?self
     {
+        $items = $stored['items'] ?? null;
+        $states = $stored['state'] ?? null;
+        $omitted = $stored['omitted'] ?? null;
+        $fingerprint = $stored['fingerprint'] ?? null;
+
+        if (!is_string($stored['summary'] ?? null) || !is_array($items) || !array_is_list($items)
+            || !is_array($states) || !array_is_list($states)
+            || !is_int($omitted) || $omitted < 0
+            || ($fingerprint !== null && !is_string($fingerprint))) {
+            return null;
+        }
+
         $state = [];
 
-        foreach (is_array($stored['state'] ?? null) ? $stored['state'] : [] as $evidence) {
-            if (is_array($evidence)) {
-                $state[] = Evidence::fromArray($evidence);
+        foreach ($items as $item) {
+            if (!is_string($item)) {
+                return null;
             }
         }
 
+        foreach ($states as $evidence) {
+            $read = is_array($evidence) ? Evidence::fromArray($evidence) : null;
+
+            if ($read === null || !$read->readable) {
+                return null;
+            }
+
+            $state[] = $read;
+        }
+
         return new self(
-            summary: is_string($stored['summary'] ?? null) ? $stored['summary'] : '',
-            items: is_array($stored['items'] ?? null) ? array_values($stored['items']) : [],
+            summary: $stored['summary'],
+            items: $items,
             state: $state,
-            fingerprint: is_string($stored['fingerprint'] ?? null) ? $stored['fingerprint'] : null,
-            omitted: is_int($stored['omitted'] ?? null) ? $stored['omitted'] : 0,
+            fingerprint: $fingerprint,
+            omitted: $omitted,
         );
     }
 
@@ -133,10 +157,5 @@ final class RepairReport implements JsonSerializable
             'state' => array_map(static fn(Evidence $e): array => $e->jsonSerialize(), $this->state),
             'fingerprint' => $this->fingerprint,
         ];
-    }
-
-    private static function cut(string $value, int $length): string
-    {
-        return mb_strlen($value) > $length ? mb_substr($value, 0, $length - 1) . '…' : $value;
     }
 }

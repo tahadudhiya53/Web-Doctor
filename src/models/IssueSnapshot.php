@@ -38,6 +38,10 @@ final class IssueSnapshot
 
     public static function fromIssue(Issue $issue, ?string $runId = null): self
     {
+        if ($issue->category === null || $issue->severity === null || $issue->status === null || $issue->firstDetected === null) {
+            throw new \RuntimeException(sprintf('Issue %d cannot be read in full, so it cannot be weighed.', $issue->id));
+        }
+
         return new self(
             id: $issue->id,
             diagnosticId: $issue->diagnosticId,

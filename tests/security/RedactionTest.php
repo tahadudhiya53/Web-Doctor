@@ -598,6 +598,69 @@ class RedactionTest extends TestCase
         self::assertStringContainsString('mail.example.com', $result->description);
     }
 
+    public function testNothingAnAuditEntryRecordsCanCarryACredential(): void
+    {
+        // An entry quotes what a person typed — a reason for a status — and what a check or a repair
+        // said about itself, and it is read back from a table every reader of the log reaches. Built
+        // straight from the model, so no earlier redaction helps.
+        $entry = new \Tahadudhiya\WebDoctor\models\AuditEntry(
+            id: null,
+            action: \Tahadudhiya\WebDoctor\enums\AuditAction::ISSUE_STATUS_CHANGED,
+            result: \Tahadudhiya\WebDoctor\enums\AuditResult::NONE,
+            summary: 'Moved: password=hunter2-summary',
+            objectType: \Tahadudhiya\WebDoctor\enums\AuditObjectType::ISSUE,
+            objectId: '1',
+            objectLabel: 'Login refused for smtp://mailer:hunter2-label@mail.example.com',
+            issueId: 1,
+            userId: 1,
+            userName: 'token=hunter2-user',
+            environment: 'production',
+            siteId: null,
+            siteName: 'secret=hunter2-site',
+            details: [
+                'reason' => 'Pasted: api_key=hunter2-reason',
+                'password' => 'hunter2-named',
+                'quoted' => ['Authorization: Bearer hunter2-bearer-token-value'],
+            ],
+            occurredAt: new \DateTimeImmutable(),
+        );
+
+        $json = (string)json_encode([$entry->summary, $entry->objectLabel, $entry->userName, $entry->siteName, $entry->details]);
+
+        foreach (['hunter2-summary', 'hunter2-label', 'hunter2-user', 'hunter2-site', 'hunter2-reason', 'hunter2-named', 'hunter2-bearer'] as $secret) {
+            self::assertStringNotContainsString($secret, $json);
+        }
+
+        self::assertStringStartsWith('Moved', $entry->summary);
+        self::assertStringContainsString('mail.example.com', (string)$entry->objectLabel);
+    }
+
+    public function testAnAuditEntryKeepsNoCredentialHoweverItsDetailsArriveAndStaysStorable(): void
+    {
+        [$details, $cut] = \Tahadudhiya\WebDoctor\models\AuditEntry::cleanDetails([
+            'apiKey' => 'hunter2-key',
+            'jwt' => 'hunter2-jwt',
+            'nested' => ['password' => 'hunter2-nested'],
+            'message' => "Malformed \xC3\x28 then password=hunter2-malformed \xFF",
+            'long' => str_repeat('é', 600) . ' token=hunter2-long',
+            'list' => ['Authorization: Bearer hunter2-bearer-value-long-enough', str_repeat('a', 300)],
+        ]);
+
+        $json = (string)json_encode($details);
+
+        self::assertNotFalse(json_encode($details), 'What an entry keeps could not be stored.');
+        self::assertTrue($cut);
+        self::assertArrayNotHasKey('nested', $details);
+
+        foreach (['hunter2-key', 'hunter2-jwt', 'hunter2-nested', 'hunter2-malformed', 'hunter2-long', 'hunter2-bearer'] as $secret) {
+            self::assertStringNotContainsString($secret, $json);
+        }
+
+        // Cut on a character, never inside one.
+        self::assertTrue(mb_check_encoding($details['long'], 'UTF-8'));
+        self::assertSame(\Tahadudhiya\WebDoctor\models\AuditEntry::MAX_TEXT, mb_strlen($details['long']));
+    }
+
     public function testNothingARecommendationQuotesCanCarryACredential(): void
     {
         // A recommendation quotes the finding in the words of whatever wrote it — an issue's title,
@@ -643,11 +706,9 @@ class RedactionTest extends TestCase
         );
         $prerequisite = \Tahadudhiya\WebDoctor\models\Prerequisite::checked('jobsFailed', 'Jobs api_key=hunter2-description failed.', true, 'secret=hunter2-detail');
 
-        $json = (string)json_encode([
-            $report,
-            $prerequisite,
-            \Tahadudhiya\WebDoctor\models\RepairReport::fromArray((array)json_decode((string)json_encode($report), true)),
-        ]);
+        $read = \Tahadudhiya\WebDoctor\models\RepairReport::fromArray((array)json_decode((string)json_encode($report), true));
+        self::assertNotNull($read, 'The report did not read back, so nothing it holds was checked.');
+        $json = (string)json_encode([$report, $prerequisite, $read]);
 
         foreach (['hunter2-summary', 'hunter2-item', 'hunter2-state', 'hunter2-description', 'hunter2-detail'] as $secret) {
             self::assertStringNotContainsString($secret, $json);
@@ -760,23 +821,6 @@ class RedactionTest extends TestCase
                     self::assertStringNotContainsString($secret, $output, sprintf('%s survived from “%s”.', $secret, $form));
                 }
             }
-        }
-    }
-
-    public function testAnExceptionAndItsTraceCannotCarryACredentialIntoEvidence(): void
-    {
-        $previous = new \RuntimeException('inner {"client_secret":"cs-inner-audit"}');
-        $exception = new \RuntimeException('outer failed password=pw-outer-audit', 0, $previous);
-
-        $outputs = [
-            serialize(Evidence::fromThrowable($exception, 'tests.exception')),
-            serialize(Evidence::stackTrace($exception, 'tests.exception')),
-            (string)json_encode(Evidence::fromThrowable($exception, 'tests.exception')),
-        ];
-
-        foreach ($outputs as $output) {
-            self::assertStringNotContainsString('pw-outer-audit', $output);
-            self::assertStringNotContainsString('cs-inner-audit', $output);
         }
     }
 

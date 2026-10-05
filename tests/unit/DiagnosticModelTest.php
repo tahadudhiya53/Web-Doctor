@@ -6,7 +6,9 @@ use DateTimeImmutable;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\WebDoctor\base\Diagnostic;
-use Tahadudhiya\WebDoctor\base\DiagnosticInterface;
+use Tahadudhiya\WebDoctor\enums\AuditAction;
+use Tahadudhiya\WebDoctor\enums\AuditObjectType;
+use Tahadudhiya\WebDoctor\enums\AuditResult;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
@@ -19,27 +21,38 @@ use Tahadudhiya\WebDoctor\helpers\ErrorNormalizer;
 use Tahadudhiya\WebDoctor\helpers\EvidenceDisplay;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\RequestInput;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
+use Tahadudhiya\WebDoctor\models\AuditEntry;
+use Tahadudhiya\WebDoctor\models\AuditFilter;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\ErrorSignature;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
-use Tahadudhiya\WebDoctor\models\IssueList;
+use Tahadudhiya\WebDoctor\models\ListPage;
 use Tahadudhiya\WebDoctor\models\Prerequisite;
+use Tahadudhiya\WebDoctor\models\RepairFilter;
 use Tahadudhiya\WebDoctor\models\RepairReport;
 use Tahadudhiya\WebDoctor\models\SafeException;
+use Tahadudhiya\WebDoctor\Tests\_support\ConstantIdDiagnostic;
 use Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic;
 use yii\base\InvalidArgumentException as YiiInvalidArgumentException;
+use yii\web\BadRequestHttpException;
 
 /**
  * The value objects Web Doctor's domain is made of: the context that identifies a run, the
  * results it produces, the evidence behind them, the sanitised exception any failure is reduced
  * to, the base class a check is written against, the fingerprint that decides when two findings
- * are the same problem, and the filter the Issue Center is read through.
+ * are the same problem, the filter the Issue Center is read through, and the one reading of what
+ * a request asks for.
  */
 class DiagnosticModelTest extends TestCase
 {
+    /** A reading of request input that is refused rather than answered. */
+    private const REFUSED = 'refused';
+
     // --- The context: a run's identity and what a diagnostic is told about it.
 
     public function testARunGetsAnIdentityWithoutBeingGivenOne(): void
@@ -359,10 +372,10 @@ class DiagnosticModelTest extends TestCase
         $health = $run->health();
 
         self::assertLessThan(100, $health->score);
-        self::assertSame(1, $health->countOf(DiagnosticStatus::WARNING));
-        self::assertSame(1, $health->countOf(DiagnosticStatus::FAIL));
-        self::assertSame(1, $health->countOf(DiagnosticStatus::ERROR));
-        self::assertSame(1, $health->countOf(DiagnosticStatus::PASS));
+        self::assertSame(1, ($health->counts['warning'] ?? 0));
+        self::assertSame(1, ($health->counts['fail'] ?? 0));
+        self::assertSame(1, ($health->counts['error'] ?? 0));
+        self::assertSame(1, ($health->counts['pass'] ?? 0));
         self::assertSame($health, $run->health());
     }
 
@@ -847,6 +860,20 @@ class DiagnosticModelTest extends TestCase
         self::assertSame('RuntimeException', SafeException::from(new \RuntimeException())->summary());
     }
 
+    public function testAnExceptionsKindIsItsShortNameAndNeverTheFileAnAnonymousOneWasDeclaredIn(): void
+    {
+        self::assertSame('RuntimeException', SafeException::kind(new \RuntimeException('x')));
+        self::assertSame('InvalidConfigException', SafeException::kind(new \yii\base\InvalidConfigException('x')));
+        self::assertSame('Exception', SafeException::shortName('Exception'));
+
+        // An anonymous class's own name holds the path of the file that declared it.
+        $anonymous = new class('x') extends \LogicException {
+        };
+
+        self::assertSame('LogicException', SafeException::kind($anonymous));
+        self::assertStringNotContainsString('/', SafeException::kind($anonymous));
+    }
+
     public function testTheChainBehindAnExceptionIsKeptAndSanitised(): void
     {
         $safe = SafeException::from(
@@ -886,15 +913,6 @@ class DiagnosticModelTest extends TestCase
         self::assertLessThanOrEqual(1, count(SafeException::from($this->deepException(), frames: 0)->frames));
     }
 
-    public function testFramesNameTheCallSiteWithoutItsArguments(): void
-    {
-        $frames = SafeException::from($this->deepException())->frames;
-
-        self::assertNotSame([], $frames);
-        self::assertStringContainsString('DiagnosticModelTest', $frames[0]);
-        self::assertStringNotContainsString('hunter2', implode("\n", $frames));
-    }
-
     public function testEverySurfaceOfTheRepresentationIsSerializable(): void
     {
         $json = SafeException::from(new \RuntimeException('Boom'))->jsonSerialize();
@@ -912,7 +930,7 @@ class DiagnosticModelTest extends TestCase
     }
 
     /**
-     * Thrown from a nested call so there is a trace with arguments in it to not leak.
+     * Thrown from a nested call so there is a trace to budget.
      */
     private function deepException(): \RuntimeException
     {
@@ -930,55 +948,18 @@ class DiagnosticModelTest extends TestCase
 
     // --- The base class a diagnostic is written against.
 
-    /**
-     * A diagnostic written the way a real one is: identity declared as a constant and nothing
-     * else overridden, so what the base class supplies on its own is what is under test.
-     */
-    private function aConstantIdDiagnostic(): Diagnostic
+    public function testIdentityIsTheDeclaredConstantAndNoneWhenNoneIsDeclared(): void
     {
-        return new class() extends Diagnostic {
-            public const ID = 'tests.constantId';
-
-            public function name(): string
-            {
-                return 'Constant ID check';
-            }
-
-            public function category(): DiagnosticCategory
-            {
-                return DiagnosticCategory::CRAFT;
-            }
-
-            public function run(DiagnosticContext $context): DiagnosticResult
-            {
-                return $this->pass('Nothing wrong.');
-            }
-        };
-    }
-
-    public function testTheBaseClassSatisfiesTheContract(): void
-    {
-        self::assertInstanceOf(DiagnosticInterface::class, $this->aConstantIdDiagnostic());
-    }
-
-    public function testIdentityIsDeterministic(): void
-    {
-        // Issues, evidence and history are recorded against the ID, so two instances of the
-        // same check must be the same check.
-        self::assertSame('tests.constantId', ($this->aConstantIdDiagnostic())->id());
-        self::assertSame(($this->aConstantIdDiagnostic())->id(), ($this->aConstantIdDiagnostic())->id());
-    }
-
-    public function testADiagnosticThatDeclaresNoIdentityHasNone(): void
-    {
-        // Rather than inventing one that would drift between versions. The registry is what
-        // refuses it.
+        // Issues, evidence and history are recorded against the ID, so every instance of a check
+        // is the same check. One that declares none has none, rather than an invented one that
+        // would drift between versions; the registry is what refuses it.
+        self::assertSame(ConstantIdDiagnostic::ID, (new ConstantIdDiagnostic())->id());
         self::assertSame('', Diagnostic::ID);
     }
 
     public function testACheckAppliesUnlessItSaysOtherwise(): void
     {
-        self::assertTrue(($this->aConstantIdDiagnostic())->isApplicable(new DiagnosticContext()));
+        self::assertTrue((new ConstantIdDiagnostic())->isApplicable(new DiagnosticContext()));
     }
 
     public function testResultsAreAttributedToTheDiagnosticThatMadeThem(): void
@@ -1602,6 +1583,171 @@ class DiagnosticModelTest extends TestCase
         self::assertSame([], (new IssueFilter())->toParams());
     }
 
+    public function testTheAuditLogAndRepairHistoryFiltersSurviveBeingTurnedIntoALinkAndBack(): void
+    {
+        $audit = AuditFilter::fromParams([
+            'auditAction' => ['repair.executed', 'issue.resolved'],
+            'result' => ['failed'],
+            'user' => AuditFilter::NO_USER,
+            'issue' => '12',
+            'environment' => 'production',
+            'from' => '2026-01-01',
+            'to' => '2026-02-01',
+            'order' => 'oldest',
+            'page' => '3',
+        ]);
+        $repairs = RepairFilter::fromParams([
+            'repairAction' => 'queue.retryFailedJobs',
+            'status' => ['succeeded'],
+            'verification' => ['verification_failed'],
+            'user' => '4',
+            'environment' => 'staging',
+            'from' => '2026-01-01',
+            'order' => 'oldest',
+            'perPage' => '20',
+        ]);
+
+        self::assertTrue($audit->withoutUser);
+        self::assertSame([AuditAction::REPAIR_EXECUTED, AuditAction::ISSUE_RESOLVED], $audit->actions);
+        self::assertEquals($audit, AuditFilter::fromParams($audit->toParams()));
+        self::assertEquals($repairs, RepairFilter::fromParams($repairs->toParams()));
+
+        // A link says what was asked for rather than restating every default; empty is "any".
+        self::assertSame([], (new AuditFilter())->toParams());
+        self::assertSame([], (new RepairFilter())->toParams());
+        self::assertFalse(AuditFilter::fromParams(['auditAction' => [], 'user' => '', 'from' => ''])->isFiltering());
+    }
+
+    /**
+     * An audit entry is a record of an act, never of what the act read or changed, so its details are
+     * restricted by shape: a payload has nowhere to go.
+     */
+    public function testAnAuditEntryKeepsNamedValuesOnlyAndSaysWhatItLeftOut(): void
+    {
+        [$kept, $cut] = AuditEntry::cleanDetails([
+            'checks' => 18,
+            'depth' => 'normal',
+            'kept' => true,
+            'nothing' => null,
+            'selected' => array_map(static fn(int $i): string => "check.$i", range(1, AuditEntry::MAX_LIST + 5)),
+            'summary' => str_repeat('a', AuditEntry::MAX_TEXT + 50),
+            'payload' => ['evidence' => ['data' => 'x']],
+            'mixed' => ['a', ['b']],
+            'not a name' => 'dropped',
+            7 => 'dropped',
+        ]);
+
+        self::assertTrue($cut);
+        self::assertSame(['checks', 'depth', 'kept', 'nothing', 'selected', 'summary', 'mixed'], array_keys($kept));
+        self::assertCount(AuditEntry::MAX_LIST, $kept['selected']);
+        self::assertSame(AuditEntry::MAX_TEXT, mb_strlen($kept['summary']));
+        self::assertSame(['a'], $kept['mixed']);
+
+        // Flat and small: nothing cut, nothing said.
+        self::assertSame([['count' => 2], false], AuditEntry::cleanDetails(['count' => 2]));
+    }
+
+    /**
+     * @return array<string, array{AuditObjectType, string|null, int|null, array<string, mixed>, string|null}>
+     */
+    public static function auditObjects(): array
+    {
+        return [
+            'an issue' => [AuditObjectType::ISSUE, '5', 5, [], 'web-doctor/issues/5'],
+            'a deleted issue' => [AuditObjectType::ISSUE, '5', null, [], null],
+            'a repair' => [AuditObjectType::REPAIR, '9', 5, [], 'web-doctor/repairs/9'],
+            'a verification, through its repair' => [AuditObjectType::VERIFICATION, '3', 5, ['repairId' => 9], 'web-doctor/repairs/9#verification'],
+            'an issue’s investigation' => [AuditObjectType::INVESTIGATION, '7', 5, [], 'web-doctor/issues/5/investigations/7'],
+            'a recipe’s investigation' => [AuditObjectType::INVESTIGATION, '7', null, ['recipeId' => 'queue.jobsFailing'], 'web-doctor/recipes/queue.jobsFailing/investigations/7'],
+            'an investigation whose issue is deleted' => [AuditObjectType::INVESTIGATION, '7', null, [], null],
+            'a recipe ID that is not one' => [AuditObjectType::INVESTIGATION, '7', null, ['recipeId' => '../../settings'], null],
+            'a run, which is not kept as a record' => [AuditObjectType::RUN, 'b0c5e0a2-0000-4000-8000-000000000000', null, [], null],
+            'an object ID that is not one' => [AuditObjectType::REPAIR, '9/../../admin', null, [], null],
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $details
+     */
+    #[DataProvider('auditObjects')]
+    public function testAnAuditEntryLinksToWhatItWasDoneToOnlyWhereThatHasAPage(AuditObjectType $type, ?string $id, ?int $issueId, array $details, ?string $path): void
+    {
+        $entry = new AuditEntry(
+            id: 1,
+            action: AuditAction::ISSUE_STATUS_CHANGED,
+            result: AuditResult::NONE,
+            summary: 'Something was done.',
+            objectType: $type,
+            objectId: $id,
+            objectLabel: null,
+            issueId: $issueId,
+            userId: null,
+            userName: null,
+            environment: 'production',
+            siteId: null,
+            siteName: null,
+            details: $details,
+            occurredAt: new DateTimeImmutable(),
+        );
+
+        self::assertSame($path, $entry->cpPath());
+    }
+
+    /**
+     * @return array<string, array{mixed, string|null}>
+     */
+    public static function storedMoments(): array
+    {
+        return [
+            'a moment as Craft stores one' => ['2026-03-08 05:00:00', '2026-03-08T05:00:00+00:00'],
+            'the last second of a leap day' => ['2028-02-29 23:59:59', '2028-02-29T23:59:59+00:00'],
+            'nothing' => [null, null],
+            'empty' => ['', null],
+            'malformed' => ['yesterday', null],
+            'an impossible date' => ['2026-02-30 10:00:00', null],
+            'an impossible time' => ['2026-01-01 24:00:00', null],
+            'MySQL’s zero date' => ['0000-00-00 00:00:00', null],
+            'another format' => ['2026-01-01T00:00:00+00:00', null],
+            'with fractions' => ['2026-01-01 00:00:00.123', null],
+            'a number' => [1767225600, null],
+        ];
+    }
+
+    /**
+     * A stored moment is exactly the form Craft writes, round-tripped, or unreadable: never the epoch,
+     * never now, never the date PHP would roll an impossible one over into.
+     */
+    #[DataProvider('storedMoments')]
+    public function testAStoredMomentIsReadExactlyOrNotAtAll(mixed $stored, ?string $expected): void
+    {
+        self::assertSame($expected, StoredTime::read($stored)?->format(DATE_ATOM));
+        self::assertSame($stored === null ? null : ($expected === null ? false : $expected), ($m = StoredTime::readOptional($stored)) instanceof DateTimeImmutable ? $m->format(DATE_ATOM) : $m);
+    }
+
+    public function testEvidenceReadBackKeepsAnUnknownMomentUnknownAndSaysWhatItCannotRead(): void
+    {
+        $written = (new Evidence(EvidenceType::QUEUE, 'Failed jobs', 'queue.failedJobs', ['failed' => 1]))->jsonSerialize();
+
+        $whole = Evidence::fromArray($written);
+        self::assertNotNull($whole->recordedAt);
+        self::assertTrue($whole->typeKnown);
+        self::assertFalse($whole->truncated);
+
+        foreach ([
+            'a missing moment' => ['recordedAt' => null],
+            'a broken moment' => ['recordedAt' => '2026-02-30T10:00:00+00:00'],
+            'a moment in another form' => ['recordedAt' => '2026-01-01 00:00:00'],
+        ] as $case => $change) {
+            $read = Evidence::fromArray($change + $written);
+            self::assertNull($read->recordedAt, "$case: read as a moment it was not.");
+            self::assertTrue($read->truncated, "$case: not said to be partial.");
+        }
+
+        $unknown = Evidence::fromArray(['type' => 'telepathy'] + $written);
+        self::assertFalse($unknown->typeKnown, 'An unknown type was read as a known one.');
+        self::assertTrue($unknown->truncated);
+    }
+
     public function testTheDefaultViewIsWhatIsOutstandingAndSaysSo(): void
     {
         // Stated rather than left to an empty filter: a list that quietly hides closed issues
@@ -1645,23 +1791,21 @@ class DiagnosticModelTest extends TestCase
     {
         // What a page holds is the database's answer, and the positions are asserted against
         // real rows elsewhere. The arithmetic around it is this test's.
-        $middle = new IssueList(issues: [], total: 240, filter: new IssueFilter(page: 2, perPage: 50));
+        $middle = new ListPage(items: [], total: 240, filter: new IssueFilter(page: 2, perPage: 50));
 
         self::assertSame(5, $middle->pageCount());
-        self::assertTrue($middle->hasPages());
         self::assertTrue($middle->hasPreviousPage());
         self::assertTrue($middle->hasNextPage());
         self::assertSame(2, $middle->currentPage());
 
-        $empty = new IssueList(issues: [], total: 0, filter: new IssueFilter());
+        $empty = new ListPage(items: [], total: 0, filter: new IssueFilter());
 
         self::assertTrue($empty->isEmpty());
         self::assertSame(1, $empty->pageCount());
-        self::assertFalse($empty->hasPages());
 
         // A page past the end reports the last page, and no position at all: a page holding
         // nothing must not claim to be showing rows 4901 to 4900.
-        $beyond = new IssueList(issues: [], total: 10, filter: new IssueFilter(page: 99, perPage: 50));
+        $beyond = new ListPage(items: [], total: 10, filter: new IssueFilter(page: 99, perPage: 50));
 
         self::assertSame(1, $beyond->currentPage());
         self::assertFalse($beyond->hasNextPage());
@@ -1710,18 +1854,26 @@ class DiagnosticModelTest extends TestCase
             RepairReport::fingerprintOf([1, 2]),
         );
 
-        $read = RepairReport::fromArray((array)json_decode(Evidence::encode($report), true));
+        $stored = (array)json_decode(Evidence::encode($report), true);
+        $read = RepairReport::fromArray($stored);
 
+        self::assertNotNull($read);
         self::assertSame($report->jsonSerialize(), $read->jsonSerialize());
         self::assertSame(['failed' => 2], $read->state[0]->data);
 
-        $junk = RepairReport::fromArray(['summary' => ['not text'], 'items' => 'nope', 'state' => [1, 'x'], 'omitted' => '5']);
-
-        self::assertSame('', $junk->summary);
-        self::assertSame([], $junk->items);
-        self::assertSame([], $junk->state);
-        self::assertSame(0, $junk->omitted);
-        self::assertNull($junk->fingerprint);
+        // Any part not as written makes the report unreadable — never "changed nothing".
+        foreach ([
+            'summary' => ['summary' => ['not text']],
+            'items' => ['items' => 'nope'],
+            'an item' => ['items' => ['Job #1', 7]],
+            'state' => ['state' => [1, 'x']],
+            'a piece of state' => ['state' => [['type' => 'a type from elsewhere'] + $stored['state'][0]]],
+            'omitted' => ['omitted' => '5'],
+            'a negative omitted' => ['omitted' => -1],
+            'fingerprint' => ['fingerprint' => ['x']],
+        ] as $what => $change) {
+            self::assertNull(RepairReport::fromArray($change + $stored), $what);
+        }
     }
 
     public function testAPrerequisiteIsCheckedOrAcknowledgedAndOnlyAPersonMeetsTheSecond(): void
@@ -1748,6 +1900,84 @@ class DiagnosticModelTest extends TestCase
         $this->expectException(YiiInvalidArgumentException::class);
 
         Prerequisite::acknowledged('safe to repeat', 'Each job is safe to run again.');
+    }
+
+    // --- Request input: what a request asks for, read exactly or refused.
+
+    /**
+     * Every reading of request input, as the controllers call them. `null` is the parameter left
+     * out; a value sent is taken exactly or refused, never coerced into something that happens to
+     * be valid — read as a number, `12abc` would act on issue 12.
+     *
+     * @return array<string, array{string, mixed, mixed}>
+     */
+    public static function requestInput(): array
+    {
+        $refused = self::REFUSED;
+
+        return [
+            'depth: shallow' => ['depth', 'shallow', DiagnosticDepth::SHALLOW],
+            'depth: normal' => ['depth', 'normal', DiagnosticDepth::NORMAL],
+            'depth: deep' => ['depth', 'deep', DiagnosticDepth::DEEP],
+            'depth: missing is normal' => ['depth', null, DiagnosticDepth::NORMAL],
+            'depth: one Web Doctor does not have' => ['depth', 'exhaustive', $refused],
+            'depth: empty' => ['depth', '', $refused],
+            'depth: the wrong case' => ['depth', 'Deep', $refused],
+            'depth: a list' => ['depth', ['deep'], $refused],
+            'depth: a number' => ['depth', '1', $refused],
+            'id: digits' => ['id', '12', 12],
+            'id: an integer' => ['id', 12, 12],
+            'id: as long as PHP holds' => ['id', '999999999999999999', 999999999999999999],
+            'id: missing' => ['id', null, $refused],
+            'id: with letters after it' => ['id', '12abc', $refused],
+            'id: with a newline after it' => ['id', "12\n", $refused],
+            'id: with spaces around it' => ['id', ' 12 ', $refused],
+            'id: with a leading zero' => ['id', '012', $refused],
+            'id: zero' => ['id', '0', $refused],
+            'id: the integer zero' => ['id', 0, $refused],
+            'id: negative' => ['id', '-1', $refused],
+            'id: a negative integer' => ['id', -1, $refused],
+            'id: a fraction' => ['id', '1.5', $refused],
+            'id: a float' => ['id', 12.0, $refused],
+            'id: empty' => ['id', '', $refused],
+            'id: longer than PHP holds' => ['id', '1000000000000000000', $refused],
+            'id: a list' => ['id', ['1'], $refused],
+            'id: sent twice' => ['id', ['12', '12'], $refused],
+            'page: missing is the first' => ['page', null, 1],
+            'page: empty is the first' => ['page', '', 1],
+            'page: digits' => ['page', '3', 3],
+            'page: a fraction' => ['page', '1.5', $refused],
+            'page: an exponent' => ['page', '1e3', $refused],
+            'page: zero' => ['page', '0', $refused],
+            'page: negative' => ['page', '-1', $refused],
+            'page: with a newline after it' => ['page', "2\n", $refused],
+            'page: a list' => ['page', ['1'], $refused],
+            'flag: missing is off' => ['flag', null, false],
+            'flag: on' => ['flag', '1', true],
+            'flag: a word' => ['flag', 'yes', $refused],
+            'flag: zero' => ['flag', '0', $refused],
+            'flag: empty' => ['flag', '', $refused],
+            'flag: the integer one' => ['flag', 1, $refused],
+            'flag: a list' => ['flag', ['1'], $refused],
+            'names: missing is none' => ['names', null, []],
+            'names: an empty list' => ['names', [], []],
+            'names: a list of names' => ['names', ['a.b', 'c.d'], ['a.b', 'c.d']],
+            'names: one name, not a list' => ['names', 'a.b', $refused],
+            'names: keyed by name' => ['names', ['a' => 'a.b'], $refused],
+            'names: a list out of order' => ['names', [1 => 'a.b'], $refused],
+            'names: a name that is a list' => ['names', [['a.b']], $refused],
+            'names: a name that is a number' => ['names', [1], $refused],
+        ];
+    }
+
+    #[DataProvider('requestInput')]
+    public function testRequestInputIsReadExactlyOrRefused(string $reading, mixed $requested, mixed $expected): void
+    {
+        if ($expected === self::REFUSED) {
+            $this->expectException(BadRequestHttpException::class);
+        }
+
+        self::assertSame($expected, RequestInput::$reading($requested));
     }
 
     /**

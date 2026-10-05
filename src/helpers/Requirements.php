@@ -5,6 +5,7 @@ namespace Tahadudhiya\WebDoctor\helpers;
 use Composer\InstalledVersions;
 use Craft;
 use ReflectionClass;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Throwable;
 
 /**
@@ -176,7 +177,8 @@ final class Requirements
                 'mariadb' => self::version($declared, 'requiredMariaDbVersion'),
                 'pgsql' => self::version($declared, 'requiredPgSqlVersion'),
             ]);
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            SafeException::log('Craft’s minimum database versions could not be read', $e);
             // Unreadable requirements are reported as unknown by the diagnostics that asked,
             // never filled in from memory.
             self::$databaseVersions = [];
@@ -216,7 +218,8 @@ final class Requirements
 
         try {
             $manifest = json_decode((string)file_get_contents("$path/composer.json"), true, 16, JSON_THROW_ON_ERROR);
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            SafeException::log('Craft’s package manifest could not be read', $e);
             return self::$require;
         }
 
@@ -245,7 +248,8 @@ final class Requirements
     {
         try {
             $file = (new ReflectionClass(Craft::class))->getFileName();
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            SafeException::log('Craft’s server requirements could not be read', $e);
             $file = false;
         }
 
@@ -269,7 +273,8 @@ final class Requirements
             }
 
             $path = InstalledVersions::getInstallPath($package);
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            SafeException::log('Craft’s installed package could not be located', $e);
             return null;
         }
 

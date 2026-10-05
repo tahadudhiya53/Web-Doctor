@@ -6,7 +6,7 @@ use Craft;
 use DateTimeImmutable;
 use JsonSerializable;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
-use Throwable;
+use Tahadudhiya\WebDoctor\helpers\Text;
 
 /**
  * One fact a root cause was weighed on, and where to find it again.
@@ -66,10 +66,10 @@ final class Observation implements JsonSerializable
         public readonly bool $confirmed = false,
         public readonly ?DateTimeImmutable $at = null,
     ) {
-        $this->label = self::shorten(Redaction::redactString($label), self::MAX_LABEL_LENGTH);
+        $this->label = Text::fit(Redaction::redactString($label), self::MAX_LABEL_LENGTH);
         $this->detail = $detail === null || $detail === ''
             ? null
-            : self::shorten(Redaction::redactString($detail), self::MAX_DETAIL_LENGTH);
+            : Text::fit(Redaction::redactString($detail), self::MAX_DETAIL_LENGTH);
     }
 
     /**
@@ -116,24 +116,30 @@ final class Observation implements JsonSerializable
      *
      * @param array<array-key, mixed> $stored
      */
-    public static function fromArray(array $stored): self
+    public static function fromArray(array $stored): ?self
     {
         $text = static fn(mixed $value): ?string => is_string($value) && $value !== '' ? $value : null;
         $at = null;
 
-        if ($text($stored['at'] ?? null) !== null) {
-            try {
-                $at = new DateTimeImmutable((string)$stored['at']);
-            } catch (Throwable) {
-                $at = null;
+        // Exactly as written, round-tripped: a moment parsed leniently would become a different one.
+        if (($stored['at'] ?? null) !== null) {
+            $at = is_string($stored['at']) ? DateTimeImmutable::createFromFormat(DATE_ATOM, $stored['at']) : false;
+
+            if ($at === false || $at->format(DATE_ATOM) !== $stored['at']) {
+                return null;
             }
         }
 
         $kind = is_string($stored['kind'] ?? null) ? $stored['kind'] : '';
 
+        // A kind this version does not have is not read as some other kind: the observation cannot
+        // be read, and whatever holds it says so.
+        if (!in_array($kind, self::KINDS, true)) {
+            return null;
+        }
+
         return new self(
-            // A kind this version does not have reads as the least direct one there is.
-            kind: in_array($kind, self::KINDS, true) ? $kind : self::ISSUE,
+            kind: $kind,
             label: (string)($text($stored['label'] ?? null) ?? ''),
             detail: $text($stored['detail'] ?? null),
             diagnosticId: $text($stored['diagnosticId'] ?? null),
@@ -169,10 +175,5 @@ final class Observation implements JsonSerializable
         $position = array_search($kind, self::KINDS, true);
 
         return $position === false ? count(self::KINDS) : $position;
-    }
-
-    private static function shorten(string $value, int $length): string
-    {
-        return mb_strlen($value) > $length ? mb_substr($value, 0, $length - 1) . '…' : $value;
     }
 }

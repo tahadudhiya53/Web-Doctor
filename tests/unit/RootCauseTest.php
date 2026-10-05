@@ -731,9 +731,11 @@ class RootCauseTest extends TestCase
 
         self::assertEquals($outcome, $back);
         self::assertTrue($back->confirms());
-        // Something this version does not recognise never reads as more than it was.
-        self::assertSame(Observation::ISSUE, Observation::fromArray(['kind' => 'rumour', 'label' => 'x'])->kind);
-        self::assertSame(ConditionRole::SUPPORTING, ConditionOutcome::fromArray(['role' => 'decisive'])->role);
+        // Something this version does not recognise is not read as something it does: it cannot be read.
+        self::assertNull(Observation::fromArray(['kind' => 'rumour', 'label' => 'x']));
+        self::assertNull(Observation::fromArray(['kind' => Observation::ERROR, 'label' => 'x', 'at' => 'yesterday']));
+        self::assertNull(ConditionOutcome::fromArray(['role' => 'decisive']));
+        self::assertNull(ConditionOutcome::fromArray(['role' => 'supporting', 'observations' => [['kind' => 'rumour']]]));
     }
 
     // Helpers ----------------------------------------------------------------

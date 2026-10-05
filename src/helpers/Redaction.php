@@ -42,6 +42,8 @@ final class Redaction
         'credentials', 'authorization', 'signature', 'salt', 'dsn', 'cipher', 'cookie',
         'bearer', 'certificate', 'apikey', 'accesskey', 'privatekey', 'securitykey', 'pw',
         'passwords', 'passcode', 'pgpassword',
+        // A JSON web token is a bearer credential whatever key it sits under.
+        'jwt',
         // Session identifiers as the cookies that carry them are named, in one word.
         'phpsessid', 'sessid', 'sessionid',
         // `auth` on its own holds a login far more often than anything else — an HTTP client's

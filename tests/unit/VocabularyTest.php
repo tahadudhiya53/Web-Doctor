@@ -3,6 +3,9 @@
 namespace Tahadudhiya\WebDoctor\Tests\unit;
 
 use PHPUnit\Framework\TestCase;
+use Tahadudhiya\WebDoctor\enums\AuditAction;
+use Tahadudhiya\WebDoctor\enums\AuditObjectType;
+use Tahadudhiya\WebDoctor\enums\AuditResult;
 use Tahadudhiya\WebDoctor\enums\ConditionRole;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
@@ -29,50 +32,32 @@ use Tahadudhiya\WebDoctor\enums\VerificationStatus;
  */
 class VocabularyTest extends TestCase
 {
-    public function testACheckThatCouldNotRunIsNotACheckThatFoundNothing(): void
+    /**
+     * What each status says, as a truth table over every case. The difference the whole product
+     * rests on: a check that broke (`error`) has said nothing about the site and is never read as
+     * a clean result, nor as a problem with the site — which only `warning` and `fail` are. An
+     * unanswered question is not a clean bill of health, so it counts against it; a check that did
+     * not apply is not a question at all.
+     */
+    public function testWhatEachStatusSaysAboutTheSite(): void
     {
-        // The difference the whole product rests on: a diagnostic that broke has said nothing
-        // about the site, and must never be read as a clean result.
-        self::assertTrue(DiagnosticStatus::PASS->isConclusive());
-        self::assertFalse(DiagnosticStatus::ERROR->isConclusive());
-        self::assertFalse(DiagnosticStatus::UNKNOWN->isConclusive());
-        self::assertFalse(DiagnosticStatus::SKIPPED->isConclusive());
-    }
+        // [conclusive, a problem, counts against health]
+        $expected = [
+            'pass' => [true, false, false],
+            'info' => [true, false, false],
+            'warning' => [true, true, true],
+            'fail' => [true, true, true],
+            'error' => [false, false, true],
+            'skipped' => [false, false, false],
+            'unknown' => [false, false, true],
+        ];
 
-    public function testACheckThatFailedIsNotACheckThatBroke(): void
-    {
-        // FAIL: the thing inspected is broken. ERROR: the check is broken and knows nothing.
-        self::assertTrue(DiagnosticStatus::FAIL->isConclusive());
-        self::assertTrue(DiagnosticStatus::FAIL->isProblem());
+        $actual = [];
+        foreach (DiagnosticStatus::cases() as $status) {
+            $actual[$status->value] = [$status->isConclusive(), $status->isProblem(), $status->countsTowardHealth()];
+        }
 
-        self::assertFalse(DiagnosticStatus::ERROR->isConclusive());
-        self::assertFalse(DiagnosticStatus::ERROR->isProblem());
-    }
-
-    public function testOnlyFindingsAboutTheSiteCountAsProblems(): void
-    {
-        self::assertTrue(DiagnosticStatus::WARNING->isProblem());
-        self::assertTrue(DiagnosticStatus::FAIL->isProblem());
-
-        // An error is Web Doctor's problem, not the site's.
-        self::assertFalse(DiagnosticStatus::ERROR->isProblem());
-        self::assertFalse(DiagnosticStatus::INFO->isProblem());
-        self::assertFalse(DiagnosticStatus::PASS->isProblem());
-    }
-
-    public function testWhatCountsAgainstHealthIsEveryUnansweredQuestionAndNothingElse(): void
-    {
-        $counting = array_values(array_filter(
-            DiagnosticStatus::cases(),
-            static fn(DiagnosticStatus $s): bool => $s->countsTowardHealth(),
-        ));
-
-        // An unanswered question is not a clean bill of health; a check that did not apply is
-        // not a question at all.
-        self::assertSame(
-            [DiagnosticStatus::WARNING, DiagnosticStatus::FAIL, DiagnosticStatus::ERROR, DiagnosticStatus::UNKNOWN],
-            $counting,
-        );
+        self::assertSame($expected, $actual);
     }
 
     public function testEveryStatusImpliesASeverityForResultsThatStateNone(): void
@@ -101,30 +86,15 @@ class VocabularyTest extends TestCase
         self::assertNotContains('critical', DiagnosticStatus::values());
     }
 
-    public function testSeveritiesAreOrderedLowToHigh(): void
+    public function testSeveritiesAreOrderedLowToHighAndTheWorstIsTaken(): void
     {
-        $ranks = array_map(static fn(Severity $s): int => $s->rank(), Severity::cases());
-
-        self::assertSame([0, 1, 2, 3, 4], $ranks);
+        self::assertSame([0, 1, 2, 3, 4], array_map(static fn(Severity $s): int => $s->rank(), Severity::cases()));
         self::assertSame(['info', 'low', 'medium', 'high', 'critical'], Severity::values());
-    }
 
-    public function testTheMoreSevereOfTwoIsTaken(): void
-    {
         self::assertSame(Severity::CRITICAL, Severity::LOW->max(Severity::CRITICAL));
         self::assertSame(Severity::CRITICAL, Severity::CRITICAL->max(Severity::LOW));
-    }
+        self::assertSame(Severity::HIGH, Severity::highest([Severity::LOW, Severity::HIGH, Severity::MEDIUM]));
 
-    public function testTheWorstOfManyIsFound(): void
-    {
-        self::assertSame(
-            Severity::HIGH,
-            Severity::highest([Severity::LOW, Severity::HIGH, Severity::MEDIUM]),
-        );
-    }
-
-    public function testNothingHasNoWorstSeverity(): void
-    {
         // A run with nothing against it reports no worst severity rather than the mildest one,
         // which would read as a finding that was never made.
         self::assertNull(Severity::highest([]));
@@ -201,6 +171,9 @@ class VocabularyTest extends TestCase
             RepairRisk::cases(),
             RepairStatus::cases(),
             VerificationStatus::cases(),
+            AuditAction::cases(),
+            AuditResult::cases(),
+            AuditObjectType::cases(),
         ];
 
         foreach ($vocabularies as $cases) {
@@ -215,6 +188,23 @@ class VocabularyTest extends TestCase
             // status column impossible to act on.
             self::assertSame($labels, array_unique($labels));
         }
+    }
+
+    public function testTheAuditTrailNamesActsByWhatTheyWereDoneToAndHowTheyEndedNotWhatTheyFound(): void
+    {
+        // Each act is its object and its verb, so the log groups and filters by either; the values
+        // are stored, so they are fixed.
+        foreach (AuditAction::cases() as $action) {
+            self::assertMatchesRegularExpression('/\A[a-z]+\.[a-z][a-zA-Z]*\z/', $action->value);
+        }
+
+        self::assertSame(
+            ['diagnostics.started', 'diagnostics.completed', 'investigation.started', 'investigation.completed', 'recommendations.generated', 'repair.previewed', 'repair.executed', 'verification.executed', 'issue.resolved', 'issue.statusChanged'],
+            AuditAction::values(),
+        );
+
+        // How it ended, never what it found: a run that found ten problems succeeded.
+        self::assertSame(['succeeded', 'partial', 'failed', 'inconclusive', 'none'], AuditResult::values());
     }
 
     public function testEvidenceCanBeTypedByEveryPartOfTheInstallationItDescribes(): void

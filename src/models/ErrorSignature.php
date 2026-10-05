@@ -162,9 +162,7 @@ final class ErrorSignature
      */
     public function shortClass(): string
     {
-        $slash = strrpos($this->class, '\\');
-
-        return $slash === false ? $this->class : substr($this->class, $slash + 1);
+        return SafeException::shortName($this->class);
     }
 
     /**

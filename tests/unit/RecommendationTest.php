@@ -342,6 +342,53 @@ class RecommendationTest extends TestCase
         self::assertSame(['queue.startRunner'], array_map(static fn(Recommendation $r): string => $r->ruleId, (new Recommendations())->recommend($unread)->recommendations));
     }
 
+    /**
+     * A cause read back with any part of it unreadable is not acted on, however firmly it was held:
+     * its advice would rest on a record that does not say what was concluded.
+     */
+    #[DataProvider('unreadableCauseColumns')]
+    public function testACauseWithAnyPartUnreadableIsNotActedOn(string $column): void
+    {
+        $finding = self::reported('queue.backlog', Status::FAIL, [self::backlog(waiting: 12, oldest: 7200)]);
+        $whole = self::cause('queue.notProcessing', Confidence::HIGH);
+        $ids = static fn(RootCause $cause): array => array_map(
+            static fn(Recommendation $r): string => $r->ruleId,
+            (new Recommendations())->recommend(RecommendationCase::fromResult($finding, 3, [$cause]))->recommendations,
+        );
+
+        // The same cause whole is acted on, so the refusal below is the unreadable part's alone.
+        self::assertSame(['queue.startWorker', 'queue.startRunner'], $ids($whole));
+
+        $partial = new RootCause(
+            ruleId: $whole->ruleId,
+            title: $whole->title,
+            statement: $whole->statement,
+            problem: $whole->problem,
+            confidence: $whole->confidence,
+            conditions: $whole->conditions,
+            reasoning: $whole->reasoning,
+            relatedIssues: $whole->relatedIssues,
+            recommendation: $whole->recommendation,
+            nextSteps: $whole->nextSteps,
+            position: $whole->position,
+            id: $whole->id,
+            investigationId: $whole->investigationId,
+            unreadable: [$column],
+        );
+
+        self::assertSame(['queue.startRunner'], $ids($partial));
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function unreadableCauseColumns(): array
+    {
+        $columns = ['supporting', 'conflicting', 'unmet', 'relatedIssues', 'reasoning', 'nextSteps', 'confidence'];
+
+        return array_combine($columns, array_map(static fn(string $c): array => [$c], $columns));
+    }
+
     public function testTheOrderCausesArriveInAndDuplicateRulesChangeNothing(): void
     {
         $finding = self::reported('database.connection', Status::FAIL, self::connectionFailed());
@@ -572,6 +619,29 @@ class RecommendationTest extends TestCase
         self::assertSame([], $partial->recommendations);
         self::assertTrue($partial->partialEvidence);
         self::assertFalse($partial->nothingApplies());
+
+        // Nor is one whose evidence, read back, holds a type or data that cannot be read: an
+        // unknown type is never matched as the one it is carried as, and missing data is not "none".
+        foreach (['type' => 'a type from elsewhere', 'data' => 'not a structure', 'metadata' => 7, 'confidence' => 'surely', 'data missing' => null] as $field => $value) {
+            $stored = array_map(static fn(Evidence $e): array => $e->jsonSerialize(), $result->evidence());
+
+            if ($field === 'data missing') {
+                unset($stored[0]['data']);
+            } else {
+                $stored[0][$field] = $value;
+            }
+            $unreadable = (new Recommendations())->recommend(new RecommendationCase(
+                diagnosticId: $result->diagnosticId,
+                name: $result->name,
+                status: $result->status,
+                severity: $result->severity(),
+                problem: $result->summary,
+                evidence: array_map(static fn(array $e): Evidence => Evidence::fromArray($e), $stored),
+            ));
+
+            self::assertSame([], $unreadable->recommendations, $field);
+            self::assertTrue($unreadable->partialEvidence, $field);
+        }
     }
 
     // --- Findings, as the checks produce them.

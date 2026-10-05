@@ -4,14 +4,13 @@ namespace Tahadudhiya\WebDoctor\models;
 
 use Craft;
 use DateTimeImmutable;
-use DateTimeZone;
 use JsonSerializable;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\InvestigationStatus;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
 use Tahadudhiya\WebDoctor\recipes\Recipe;
 use Tahadudhiya\WebDoctor\records\InvestigationRecord;
-use Throwable;
 
 /**
  * One investigation, as it stands: what it set out to look at and why, how far it got, and what it
@@ -27,6 +26,8 @@ use Throwable;
  */
 final class Investigation implements JsonSerializable
 {
+    use NamesUnreadable;
+
     /** @var int Seconds after which one still `running` is taken to have stopped. */
     public const STOPPED_AFTER = 3600;
 
@@ -47,8 +48,8 @@ final class Investigation implements JsonSerializable
         public readonly ?int $issueId,
         public readonly ?string $recipeId,
         public readonly ?string $runId,
-        public readonly InvestigationStatus $status,
-        public readonly DiagnosticDepth $depth,
+        public readonly ?InvestigationStatus $status,
+        public readonly ?DiagnosticDepth $depth,
         public readonly InvestigationPlan $plan,
         public readonly string $environment,
         public readonly ?int $siteId,
@@ -62,15 +63,17 @@ final class Investigation implements JsonSerializable
         public readonly int $relatedIssues,
         public readonly ?DiagnosticStatus $originStatus,
         public readonly ?string $failure,
-        public readonly DateTimeImmutable $startedAt,
+        public readonly ?DateTimeImmutable $startedAt,
         public readonly ?DateTimeImmutable $finishedAt,
         public readonly ?float $durationMs,
+        public readonly array $unreadable = [],
     ) {
     }
 
     /**
-     * Reads a stored row. A status this version does not have reads as partly completed rather
-     * than completed: not knowing how an investigation went is not a reason to call it whole.
+     * Reads a stored row, strictly. A status or depth this version does not have, a moment that is
+     * not one, or a plan that cannot be read is null (the plan: one with nothing in it) and named in
+     * `$unreadable` — never read as partly completed, normal depth or now — and the page says so.
      */
     public static function fromRecord(InvestigationRecord $record): self
     {
@@ -81,16 +84,21 @@ final class Investigation implements JsonSerializable
             $plan = is_array($decoded) ? InvestigationPlan::fromArray($decoded) : null;
         }
 
-        $depth = DiagnosticDepth::tryFrom((string)$record->depth) ?? DiagnosticDepth::NORMAL;
+        $status = InvestigationStatus::tryFrom((string)$record->status);
+        $depth = DiagnosticDepth::tryFrom((string)$record->depth);
+        $origin = $record->originStatus === null ? null : DiagnosticStatus::tryFrom((string)$record->originStatus);
+        $startedAt = StoredTime::read($record->startedAt);
+        $finishedAt = StoredTime::readOptional($record->finishedAt);
 
         return new self(
             id: (int)$record->id,
             issueId: $record->issueId === null ? null : (int)$record->issueId,
             recipeId: is_string($record->recipeId) && $record->recipeId !== '' ? $record->recipeId : null,
             runId: $record->runId,
-            status: InvestigationStatus::tryFrom((string)$record->status) ?? InvestigationStatus::PARTIAL,
+            status: $status,
             depth: $depth,
-            plan: $plan ?? new InvestigationPlan(ruleId: (string)$record->ruleId, ruleLabel: '', depth: $depth, checks: []),
+            // A plan carries the reasons the page lists; one that cannot be read lists none, and says so.
+            plan: $plan ?? new InvestigationPlan(ruleId: (string)$record->ruleId, ruleLabel: '', depth: $depth ?? DiagnosticDepth::NORMAL, checks: []),
             environment: (string)$record->environment,
             siteId: $record->siteId === null ? null : (int)$record->siteId,
             startedBy: $record->startedBy === null ? null : (int)$record->startedBy,
@@ -101,11 +109,19 @@ final class Investigation implements JsonSerializable
             checksSkipped: (int)$record->checksSkipped,
             evidenceCount: (int)$record->evidenceCount,
             relatedIssues: (int)$record->relatedIssues,
-            originStatus: $record->originStatus === null ? null : DiagnosticStatus::tryFrom((string)$record->originStatus),
+            originStatus: $origin,
             failure: $record->failure,
-            startedAt: self::time($record->startedAt) ?? new DateTimeImmutable(),
-            finishedAt: self::time($record->finishedAt),
+            startedAt: $startedAt,
+            finishedAt: $finishedAt === false ? null : $finishedAt,
             durationMs: $record->durationMs === null ? null : (float)$record->durationMs,
+            unreadable: array_keys(array_filter([
+                'status' => $status === null,
+                'depth' => $depth === null,
+                'plan' => $plan === null,
+                'originStatus' => $record->originStatus !== null && $origin === null,
+                'startedAt' => $startedAt === null,
+                'finishedAt' => $finishedAt === false,
+            ])),
         );
     }
 
@@ -123,14 +139,19 @@ final class Investigation implements JsonSerializable
      */
     public function hasStopped(?DateTimeImmutable $now = null): bool
     {
+        // One whose start cannot be read cannot be shown to be recent, so it is said to have stopped.
         return $this->status === InvestigationStatus::RUNNING
-            && ($now ?? new DateTimeImmutable())->getTimestamp() - $this->startedAt->getTimestamp() > self::STOPPED_AFTER;
+            && ($this->startedAt === null || ($now ?? new DateTimeImmutable())->getTimestamp() - $this->startedAt->getTimestamp() > self::STOPPED_AFTER);
     }
 
     /** Where it stands, as a reader should be told it. */
     public function statusLabel(?DateTimeImmutable $now = null): string
     {
-        return $this->hasStopped($now) ? Craft::t('web-doctor', 'Stopped without an ending') : $this->status->label();
+        return match (true) {
+            $this->status === null => Craft::t('web-doctor', 'Could not be read'),
+            $this->hasStopped($now) => Craft::t('web-doctor', 'Stopped without an ending'),
+            default => $this->status->label(),
+        };
     }
 
     public function originOutcome(): ?string
@@ -143,7 +164,7 @@ final class Investigation implements JsonSerializable
             };
         }
 
-        if ($this->status->isFinished() && $this->status !== InvestigationStatus::FAILED && $this->plan->missesOrigin()) {
+        if ($this->status !== null && $this->status->isFinished() && $this->status !== InvestigationStatus::FAILED && $this->plan->missesOrigin()) {
             return self::ORIGIN_UNAVAILABLE;
         }
 
@@ -160,8 +181,8 @@ final class Investigation implements JsonSerializable
             'issueId' => $this->issueId,
             'recipeId' => $this->recipeId,
             'runId' => $this->runId,
-            'status' => $this->status->value,
-            'depth' => $this->depth->value,
+            'status' => $this->status?->value,
+            'depth' => $this->depth?->value,
             'plan' => $this->plan->jsonSerialize(),
             'environment' => $this->environment,
             'siteId' => $this->siteId,
@@ -175,23 +196,9 @@ final class Investigation implements JsonSerializable
             'originStatus' => $this->originStatus?->value,
             'originOutcome' => $this->originOutcome(),
             'failure' => $this->failure,
-            'startedAt' => $this->startedAt->format(DATE_ATOM),
+            'startedAt' => $this->startedAt?->format(DATE_ATOM),
             'finishedAt' => $this->finishedAt?->format(DATE_ATOM),
             'durationMs' => $this->durationMs,
         ];
-    }
-
-    private static function time(?string $value): ?DateTimeImmutable
-    {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        try {
-            // Stored the way Craft stores every date: UTC.
-            return new DateTimeImmutable($value, new DateTimeZone('UTC'));
-        } catch (Throwable) {
-            return null;
-        }
     }
 }

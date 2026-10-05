@@ -2,12 +2,11 @@
 
 namespace Tahadudhiya\WebDoctor\models;
 
-use Craft;
 use DateTimeImmutable;
-use DateTimeZone;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
 use Tahadudhiya\WebDoctor\records\ErrorGroupRecord;
-use Throwable;
 
 /**
  * One error as it stands across every time it happened: what it is, how often and between when
@@ -37,11 +36,12 @@ final class ErrorGroup
         public readonly ?int $siteId,
         public readonly ?string $siteName,
         public readonly int $occurrences,
-        public readonly DateTimeImmutable $firstSeen,
-        public readonly DateTimeImmutable $lastSeen,
+        public readonly ?DateTimeImmutable $firstSeen,
+        public readonly ?DateTimeImmutable $lastSeen,
         public readonly ?string $firstRunId,
         public readonly ?string $lastRunId,
         public readonly array $sources = [],
+        public readonly array $unreadable = [],
     ) {
     }
 
@@ -55,8 +55,8 @@ final class ErrorGroup
         foreach (self::decode($record->previous) as $link) {
             if (is_array($link)) {
                 $previous[] = [
-                    'class' => (string)($link['class'] ?? ''),
-                    'message' => Redaction::redactString((string)($link['message'] ?? '')),
+                    'class' => is_string($link['class'] ?? null) ? $link['class'] : '',
+                    'message' => Redaction::redactString(is_string($link['message'] ?? null) ? $link['message'] : ''),
                 ];
             }
         }
@@ -78,11 +78,18 @@ final class ErrorGroup
             siteId: $record->siteId === null ? null : (int)$record->siteId,
             siteName: $record->siteName,
             occurrences: (int)$record->occurrences,
-            firstSeen: self::time($record->firstSeen) ?? new DateTimeImmutable(),
-            lastSeen: self::time($record->lastSeen) ?? new DateTimeImmutable(),
+            // Moments that are not ones are unreadable, never now.
+            firstSeen: StoredTime::read($record->firstSeen),
+            lastSeen: StoredTime::read($record->lastSeen),
             firstRunId: $record->firstRunId,
             lastRunId: $record->lastRunId,
             sources: $sources,
+            unreadable: array_keys(array_filter([
+                'firstSeen' => StoredTime::read($record->firstSeen) === null,
+                'lastSeen' => StoredTime::read($record->lastSeen) === null,
+                'previous' => !self::readable($record->previous),
+                'frames' => !self::readable($record->frames),
+            ])),
         );
     }
 
@@ -91,9 +98,7 @@ final class ErrorGroup
      */
     public function shortClass(): string
     {
-        $slash = strrpos($this->exceptionClass, '\\');
-
-        return $slash === false ? $this->exceptionClass : substr($this->exceptionClass, $slash + 1);
+        return SafeException::shortName($this->exceptionClass);
     }
 
     /**
@@ -102,21 +107,7 @@ final class ErrorGroup
      */
     public function siteLabel(): string
     {
-        if ($this->siteId === null) {
-            return $this->siteName === null
-                ? Craft::t('web-doctor', 'All sites')
-                : Craft::t('web-doctor', '{name} (deleted)', ['name' => $this->siteName]);
-        }
-
-        // The site's name now, as the issue page reads it, so a renamed site reads the same on
-        // every page; the name kept at recording where the site cannot be read.
-        try {
-            $name = Craft::$app->getSites()->getSiteById($this->siteId)?->getName();
-        } catch (\Throwable) {
-            $name = null;
-        }
-
-        return $name ?? $this->siteName ?? Craft::t('web-doctor', 'Site #{id} (no longer available)', ['id' => $this->siteId]);
+        return SiteName::label($this->siteId, $this->siteName);
     }
 
     /** Whether this error has happened more than once. */
@@ -146,6 +137,12 @@ final class ErrorGroup
     /**
      * @return array<array-key, mixed>
      */
+    /** Whether a stored JSON column holds what was written: nothing, or a structure. */
+    private static function readable(?string $json): bool
+    {
+        return $json === null || is_array(json_decode($json, true));
+    }
+
     private static function decode(?string $json): array
     {
         if ($json === null || $json === '') {
@@ -155,18 +152,5 @@ final class ErrorGroup
         $decoded = json_decode($json, true);
 
         return is_array($decoded) ? $decoded : [];
-    }
-
-    private static function time(?string $value): ?DateTimeImmutable
-    {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        try {
-            return new DateTimeImmutable($value, new DateTimeZone('UTC'));
-        } catch (Throwable) {
-            return null;
-        }
     }
 }
