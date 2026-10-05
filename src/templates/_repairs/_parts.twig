@@ -1,0 +1,25 @@
+{#
+    How a repair's risk, status and verification are shown, the same on every page. A value its row
+    could not be read for is said to be unreadable rather than shown as another.
+#}
+
+{% macro risk(repair) -%}
+    {%- import "web-doctor/_macros" as shared -%}
+    {{- shared.pill('wd-pill--risk-', repair.risk) -}}
+{%- endmacro %}
+
+{% macro status(repair) -%}
+    {%- import "web-doctor/_macros" as shared -%}
+    {{- shared.pill('wd-pill--repair-', repair.status, repair.status ? repair.statusLabel() : null) -}}
+{%- endmacro %}
+
+{% macro verification(repair) -%}
+    {%- import "web-doctor/_macros" as shared -%}
+    {%- if not repair.status or not repair.verificationStatus -%}
+        {{ shared.unreadable() }}
+    {%- elseif repair.status.wasExecuted() -%}
+        {{- shared.pill('wd-pill--verification-', repair.verificationStatus) -}}
+    {%- else -%}
+        <span class="light">—</span>
+    {%- endif -%}
+{%- endmacro %}

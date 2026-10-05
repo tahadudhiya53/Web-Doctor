@@ -4,13 +4,15 @@ namespace Tahadudhiya\WebDoctor\models;
 
 use Craft;
 use DateTimeImmutable;
-use DateTimeZone;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\RepairRisk;
 use Tahadudhiya\WebDoctor\enums\RepairStatus;
 use Tahadudhiya\WebDoctor\enums\VerificationStatus;
+use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
+use Tahadudhiya\WebDoctor\helpers\StoredJson;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
 use Tahadudhiya\WebDoctor\records\RepairRecord;
-use Throwable;
 
 /**
  * One repair of an issue, as it stands: the action, its risk, what it would do, what had to be true
@@ -23,6 +25,8 @@ use Throwable;
  */
 final class Repair
 {
+    use NamesUnreadable;
+
     /**
      * @var int How long a preview may be confirmed for, in seconds. What it describes is read live,
      * and an old preview is one nobody should be confirming.
@@ -48,14 +52,15 @@ final class Repair
         public readonly string $diagnosticId,
         public readonly string $action,
         public readonly string $actionName,
-        public readonly RepairRisk $risk,
+        public readonly ?RepairRisk $risk,
         public readonly string $riskReason,
-        public readonly RepairStatus $status,
-        public readonly VerificationStatus $verificationStatus,
+        public readonly ?RepairStatus $status,
+        public readonly ?VerificationStatus $verificationStatus,
         public readonly array $verifyWith,
         public readonly string $verificationNote,
         public readonly string $environment,
         public readonly ?int $siteId,
+        public readonly ?string $siteName,
         public readonly RepairReport $preview,
         public readonly string $fingerprint,
         public readonly string $definitionFingerprint,
@@ -67,23 +72,34 @@ final class Repair
         public readonly ?IssueStatus $issueStatusBefore,
         public readonly ?int $previewedBy,
         public readonly ?int $executedBy,
-        public readonly DateTimeImmutable $previewedAt,
+        public readonly ?string $previewedByName,
+        public readonly ?string $executedByName,
+        public readonly ?DateTimeImmutable $previewedAt,
         public readonly ?DateTimeImmutable $startedAt,
         public readonly ?DateTimeImmutable $finishedAt,
         public readonly ?float $durationMs,
         private readonly bool $intact,
+        public readonly array $unreadable = [],
     ) {
     }
 
     /**
-     * Reads a stored row. Anything unreadable reads as the more cautious answer: an unknown risk as
-     * high, an unknown status as already carried out, so a row this version cannot read is never
-     * offered for confirmation.
+     * Reads a stored row, strictly. A field that does not hold what Web Doctor writes — a status,
+     * risk or verification answer this version does not know, a moment that is not one, a preview or
+     * outcome that is not JSON — is null and named in `$unreadable`, never given a value it did not
+     * have: a repair whose status cannot be read is not shown as failed, and one whose preview cannot
+     * be read is not shown as having changed nothing. Such a row, like any that is not whole, can be
+     * read as history and never carried out or verified.
      */
     public static function fromRecord(RepairRecord $record): self
     {
+        $unreadable = [];
+        [$stored, $prerequisitesRead] = StoredJson::decode($record->prerequisites);
+        [$outcome, $outcomeRead] = StoredJson::decode($record->outcome);
+        [$previewData, $previewRead] = StoredJson::decode($record->preview);
+        [$verifyWith, $verifyWithRead] = StoredJson::decode($record->verifyWith);
+        [$acknowledged, $acknowledgedRead] = StoredJson::decode($record->acknowledged);
         $prerequisites = [];
-        $stored = self::decode($record->prerequisites);
 
         foreach ($stored as $entry) {
             $prerequisite = is_array($entry) ? Prerequisite::fromArray($entry) : null;
@@ -93,18 +109,44 @@ final class Repair
             }
         }
 
-        $outcome = self::decode($record->outcome);
-        $preview = RepairReport::fromArray(self::decode($record->preview));
-        $verifyWith = self::decode($record->verifyWith);
-        $acknowledged = self::decode($record->acknowledged);
+        $preview = RepairReport::fromArray($previewData);
+        $previewWhole = $preview !== null;
+        // A report that cannot be read is said to be unreadable, never shown as one that holds nothing.
+        $preview ??= new RepairReport('');
+        $outcomeReport = $outcome === [] ? null : RepairReport::fromArray($outcome);
+        $status = RepairStatus::tryFrom((string)$record->status);
+        $risk = RepairRisk::tryFrom((string)$record->risk);
+        $verification = VerificationStatus::tryFrom((string)$record->verificationStatus);
+        $before = $record->issueStatusBefore === null ? null : IssueStatus::tryFrom((string)$record->issueStatusBefore);
+        $previewedAt = StoredTime::read($record->previewedAt);
+        $startedAt = StoredTime::readOptional($record->startedAt);
+        $finishedAt = StoredTime::readOptional($record->finishedAt);
         $hash = static fn(mixed $value): bool => is_string($value) && preg_match('/\A[0-9a-f]{64}\z/', $value) === 1;
 
+        foreach ([
+            'status' => $status === null,
+            'risk' => $risk === null,
+            'verificationStatus' => $verification === null,
+            'issueStatusBefore' => $record->issueStatusBefore !== null && $before === null,
+            'previewedAt' => $previewedAt === null,
+            'startedAt' => $startedAt === false,
+            'finishedAt' => $finishedAt === false,
+            'preview' => !$previewRead || $previewData === [] || !$previewWhole,
+            'outcome' => !$outcomeRead || ($outcome !== [] && $outcomeReport === null),
+            'prerequisites' => !$prerequisitesRead,
+            'acknowledged' => !$acknowledgedRead,
+            'verifyWith' => !$verifyWithRead,
+        ] as $field => $broken) {
+            if ($broken) {
+                $unreadable[] = $field;
+            }
+        }
+
         // Whether every part a confirmation relies on was read back as it was written. Anything a
-        // reader of this version cannot account for — an unknown status or risk, a prerequisite
-        // or check that did not parse, a preview that disagrees with its own fingerprint — makes
-        // the row history only: it can be read, never carried out.
-        $intact = RepairStatus::tryFrom((string)$record->status) !== null
-            && RepairRisk::tryFrom((string)$record->risk) !== null
+        // reader of this version cannot account for — an unreadable field, a prerequisite or check
+        // that did not parse, a preview that disagrees with its own fingerprint — makes the row
+        // history only: it can be read, never carried out.
+        $intact = $unreadable === []
             && $hash($record->fingerprint)
             && $hash($record->definitionFingerprint)
             && $preview->fingerprint !== null
@@ -122,31 +164,41 @@ final class Repair
             diagnosticId: (string)$record->diagnosticId,
             action: (string)$record->action,
             actionName: (string)$record->actionName,
-            risk: RepairRisk::tryFrom((string)$record->risk) ?? RepairRisk::HIGH,
+            risk: $risk,
             riskReason: (string)($record->riskReason ?? ''),
-            status: RepairStatus::tryFrom((string)$record->status) ?? RepairStatus::FAILED,
-            verificationStatus: VerificationStatus::tryFrom((string)$record->verificationStatus) ?? VerificationStatus::NONE,
+            status: $status,
+            verificationStatus: $verification,
             verifyWith: array_values(array_filter($verifyWith, 'is_string')),
             verificationNote: (string)($record->verificationNote ?? ''),
             environment: (string)$record->environment,
             siteId: $record->siteId === null ? null : (int)$record->siteId,
+            siteName: self::name($record->siteName),
             preview: $preview,
             fingerprint: (string)$record->fingerprint,
             definitionFingerprint: (string)$record->definitionFingerprint,
             findingRunId: $record->findingRunId,
             prerequisites: $prerequisites,
             acknowledged: array_values(array_filter($acknowledged, 'is_string')),
-            outcome: $outcome === [] ? null : RepairReport::fromArray($outcome),
+            outcome: $outcomeReport,
             failure: $record->failure,
-            issueStatusBefore: IssueStatus::tryFrom((string)$record->issueStatusBefore),
+            issueStatusBefore: $before,
             previewedBy: $record->previewedBy === null ? null : (int)$record->previewedBy,
             executedBy: $record->executedBy === null ? null : (int)$record->executedBy,
-            previewedAt: self::time($record->previewedAt) ?? new DateTimeImmutable('@0'),
-            startedAt: self::time($record->startedAt),
-            finishedAt: self::time($record->finishedAt),
+            previewedByName: self::name($record->previewedByName),
+            executedByName: self::name($record->executedByName),
+            previewedAt: $previewedAt,
+            startedAt: $startedAt === false ? null : $startedAt,
+            finishedAt: $finishedAt === false ? null : $finishedAt,
             durationMs: $record->durationMs === null ? null : (float)$record->durationMs,
             intact: $intact,
+            unreadable: $unreadable,
         );
+    }
+
+    /** Where it was carried out, by the site's name as it was then. */
+    public function siteLabel(): string
+    {
+        return SiteName::recorded($this->siteId, $this->siteName);
     }
 
     /** Whether it was read back whole. A row that was not can be shown but never carried out. */
@@ -155,25 +207,40 @@ final class Repair
         return $this->intact;
     }
 
-    /** When the preview stops being confirmable. */
-    public function expiresAt(): DateTimeImmutable
+    /** When the preview stops being confirmable, or null where when it was made cannot be read. */
+    public function expiresAt(): ?DateTimeImmutable
     {
-        return $this->previewedAt->modify(sprintf('+%d seconds', self::PREVIEW_EXPIRES_AFTER));
+        return $this->previewedAt?->modify(sprintf('+%d seconds', self::PREVIEW_EXPIRES_AFTER));
     }
 
-    /** Whether the preview is too old to confirm. */
+    /**
+     * Whether the preview is too old to confirm. One whose moment cannot be read cannot be shown to
+     * be recent, so it is expired.
+     */
     public function isExpired(?DateTimeImmutable $now = null): bool
     {
+        $expires = $this->expiresAt();
+
         return $this->status === RepairStatus::PREVIEWED
-            && ($now ?? new DateTimeImmutable())->getTimestamp() > $this->expiresAt()->getTimestamp();
+            && ($expires === null || ($now ?? new DateTimeImmutable())->getTimestamp() > $expires->getTimestamp());
     }
 
-    /** Whether it was left under way by a request that went away. */
+    /**
+     * Whether it was left under way by a request that went away. One whose start cannot be read
+     * cannot be shown to be recent either, and is read as stopped so its lock and its issue can be
+     * recovered rather than held for ever.
+     */
     public function hasStopped(?DateTimeImmutable $now = null): bool
     {
-        return $this->status === RepairStatus::RUNNING
-            && $this->startedAt !== null
-            && ($now ?? new DateTimeImmutable())->getTimestamp() - $this->startedAt->getTimestamp() > self::STOPPED_AFTER;
+        if ($this->status !== RepairStatus::RUNNING) {
+            return false;
+        }
+
+        if ($this->startedAt === null) {
+            return $this->isUnreadable('startedAt');
+        }
+
+        return ($now ?? new DateTimeImmutable())->getTimestamp() - $this->startedAt->getTimestamp() > self::STOPPED_AFTER;
     }
 
     /** Whether somebody may still confirm it. */
@@ -186,10 +253,23 @@ final class Repair
     public function statusLabel(?DateTimeImmutable $now = null): string
     {
         return match (true) {
+            $this->status === null => Craft::t('web-doctor', 'Could not be read'),
             $this->isExpired($now) => Craft::t('web-doctor', 'Preview expired'),
             $this->hasStopped($now) => Craft::t('web-doctor', 'Stopped without an ending'),
             default => $this->status->label(),
         };
+    }
+
+    /** Who previewed it, as a reader is told: their username as it was, or that the account has gone. */
+    public function previewedByLabel(): ?string
+    {
+        return self::userLabel($this->previewedBy, $this->previewedByName);
+    }
+
+    /** Who carried it out, or null where nobody has. */
+    public function executedByLabel(): ?string
+    {
+        return self::userLabel($this->executedBy, $this->executedByName);
     }
 
     /**
@@ -214,30 +294,21 @@ final class Repair
         return true;
     }
 
-    /**
-     * @return array<array-key, mixed>
-     */
-    private static function decode(?string $json): array
+    private static function userLabel(?int $id, ?string $name): ?string
     {
-        if ($json === null || $json === '') {
-            return [];
-        }
-
-        $decoded = json_decode($json, true);
-
-        return is_array($decoded) ? $decoded : [];
+        return match (true) {
+            $name !== null && $id !== null => $name,
+            $name !== null => Craft::t('web-doctor', '{name} (deleted)', ['name' => $name]),
+            $id !== null => Craft::t('web-doctor', 'User #{id}', ['id' => $id]),
+            default => null,
+        };
     }
 
-    private static function time(?string $value): ?DateTimeImmutable
+    /**
+     * A stored username, redacted on the way out as everything stored is.
+     */
+    private static function name(mixed $value): ?string
     {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        try {
-            return new DateTimeImmutable($value, new DateTimeZone('UTC'));
-        } catch (Throwable) {
-            return null;
-        }
+        return is_string($value) && $value !== '' ? Redaction::redactString($value) : null;
     }
 }

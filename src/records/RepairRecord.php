@@ -22,6 +22,7 @@ use craft\db\ActiveRecord;
  * @property string|null $verificationNote
  * @property string $environment
  * @property int|null $siteId
+ * @property string|null $siteName
  * @property string|null $preview
  * @property string $fingerprint
  * @property string $definitionFingerprint
@@ -33,6 +34,8 @@ use craft\db\ActiveRecord;
  * @property string|null $lockKey
  * @property int|null $previewedBy
  * @property int|null $executedBy
+ * @property string|null $previewedByName
+ * @property string|null $executedByName
  * @property string $previewedAt
  * @property string|null $startedAt
  * @property string|null $finishedAt

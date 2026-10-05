@@ -4,6 +4,8 @@ namespace Tahadudhiya\WebDoctor\migrations;
 
 use craft\db\Migration;
 use craft\db\Table;
+use Tahadudhiya\WebDoctor\records\AuditRecord;
+use Tahadudhiya\WebDoctor\records\DiagnosticRunRecord;
 use Tahadudhiya\WebDoctor\records\ErrorGroupRecord;
 use Tahadudhiya\WebDoctor\records\ErrorSourceRecord;
 use Tahadudhiya\WebDoctor\records\EvidenceRecord;
@@ -36,6 +38,8 @@ class Install extends Migration
         $this->createErrorSourcesTable();
         $this->createRepairsTable();
         $this->createVerificationsTable();
+        $this->createAuditLogTable();
+        $this->createDiagnosticRunsTable();
 
         return true;
     }
@@ -45,7 +49,9 @@ class Install extends Migration
         // Whatever points at an issue first: dropping the target of a foreign key before the key
         // itself leaves the table that holds it unusable. Steps and root causes point at
         // investigations as well, an error's sources at both the error and an issue, and a
-        // verification at its repair.
+        // verification at its repair. The audit log points at an issue only by a nullable link.
+        $this->dropTableIfExists(DiagnosticRunRecord::TABLE);
+        $this->dropTableIfExists(AuditRecord::TABLE);
         $this->dropTableIfExists(VerificationRecord::TABLE);
         $this->dropTableIfExists(RepairRecord::TABLE);
         $this->dropTableIfExists(ErrorSourceRecord::TABLE);
@@ -453,6 +459,8 @@ class Install extends Migration
             'verificationNote' => $this->text(),
             'environment' => $this->string(255)->notNull(),
             'siteId' => $this->integer(),
+            // The site's name as it was, for the reason the issue keeps it.
+            'siteName' => $this->string(255),
             // What it would do and the state before, redacted and bounded by the report and its
             // evidence — a medium text column holds it with room to spare where a text column
             // might not. The fingerprint is of the whole state, not the bounded list.
@@ -474,6 +482,10 @@ class Install extends Migration
             'lockKey' => $this->char(64),
             'previewedBy' => $this->integer(),
             'executedBy' => $this->integer(),
+            // Their usernames as they were, so the history still says who after an account is
+            // deleted and the IDs beside them are set null.
+            'previewedByName' => $this->string(255),
+            'executedByName' => $this->string(255),
             'previewedAt' => $this->dateTime()->notNull(),
             'startedAt' => $this->dateTime(),
             'finishedAt' => $this->dateTime(),
@@ -488,6 +500,10 @@ class Install extends Migration
         $this->createIndex(null, RepairRecord::TABLE, ['issueId', 'previewedAt']);
         $this->createIndex(null, RepairRecord::TABLE, ['action']);
         $this->createIndex(null, RepairRecord::TABLE, ['siteId']);
+        // The repair history, newest first, and its filters.
+        $this->createIndex(null, RepairRecord::TABLE, ['previewedAt']);
+        $this->createIndex(null, RepairRecord::TABLE, ['status', 'previewedAt']);
+        $this->createIndex(null, RepairRecord::TABLE, ['environment', 'previewedAt']);
 
         // A repair is a record of something done to the installation, so it outlives the issue it
         // was done for: deleting the issue drops the link, and `issueTitle` keeps saying what it was.
@@ -547,5 +563,106 @@ class Install extends Migration
         $this->addForeignKey(null, VerificationRecord::TABLE, ['issueId'], IssueRecord::TABLE, ['id'], 'SET NULL', null);
         $this->addForeignKey(null, VerificationRecord::TABLE, ['siteId'], Table::SITES, ['id'], 'SET NULL', null);
         $this->addForeignKey(null, VerificationRecord::TABLE, ['verifiedBy'], Table::USERS, ['id'], 'SET NULL', null);
+    }
+
+    /**
+     * The audit trail: one row per act — who did what, to what, where, when, and how it ended.
+     * Written once and never changed; only retention removes rows, oldest first.
+     */
+    private function createAuditLogTable(): void
+    {
+        $this->createTable(AuditRecord::TABLE, [
+            'id' => $this->primaryKey(),
+            'action' => $this->string(64)->notNull(),
+            'result' => $this->string(16)->notNull(),
+            'summary' => $this->text()->notNull(),
+            // What it was done to: a run by its run ID, or an issue, investigation, repair or
+            // verification by its row ID — kept as text, since a run is not a row.
+            'objectType' => $this->string(32)->notNull(),
+            'objectId' => $this->string(36),
+            // What the object was called then, so the entry still reads after it is deleted.
+            'objectLabel' => $this->string(255),
+            'issueId' => $this->integer(),
+            'userId' => $this->integer(),
+            // The username as it was, for the reason the issue keeps its site's name.
+            'userName' => $this->string(255),
+            'environment' => $this->string(255)->notNull(),
+            'siteId' => $this->integer(),
+            'siteName' => $this->string(255),
+            // Named values only, redacted and bounded by the entry model: never a payload.
+            'details' => $this->text(),
+            'occurredAt' => $this->dateTime()->notNull(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+            'uid' => $this->uid(),
+        ]);
+
+        // The log, newest or oldest first, and retention, which removes by age.
+        $this->createIndex(null, AuditRecord::TABLE, ['occurredAt', 'id']);
+        $this->createIndex(null, AuditRecord::TABLE, ['action', 'occurredAt']);
+        $this->createIndex(null, AuditRecord::TABLE, ['result', 'occurredAt']);
+        $this->createIndex(null, AuditRecord::TABLE, ['userId', 'occurredAt']);
+        $this->createIndex(null, AuditRecord::TABLE, ['issueId', 'occurredAt']);
+        $this->createIndex(null, AuditRecord::TABLE, ['environment', 'occurredAt']);
+        $this->createIndex(null, AuditRecord::TABLE, ['objectType', 'objectId']);
+        $this->createIndex(null, AuditRecord::TABLE, ['siteId']);
+
+        // A record of what was done outlives what it was done to and who did it: each deletion
+        // drops the link, and the names kept beside it still say what and who.
+        $this->addForeignKey(null, AuditRecord::TABLE, ['issueId'], IssueRecord::TABLE, ['id'], 'SET NULL', null);
+        $this->addForeignKey(null, AuditRecord::TABLE, ['userId'], Table::USERS, ['id'], 'SET NULL', null);
+        $this->addForeignKey(null, AuditRecord::TABLE, ['siteId'], Table::SITES, ['id'], 'SET NULL', null);
+    }
+
+    /**
+     * Diagnostic history: one row per run somebody set going, as it finished, with its health
+     * snapshot where it covered every check. Written once and never changed; only retention removes
+     * rows, oldest first.
+     */
+    private function createDiagnosticRunsTable(): void
+    {
+        $this->createTable(DiagnosticRunRecord::TABLE, [
+            'id' => $this->primaryKey(),
+            'runId' => $this->string(36)->notNull(),
+            'environment' => $this->string(255)->notNull(),
+            'siteId' => $this->integer(),
+            // Names as they were, for the reason the issue keeps its site's name.
+            'siteName' => $this->string(255),
+            'mode' => $this->string(16)->notNull(),
+            'depth' => $this->string(16)->notNull(),
+            'userId' => $this->integer(),
+            'userName' => $this->string(255),
+            'checksRegistered' => $this->integer()->notNull(),
+            'checksRun' => $this->integer()->notNull(),
+            // Whether the run covered every check registered then: only such a run has a score.
+            'complete' => $this->boolean()->notNull(),
+            'statusCounts' => $this->text()->notNull(),
+            // The health snapshot: the score with everything behind it, or none of it.
+            'score' => $this->integer(),
+            'maxScore' => $this->integer(),
+            'weights' => $this->text(),
+            'severityCounts' => $this->text(),
+            'contributions' => $this->mediumText(),
+            // Each check's answer, redacted and bounded: five hundred at most, the rest counted.
+            'results' => $this->mediumText()->notNull(),
+            'resultsOmitted' => $this->integer()->notNull()->defaultValue(0),
+            'startedAt' => $this->dateTime()->notNull(),
+            'finishedAt' => $this->dateTime()->notNull(),
+            'durationMs' => $this->float(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+            'uid' => $this->uid(),
+        ]);
+
+        $this->createIndex(null, DiagnosticRunRecord::TABLE, ['runId'], true);
+        // The history, newest or oldest first, its filters, and retention by age.
+        $this->createIndex(null, DiagnosticRunRecord::TABLE, ['startedAt', 'id']);
+        $this->createIndex(null, DiagnosticRunRecord::TABLE, ['environment', 'siteId', 'startedAt']);
+        $this->createIndex(null, DiagnosticRunRecord::TABLE, ['siteId']);
+        $this->createIndex(null, DiagnosticRunRecord::TABLE, ['userId']);
+
+        // A record of what was found outlives who ran it and where.
+        $this->addForeignKey(null, DiagnosticRunRecord::TABLE, ['siteId'], Table::SITES, ['id'], 'SET NULL', null);
+        $this->addForeignKey(null, DiagnosticRunRecord::TABLE, ['userId'], Table::USERS, ['id'], 'SET NULL', null);
     }
 }

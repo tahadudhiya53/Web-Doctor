@@ -1,0 +1,116 @@
+{# The diagnostic history, kept apart from the control panel shell for the reason the issue list is. #}
+
+{% import "web-doctor/_macros" as shared %}
+
+{% if failure %}
+    <div class="pane wd-failure" role="alert">
+        <p><strong>{{ failure }}</strong></p>
+    </div>
+{% endif %}
+
+{% if runs is not null %}
+    <div class="pane">
+        <p class="wd-issues__headline">
+            {{ "{count, plural, =0{No runs have been kept.} =1{1 run has been kept.} other{# runs have been kept.}}"|t('web-doctor', { count: runs.total }) }}
+        </p>
+        <p class="light">
+            {{ "Every run set going from the overview, as it finished: who ran it, where, at what depth and what each check answered. A run that covered every check registered then keeps its health score with the weights and penalties behind it; a partial run keeps no score, as the overview shows none. Nothing here is worked out again from the checks as they are now. Each issue’s own history is on its page. Runs are kept for {days} days."|t('web-doctor', { days: retainDays }) }}
+        </p>
+    </div>
+
+    <form method="get" action="" accept-charset="UTF-8" class="pane wd-filters">
+        <h2>{{ "Filter"|t('web-doctor') }}</h2>
+        <div class="wd-filters__grid">
+            <div class="wd-filters__group">
+                <label for="wd-history-environment">{{ "Environment"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-history-environment" name="environment">
+                        <option value="">{{ "Any environment"|t('web-doctor') }}</option>
+                        {% for environment in environments %}
+                            <option value="{{ environment }}"{{ filter.environment == environment ? ' selected' : '' }}>{{ shared.plainText(environment) }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                {{ shared.siteFilter('wd-history-site', filter, sites ?? []) }}
+                <label class="wd-filters__check">
+                    <input type="checkbox" name="scored" value="1"{{ filter.snapshotsOnly ? ' checked' : '' }}>
+                    {{ "Only runs with a health score"|t('web-doctor') }}
+                </label>
+            </div>
+            <div class="wd-filters__group">
+                <label for="wd-history-from">{{ "From"|t('web-doctor') }}</label>
+                <input type="date" id="wd-history-from" name="from" class="text fullwidth" value="{{ filter.from }}">
+                <label for="wd-history-to">{{ "To"|t('web-doctor') }}</label>
+                <input type="date" id="wd-history-to" name="to" class="text fullwidth" value="{{ filter.to }}">
+                <label for="wd-history-order">{{ "Order"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-history-order" name="order">
+                        <option value="newest">{{ "Newest first"|t('web-doctor') }}</option>
+                        <option value="oldest"{{ filter.oldestFirst ? ' selected' : '' }}>{{ "Oldest first"|t('web-doctor') }}</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        <div class="wd-filters__actions">
+            <button type="submit" class="btn submit">{{ "Apply"|t('web-doctor') }}</button>
+            <a class="btn" href="{{ cpUrl('web-doctor/history') }}">{{ "Clear"|t('web-doctor') }}</a>
+        </div>
+    </form>
+
+    {% if runs.isEmpty() %}
+        <div class="pane wd-empty">
+            <p>{{- filter.isFiltering() ? "No runs match this filter."|t('web-doctor') : "No runs have been kept."|t('web-doctor') -}}</p>
+            <p class="light">{{ "A run is kept when somebody runs the checks from the overview."|t('web-doctor') }}</p>
+        </div>
+    {% else %}
+        <div class="pane">
+            <div class="wd-table-scroll">
+            <table class="data fullwidth wd-ledger">
+                <thead>
+                    <tr>
+                        <th scope="col" class="wd-col-narrow">{{ "When"|t('web-doctor') }}</th>
+                        <th scope="col" class="wd-col-narrow">{{ "Health score"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "What the checks answered"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Who"|t('web-doctor') }}</th>
+                        <th scope="col" class="wd-col-narrow">{{ "Where"|t('web-doctor') }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for run in runs.items %}
+                        <tr>
+                            <td class="wd-col-narrow"><a href="{{ cpUrl('web-doctor/history/' ~ run.id) }}">{{ shared.when(run.startedAt) }}</a></td>
+                            <td class="wd-col-narrow">
+                                {% if run.isUnreadable('snapshot') %}
+                                    {{ shared.unreadable() }}
+                                {% elseif run.hasSnapshot() %}
+                                    <strong>{{ run.score }}</strong> / {{ run.maxScore }}
+                                {% else %}
+                                    <span class="light">{{ "None: {run} of {registered} checks ran"|t('web-doctor', { run: run.checksRun, registered: run.checksRegistered }) }}</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if run.isUnreadable('statusCounts') %}
+                                    {{ shared.unreadable() }}
+                                {% else %}
+                                    {% for status, count in run.statusCounts|filter(c => c > 0) %}
+                                        <span class="wd-pill wd-pill--{{ status }}">{{ count }} {{ statusLabels[status] }}</span>
+                                    {% endfor %}
+                                {% endif %}
+                                <div class="light">{{ shared.label(run.depth) }} &middot; {{ shared.label(run.mode) }}</div>
+                            </td>
+                            <td>{{ shared.text(run.userLabel()) }}</td>
+                            <td class="wd-col-narrow">
+                                <div>{{ shared.text(run.environment) }}</div>
+                                <div class="light">{{ shared.text(run.siteLabel()) }}</div>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+
+            {{ shared.pager(runs, 'web-doctor/history', filter) }}
+        </div>
+    {% endif %}
+{% endif %}

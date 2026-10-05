@@ -537,6 +537,7 @@
 }
 
 .wd-mark--redacted { background: #1d2a35; color: #fff; }
+.wd-mark--unreadable { background: #b00020; color: #fff; }
 .wd-mark--truncated { background: transparent; color: #8a5200; border: 1px dashed #8a5200; }
 .wd-mark--presence { background: transparent; color: var(--text-color, #1d2a35); border: 1px solid var(--hairline-color, rgba(51, 64, 77, 0.3)); }
 .wd-mark--presence-present { border-color: #1f6b30; color: #1f6b30; }
@@ -927,4 +928,21 @@
 /* Four columns of prose cannot share a phone's width; the table scrolls inside its wrapper instead. */
 .wd-verification__checks {
     min-width: 640px;
+}
+
+/* The repair history and the audit log: five or six columns of prose scroll inside their wrapper on a phone. */
+.wd-ledger {
+    min-width: 720px;
+}
+
+.wd-ledger td {
+    overflow-wrap: anywhere;
+}
+
+.wd-audit__details {
+    margin-top: 4px;
+}
+
+.wd-audit__details > summary {
+    cursor: pointer;
 }

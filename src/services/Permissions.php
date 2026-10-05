@@ -62,6 +62,14 @@ class Permissions extends Component
      */
     public const RUN_REPAIRS = 'webDoctor:runRepairs';
 
+    /**
+     * @var string Reading the audit trail: who ran checks, investigated, repaired, verified, and
+     * moved or resolved issues, and when. Separate from {@see self::VIEW_ISSUES} because it says
+     * what people did, which is a different thing to show somebody from what was found; nested
+     * under it because every entry is about something in the Issue Center.
+     */
+    public const VIEW_AUDIT_TRAIL = 'webDoctor:viewAuditTrail';
+
     public function register(): void
     {
         Event::on(UserPermissions::class, UserPermissions::EVENT_REGISTER_PERMISSIONS, function(RegisterUserPermissionsEvent $event) {
@@ -100,6 +108,10 @@ class Permissions extends Component
                             self::RUN_REPAIRS => [
                                 'label' => Craft::t('web-doctor', 'Run repairs'),
                                 'info' => Craft::t('web-doctor', 'Previews, carries out and verifies the repairs Web Doctor offers for an issue. Each repair changes this installation, is confirmed first, and also needs whatever Craft requires for the same action; verifying one runs its checks again and changes nothing.'),
+                            ],
+                            self::VIEW_AUDIT_TRAIL => [
+                                'label' => Craft::t('web-doctor', 'View audit trail'),
+                                'info' => Craft::t('web-doctor', 'Reads who ran checks, investigated, previewed, carried out and verified repairs, and moved or resolved issues, and when.'),
                             ],
                         ],
                     ],
@@ -141,6 +153,11 @@ class Permissions extends Component
     public function canRunRepairs(): bool
     {
         return $this->can(self::RUN_REPAIRS);
+    }
+
+    public function canViewAuditTrail(): bool
+    {
+        return $this->can(self::VIEW_AUDIT_TRAIL);
     }
 
     /**
