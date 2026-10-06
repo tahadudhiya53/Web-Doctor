@@ -55,7 +55,7 @@
                                 {% set first = advice.recommendations|first %}
                                 <details class="wd-result__recommendations">
                                     <summary><strong>{{ "Recommended"|t('web-doctor') }}:</strong>
-                                        {% if first %}{{ shared.text(first.title) }} <span class="wd-pill wd-pill--risk-{{ first.risk.value }}">{{ first.risk.label() }}</span>{% else %}{{ "could not be worked out"|t('web-doctor') }}{% endif %}
+                                        {% if first %}{{ shared.text(first.title) }} {{ shared.pill('wd-pill--risk-', first.risk) }}{% else %}{{ "could not be worked out"|t('web-doctor') }}{% endif %}
                                     </summary>
                                     {{ rec.list(advice, false, 'dashboard', null) }}
                                 </details>
@@ -80,14 +80,14 @@
                     </td>
                     <td class="wd-col-narrow">
                         {% if result %}
-                            <span class="wd-pill wd-pill--{{ result.status.value }}">{{ result.status.label() }}</span>
+                            {{ shared.pill('wd-pill--', result.status) }}
                         {% else %}
                             <span class="wd-pill wd-pill--none">{{ "None"|t('web-doctor') }}</span>
                         {% endif %}
                     </td>
                     <td class="wd-col-narrow">
                         {% if result %}
-                            <span class="wd-pill wd-pill--severity wd-pill--severity-{{ result.severity().value }}">{{ result.severity().label() }}</span>
+                            {{ shared.pill('wd-pill--severity wd-pill--severity-', result.severity()) }}
                         {% endif %}
                     </td>
                     <td class="wd-col-narrow">
@@ -104,6 +104,7 @@
 {% endmacro %}
 
 {% import _self as wd %}
+{% import "web-doctor/_macros" as shared %}
 
 {% if failure %}
     <div class="pane wd-failure" role="alert">
@@ -112,7 +113,6 @@
 {% endif %}
 
 {% if (recipes ?? [])|length %}
-    {% import "web-doctor/_macros" as shared %}
     <div class="pane wd-recipes-pointer">
         <h2>{{ "Something specific going wrong?"|t('web-doctor') }}</h2>
         <p class="light">{{ "A recipe runs the checks that cover what a symptom most often comes from, and weighs what they find."|t('web-doctor') }}</p>
@@ -232,8 +232,8 @@
                     <div><dt>{{ "Last run"|t('web-doctor') }}</dt><dd>{{ run.startedAt|datetime('short') }}</dd></div>
                     <div><dt>{{ "Duration"|t('web-doctor') }}</dt><dd>{{ (run.durationMs / 1000)|number_format(2) }}s</dd></div>
                     <div><dt>{{ "Checks in run"|t('web-doctor') }}</dt><dd>{{ run.count() }}</dd></div>
-                    <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ run.context.environment }}</dd></div>
-                    <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ siteLabel }}</dd></div>
+                    <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ shared.text(run.context.environment) }}</dd></div>
+                    <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ shared.text(siteLabel) }}</dd></div>
                     <div><dt>{{ "Execution mode"|t('web-doctor') }}</dt><dd>{{ run.context.mode.label() }}</dd></div>
                     <div><dt>{{ "Depth"|t('web-doctor') }}</dt><dd>{{ run.context.depth.label() }}</dd></div>
                     <div><dt>{{ "Run ID"|t('web-doctor') }}</dt><dd><code>{{ run.id() }}</code></dd></div>
@@ -265,6 +265,8 @@
                     </table>
 
                     {% if health.contributions|length %}
+                        {# A check ID can be longer than a phone is wide; the table scrolls in its wrapper. #}
+                        <div class="wd-table-scroll">
                         <table class="data wd-weights wd-weights--contributions">
                             <caption class="wd-visually-hidden">{{ "What each check subtracted"|t('web-doctor') }}</caption>
                             <thead>
@@ -286,11 +288,16 @@
                                 {% endfor %}
                             </tbody>
                         </table>
+                        </div>
                     {% else %}
                         <p class="light">{{ "Nothing in this run reduced the score."|t('web-doctor') }}</p>
                     {% endif %}
                 </details>
             {% endif %}
+        {% endif %}
+
+        {% if recommendationsFailure ?? null %}
+            <p class="error" role="alert">{{ recommendationsFailure }}</p>
         {% endif %}
 
         {% for group in dashboard.byCategory() %}

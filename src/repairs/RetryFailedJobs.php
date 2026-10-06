@@ -19,6 +19,7 @@ use Tahadudhiya\WebDoctor\models\Prerequisite;
 use Tahadudhiya\WebDoctor\models\RecommendationCase;
 use Tahadudhiya\WebDoctor\models\RepairContext;
 use Tahadudhiya\WebDoctor\models\RepairReport;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\rules\RootCauseRules;
 use Tahadudhiya\WebDoctor\verifications\RetriedJobsSettled;
 use Throwable;
@@ -90,7 +91,10 @@ class RetryFailedJobs extends RepairAction
     {
         try {
             return Craft::$app->getUtilities()->checkAuthorization(QueueManager::class);
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            // Refused, as the safe answer — but a lookup that broke is not somebody lacking access.
+            SafeException::log('Whether Craft allows retrying queue jobs could not be established', $e);
+
             return false;
         }
     }
@@ -107,6 +111,15 @@ class RetryFailedJobs extends RepairAction
         if ($queue === null) {
             return [
                 Prerequisite::checked('databaseQueue', Craft::t('web-doctor', 'Craft’s queue is its own database-backed queue, which this retries jobs in.'), false),
+            ];
+        }
+
+        // With no channel to scope by, the queue checks read the whole table; retrying from it could
+        // retry another queue's jobs, so this one is not carried out.
+        if (QueueDiagnostic::channelOf($queue) === null) {
+            return [
+                Prerequisite::checked('databaseQueue', Craft::t('web-doctor', 'Craft’s queue is its own database-backed queue, which this retries jobs in.'), true),
+                Prerequisite::checked('ownChannel', Craft::t('web-doctor', 'Which of the queue table’s jobs belong to this queue can be told, so no other queue’s job is retried.'), false),
             ];
         }
 
@@ -271,7 +284,9 @@ class RetryFailedJobs extends RepairAction
     {
         try {
             $queue = $this->queue ?? Craft::$app->getQueue();
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            SafeException::log('Craft’s queue could not be built to retry its jobs', $e);
+
             return null;
         }
 

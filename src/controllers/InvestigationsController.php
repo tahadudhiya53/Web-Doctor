@@ -7,6 +7,7 @@ use craft\helpers\UrlHelper;
 use craft\web\Controller;
 use Tahadudhiya\WebDoctor\enums\InvestigationStepType;
 use Tahadudhiya\WebDoctor\errors\Refusal;
+use Tahadudhiya\WebDoctor\helpers\Actor;
 use Tahadudhiya\WebDoctor\helpers\RequestInput;
 use Tahadudhiya\WebDoctor\models\ErrorGroup;
 use Tahadudhiya\WebDoctor\models\ErrorSignature;
@@ -40,6 +41,9 @@ class InvestigationsController extends Controller
         // A plugin action route is reachable from the front end unless something refuses it, and
         // an investigation is not something a front-end request may set going.
         $this->requireCpRequest();
+        // The section's own permission as well as this one's: Craft nests them only in its own
+        // screens, and a permission set written another way can hold a child without its parent.
+        $this->requirePermission(Permissions::VIEW);
         $this->requirePermission(Permissions::VIEW_ISSUES);
 
         return true;
@@ -73,6 +77,13 @@ class InvestigationsController extends Controller
             $this->setFailFlash(Craft::t('web-doctor', 'The investigation could not be started. The details are in Craft’s logs.'));
 
             return $this->redirectToPostedUrl();
+        }
+
+        // What its page will advise for each finding, recorded once, as the investigation produced it.
+        try {
+            $this->plugin()->getAudit()->investigationRecommendations($investigation, $this->plugin()->getIssues()->get($issueId), $this->plugin()->getRecommendations());
+        } catch (Throwable $e) {
+            SafeException::log('The recommendations an investigation produced could not be recorded', $e);
         }
 
         $this->setSuccessFlash(Craft::t('web-doctor', 'Investigation finished.'));
@@ -282,8 +293,11 @@ class InvestigationsController extends Controller
         try {
             return Craft::$app->getUsers()->getUserById($userId)?->getFriendlyName()
                 ?? Craft::t('web-doctor', 'User #{id} (no longer available)', ['id' => $userId]);
-        } catch (Throwable) {
-            return null;
+        } catch (Throwable $e) {
+            // Somebody did start it: a lookup that failed does not make it nobody.
+            SafeException::log('The user who started an investigation could not be read', $e);
+
+            return Craft::t('web-doctor', 'User #{id}', ['id' => $userId]);
         }
     }
 
@@ -292,11 +306,8 @@ class InvestigationsController extends Controller
      */
     private function userId(): ?int
     {
-        try {
-            return Craft::$app->getUser()->getIdentity()?->id;
-        } catch (Throwable) {
-            return null;
-        }
+        // Craft's answer, or an error: a failed lookup is never recorded as nobody having asked.
+        return Actor::current()[0];
     }
 
     private function plugin(): WebDoctor

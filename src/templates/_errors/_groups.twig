@@ -32,11 +32,11 @@
                     {% if canViewEvidence and group.normalizedMessage %}
                         <div class="wd-error__message">{{ shared.text(group.normalizedMessage) }}</div>
                     {% endif %}
-                    <div class="wd-result__id">{{ group.environment }} &middot; {{ group.siteLabel() }}</div>
+                    <div class="wd-result__id">{{ shared.text(group.environment) }} &middot; {{ shared.text(group.siteLabel()) }}</div>
                 </td>
                 <td class="wd-col-narrow">{{ group.occurrences }}</td>
-                <td class="wd-col-narrow">{{ group.firstSeen|datetime('short') }}</td>
-                <td class="wd-col-narrow">{{ group.lastSeen|datetime('short') }}</td>
+                <td class="wd-col-narrow">{{ shared.when(group.firstSeen) }}</td>
+                <td class="wd-col-narrow">{{ shared.when(group.lastSeen) }}</td>
                 <td>
                     <ul class="wd-error__list">
                         {% for source in group.sources %}
@@ -58,7 +58,7 @@
                                         <span class="wd-mark wd-mark--origin">{{ "This issue"|t('web-doctor') }}</span>
                                     {% elseif relatedIssue %}
                                         <a href="{{ cpUrl('web-doctor/issues/' ~ issueId) }}">{{ shared.text(relatedIssue.title) }}</a>
-                                        <span class="wd-pill wd-pill--issue-{{ relatedIssue.status.value }}">{{ relatedIssue.status.label() }}</span>
+                                        {{ shared.pill('wd-pill--issue-', relatedIssue.status) }}
                                     {% else %}
                                         <a href="{{ cpUrl('web-doctor/issues/' ~ issueId) }}">{{ 'Issue #{id}'|t('web-doctor', { id: issueId }) }}</a>
                                     {% endif %}

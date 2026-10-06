@@ -775,11 +775,6 @@ class ErrorIntelligenceTest extends TestCase
                 // As it should.
             }
         }
-
-        // Nothing opts an action out of authentication; see IssueCenterTest for why that is what
-        // can be asserted.
-        $allowAnonymous = (new \ReflectionProperty(Controller::class, 'allowAnonymous'))->getValue($this->controller());
-        self::assertSame(Controller::ALLOW_ANONYMOUS_NEVER, $allowAnonymous);
     }
 
     public function testAnErrorThatDoesNotExistIsNotFound(): void

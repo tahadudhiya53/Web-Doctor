@@ -212,7 +212,9 @@ class RetriedJobsSettled extends VerificationAction
     {
         try {
             $queue = $this->queue ?? Craft::$app->getQueue();
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            SafeException::log('Craft’s queue could not be built to verify retried jobs', $e);
+
             return null;
         }
 

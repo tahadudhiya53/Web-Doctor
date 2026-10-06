@@ -3,12 +3,11 @@
 namespace Tahadudhiya\WebDoctor\services;
 
 use craft\db\ActiveQuery;
-use craft\helpers\Db;
 use DateTimeImmutable;
-use DateTimeInterface;
 use RuntimeException;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\helpers\Savepoint;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
@@ -67,7 +66,7 @@ class EvidenceStore extends Component
             return 0;
         }
 
-        $seenAt = $this->forDb($run->finishedAt);
+        $seenAt = StoredTime::forDb($run->finishedAt);
         $existing = $this->existing($issueId, array_keys($incoming));
         $new = 0;
 
@@ -96,7 +95,7 @@ class EvidenceStore extends Component
                 'occurrences' => new Expression('[[occurrences]] + 1'),
                 'lastSeen' => $seenAt,
                 'lastRunId' => $run->id(),
-                'dateUpdated' => $this->forDb(new DateTimeImmutable()),
+                'dateUpdated' => StoredTime::forDb(new DateTimeImmutable()),
             ], ['id' => array_values($existing)]);
 
             // When the fact was last true is not part of what makes it the same fact, so a
@@ -105,7 +104,7 @@ class EvidenceStore extends Component
                 $observedAt = $incoming[$digest]->observedAt ?? null;
 
                 if ($observedAt !== null) {
-                    EvidenceRecord::updateAll(['observedAt' => $this->forDb($observedAt)], ['id' => $id]);
+                    EvidenceRecord::updateAll(['observedAt' => StoredTime::forDb($observedAt)], ['id' => $id]);
                 }
             }
         }
@@ -214,7 +213,7 @@ class EvidenceStore extends Component
         $record->firstRunId = $run->id();
         $record->lastRunId = $run->id();
         $record->occurrences = 1;
-        $record->observedAt = $evidence->observedAt === null ? null : $this->forDb($evidence->observedAt);
+        $record->observedAt = $evidence->observedAt === null ? null : StoredTime::forDb($evidence->observedAt);
         $record->firstSeen = $seenAt;
         $record->lastSeen = $seenAt;
 
@@ -268,14 +267,6 @@ class EvidenceStore extends Component
         }
 
         return $out;
-    }
-
-    /**
-     * A moment as the database stores it: UTC, in Craft's own format.
-     */
-    private function forDb(DateTimeInterface $when): string
-    {
-        return Db::prepareDateForDb($when) ?? gmdate('Y-m-d H:i:s');
     }
 
     /**

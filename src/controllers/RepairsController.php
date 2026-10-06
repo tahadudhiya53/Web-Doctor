@@ -10,9 +10,12 @@ use Tahadudhiya\WebDoctor\enums\VerificationStatus;
 use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\helpers\RequestInput;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
 use Tahadudhiya\WebDoctor\models\Repair;
+use Tahadudhiya\WebDoctor\models\RepairFilter;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\models\Verification;
+use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\Verifications;
 use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
@@ -49,9 +52,59 @@ class RepairsController extends Controller
         // A plugin action route is reachable from the front end unless something refuses it, and a
         // repair is not something a front-end request may set going.
         $this->requireCpRequest();
+        // The section's own permission as well as this one's: Craft nests them only in its own
+        // screens, and a permission set written another way can hold a child without its parent.
+        $this->requirePermission(Permissions::VIEW);
         $this->requirePermission(Permissions::VIEW_ISSUES);
 
         return true;
+    }
+
+    /**
+     * The repair history: every repair kept, previewed or carried out, filtered as the query string
+     * asks. Changes nothing.
+     */
+    public function actionIndex(): Response
+    {
+        $plugin = $this->plugin();
+
+        try {
+            $filter = RepairFilter::fromParams($this->request->getQueryParams());
+        } catch (\InvalidArgumentException $e) {
+            // The filter names only the parameter it refused, never a value.
+            throw new BadRequestHttpException(Craft::t('web-doctor', 'The repair history cannot filter by that “{name}”.', ['name' => $e->getMessage()]));
+        }
+
+        $failure = null;
+        $repairs = null;
+        $actions = [];
+        $users = [];
+        $environments = [];
+
+        try {
+            $repairs = $plugin->getRepairs()->find($filter);
+            $actions = $plugin->getRepairs()->knownActions();
+            $users = $plugin->getRepairs()->knownUsers();
+            $environments = $plugin->getRepairs()->knownEnvironments();
+        } catch (Throwable $e) {
+            SafeException::log('The repair history could not be read', $e);
+            $failure = Craft::t('web-doctor', 'Web Doctor could not read the repair history. The details are in Craft’s logs.');
+        }
+
+        $this->getView()->registerAssetBundle(ControlPanelAsset::class);
+
+        return $this->renderTemplate('web-doctor/_repairs/_index', [
+            'title' => Craft::t('web-doctor', 'Repairs'),
+            'failure' => $failure,
+            'repairs' => $repairs,
+            'filter' => $filter,
+            'actions' => $actions,
+            'users' => $users,
+            'environments' => $environments,
+            'sites' => SiteName::options(),
+            'statuses' => RepairStatus::cases(),
+            'verificationStatuses' => VerificationStatus::cases(),
+        ]);
     }
 
     /**
@@ -67,7 +120,9 @@ class RepairsController extends Controller
         $issueId = RequestInput::id($this->request->getRequiredBodyParam('issueId'));
         $actionId = $this->request->getRequiredBodyParam('repairAction');
 
-        if (!is_string($actionId) || $actionId === '') {
+        // In the shape every registered repair's ID has, or refused: anything else names no repair,
+        // and is never written to the log or echoed back as though it might.
+        if (!is_string($actionId) || !Diagnostics::isValidId($actionId)) {
             throw new BadRequestHttpException(Craft::t('web-doctor', 'That is not a repair.'));
         }
 
@@ -120,8 +175,9 @@ class RepairsController extends Controller
         }
 
         // Asked of the action the preview was made with, so the Craft permission checked is the one
-        // for what would actually be carried out.
-        if ($stored !== null) {
+        // for what would actually be carried out. Only of this issue's repair: anything else is the
+        // service's to refuse, without naming what another repair would have needed.
+        if ($stored !== null && $stored->issueId === $issueId) {
             $this->requireCraftAuthorization($stored->action);
         }
 
@@ -223,23 +279,27 @@ class RepairsController extends Controller
     /**
      * One repair: what it would do or did, what had to be true first, and whether it worked.
      *
-     * @throws NotFoundHttpException if there is no such repair of that issue.
+     * Reached through the issue it belongs to, or on its own from the repair history — a repair
+     * outlives its issue, and one whose issue was deleted is still a record of what was done.
+     *
+     * @param int|null $issueId The issue in the URL, which has to be the repair's own.
+     * @throws NotFoundHttpException if there is no such repair, or not of that issue.
      */
-    public function actionDetail(int $issueId, int $repairId): Response
+    public function actionDetail(int $repairId, ?int $issueId = null): Response
     {
         $plugin = $this->plugin();
 
         try {
-            $issue = $plugin->getIssues()->get($issueId);
             $repair = $plugin->getRepairs()->get($repairId);
+            $issue = $repair?->issueId === null ? null : $plugin->getIssues()->get($repair->issueId);
         } catch (Throwable $e) {
             SafeException::log('A repair could not be read', $e);
 
             throw new NotFoundHttpException(Craft::t('web-doctor', 'That repair could not be read.'));
         }
 
-        // Reached through the issue it belongs to, never through another one's URL.
-        if ($issue === null || $repair === null || $repair->issueId !== $issue->id) {
+        // Never through another issue's URL: a link can only show what it says it shows.
+        if ($repair === null || ($issueId !== null && ($issue === null || $repair->issueId !== $issueId))) {
             throw new NotFoundHttpException(Craft::t('web-doctor', 'No such repair.'));
         }
 
@@ -248,7 +308,9 @@ class RepairsController extends Controller
         $refusal = null;
 
         try {
-            $refusal = $plugin->getRepairs()->refusal($issue);
+            $refusal = $issue === null
+                ? Craft::t('web-doctor', 'The issue this repair was for has been deleted, so it can no longer be carried out or verified.')
+                : $plugin->getRepairs()->refusal($issue);
         } catch (Throwable $e) {
             SafeException::log('Whether an issue can be repaired could not be established', $e);
             $refusal = Craft::t('web-doctor', 'Web Doctor could not establish whether this issue can be repaired. The details are in Craft’s logs.');
@@ -256,11 +318,14 @@ class RepairsController extends Controller
 
         $verifications = [];
         $verificationsFailure = null;
-        $verifyRefusal = null;
+        $verifyRefusal = $issue === null ? $refusal : null;
 
         try {
             $verifications = $plugin->getVerifications()->forRepair($repair->id);
-            $verifyRefusal = $plugin->getVerifications()->refusal($repair, $issue);
+
+            if ($issue !== null) {
+                $verifyRefusal = $plugin->getVerifications()->refusal($repair, $issue);
+            }
         } catch (Throwable $e) {
             SafeException::log('A repair\'s verifications could not be read', $e);
             $verificationsFailure = Craft::t('web-doctor', 'This repair’s verifications could not be read. The details are in Craft’s logs.');

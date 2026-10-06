@@ -16,6 +16,8 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Tahadudhiya\WebDoctor\diagnostics\storage\StoragePathsDiagnostic;
+use Tahadudhiya\WebDoctor\enums\AuditAction;
+use Tahadudhiya\WebDoctor\enums\AuditResult;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\EvidenceType;
@@ -26,6 +28,7 @@ use Tahadudhiya\WebDoctor\enums\RepairStatus;
 use Tahadudhiya\WebDoctor\enums\VerificationStatus;
 use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
+use Tahadudhiya\WebDoctor\models\AuditFilter;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
@@ -35,6 +38,7 @@ use Tahadudhiya\WebDoctor\models\Repair;
 use Tahadudhiya\WebDoctor\models\RepairReport;
 use Tahadudhiya\WebDoctor\models\Verification;
 use Tahadudhiya\WebDoctor\models\VerificationCondition;
+use Tahadudhiya\WebDoctor\records\AuditRecord;
 use Tahadudhiya\WebDoctor\records\ErrorGroupRecord;
 use Tahadudhiya\WebDoctor\records\IssueEventRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
@@ -43,6 +47,7 @@ use Tahadudhiya\WebDoctor\records\VerificationRecord;
 use Tahadudhiya\WebDoctor\repairs\CoreRepairActions;
 use Tahadudhiya\WebDoctor\repairs\CreateStorageDirectories;
 use Tahadudhiya\WebDoctor\repairs\RetryFailedJobs;
+use Tahadudhiya\WebDoctor\services\Audit;
 use Tahadudhiya\WebDoctor\services\DiagnosticEngine;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\services\Errors;
@@ -319,6 +324,10 @@ class VerificationTest extends TestCase
                     }
                 };
             }, 'could not be read, so there is nothing to compare'],
+            'part of the issue’s evidence could not be read' => [static function(self $t, Issue $i): void {
+                $t->clears();
+                \Tahadudhiya\WebDoctor\records\EvidenceRecord::updateAll(['type' => 'a type from elsewhere'], ['issueId' => $i->id]);
+            }, 'Part of the evidence the issue last recorded could not be read'],
             'a check the repair names could not answer' => [static function(self $t): void {
                 $t->clears();
                 $t->register('test.named', static fn(TestDiagnostic $d): DiagnosticResult => $d->build('unknown', ['summary' => 'Could not look.']), DiagnosticCategory::QUEUE);
@@ -611,10 +620,11 @@ class VerificationTest extends TestCase
         $this->post($body, cp: false);
         $this->refused(BadRequestHttpException::class);
 
-        foreach (['12abc', '-1', '', '1.5'] as $malformed) {
-            $this->post(['issueId' => (string)$issue->id, 'repairId' => $malformed]);
-            $this->refused(BadRequestHttpException::class);
-        }
+        // Every malformed ID is read in DiagnosticModelTest; this proves the repair's is read that way.
+        $this->post(['issueId' => (string)$issue->id, 'repairId' => $repair->id . 'abc']);
+        $this->refused(BadRequestHttpException::class);
+        $this->post(['issueId' => $issue->id . 'abc', 'repairId' => (string)$repair->id]);
+        $this->refused(BadRequestHttpException::class);
 
         self::assertSame($before, WebDoctorTables::snapshot());
         self::assertSame(0, $this->check->runs);
@@ -716,6 +726,88 @@ class VerificationTest extends TestCase
         self::assertSame(VerificationStatus::PENDING, $this->repairs->get($repair->id)?->verificationStatus);
         self::assertNotSame(IssueResolution::VERIFIED, $this->reread($issue)->resolution);
         self::assertFalse(IssueEventRecord::find()->where(['issueId' => $issue->id, 'type' => IssueEventType::REPAIR_VERIFIED->value])->exists());
+        // Nor does the trail say one was made.
+        self::assertFalse(AuditRecord::find()->where(['action' => AuditAction::VERIFICATION_EXECUTED->value, 'issueId' => $issue->id])->exists());
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public static function verificationAnswers(): array
+    {
+        return ['failed' => ['failed'], 'inconclusive' => ['inconclusive']];
+    }
+
+    /**
+     * What a verification answers is kept with the verification, and the repair carries only the
+     * latest answer: everything recorded when the repair was previewed and carried out stays as it was.
+     */
+    #[DataProvider('verificationAnswers')]
+    public function testVerifyingChangesOnlyARepairsLatestAnswerNeverWhatItRecorded(string $answer): void
+    {
+        $issue = $this->raise();
+        $repair = $this->repaired($issue);
+
+        if ($answer === 'inconclusive') {
+            $this->check->handler = static fn(TestDiagnostic $d): DiagnosticResult => $d->build('unknown', ['summary' => 'Could not look.']);
+        }
+
+        $columns = ['issueTitle', 'action', 'actionName', 'risk', 'status', 'environment', 'siteName', 'preview', 'outcome', 'failure', 'previewedBy', 'previewedByName', 'executedBy', 'executedByName', 'previewedAt', 'startedAt', 'finishedAt'];
+        $read = static fn(): array => RepairRecord::find()->select($columns)->where(['id' => $repair->id])->asArray()->one() ?? [];
+        $kept = $read();
+
+        $verification = $this->verifications->verify($repair->id, $issue->id);
+
+        self::assertSame($answer === 'failed' ? VerificationStatus::FAILED : VerificationStatus::INCONCLUSIVE, $verification->result);
+        self::assertSame($verification->result, $this->repairs->get($repair->id)?->verificationStatus);
+        self::assertSame($kept, $read());
+    }
+
+    public function testAVerificationAndTheResolutionItEstablishesAreRecordedInTheTrailAndStandOrFallWithIt(): void
+    {
+        $issue = $this->raise();
+        $repair = $this->repaired($issue);
+        $this->clears();
+
+        // An entry that cannot be written takes the verification with it, as a row that cannot be
+        // saved does: a repair that says it was verified with no record of who verified it is a claim
+        // nobody can account for.
+        $config = $this->verificationsConfig();
+        $config['audit'] = new class() extends Audit {
+            protected function save(AuditRecord $record): void
+            {
+                if ($record->action === AuditAction::VERIFICATION_EXECUTED->value) {
+                    throw new RuntimeException('The audit entry would not write.');
+                }
+
+                parent::save($record);
+            }
+        };
+
+        try {
+            (new Verifications($config))->verify($repair->id, $issue->id);
+            self::fail('A verification stood without its entry.');
+        } catch (RuntimeException $e) {
+            self::assertSame('The audit entry would not write.', $e->getMessage());
+        }
+
+        self::assertSame([], $this->verifications->forRepair($repair->id));
+        self::assertNotSame(IssueResolution::VERIFIED, $this->reread($issue)->resolution);
+
+        $verification = $this->verifications->verify($repair->id, $issue->id);
+        $entries = array_values(array_filter(
+            (new Audit())->find(new AuditFilter(issueId: $issue->id, oldestFirst: true))->items,
+            static fn($e): bool => in_array($e->action, [AuditAction::VERIFICATION_EXECUTED, AuditAction::ISSUE_RESOLVED], true),
+        ));
+
+        self::assertSame([AuditAction::ISSUE_RESOLVED, AuditAction::VERIFICATION_EXECUTED], array_map(static fn($e) => $e->action, $entries));
+        self::assertSame(IssueResolution::VERIFIED->value, $entries[0]->details['resolution'] ?? null);
+        self::assertSame(AuditResult::SUCCEEDED, $entries[1]->result);
+        self::assertSame((string)$verification->id, $entries[1]->objectId);
+        self::assertSame(VerificationStatus::VERIFIED->value, $entries[1]->details['answer'] ?? null);
+        self::assertSame($repair->id, $entries[1]->details['repairId'] ?? null);
+        self::assertSame(1, $entries[1]->userId);
+        self::assertSame('web-doctor/repairs/' . $repair->id . '#verification', $entries[1]->cpPath());
     }
 
     public function testARepairKeepsItsMostRecentVerificationsOnly(): void
@@ -733,19 +825,51 @@ class VerificationTest extends TestCase
         self::assertSame([$ids[2], $ids[1]], array_map(static fn(Verification $v): int => $v->id, $this->verifications->forRepair($repair->id)));
     }
 
-    public function testARowThatCannotBeReadIsReadAsInconclusiveNeverAsVerified(): void
+    public function testARowThatCannotBeReadIsSaidToBeUnreadableNeverReadAsAnAnswer(): void
     {
         $issue = $this->raise();
         $repair = $this->repaired($issue);
         $this->clears();
         $verification = $this->verifications->verify($repair->id, $issue->id);
 
-        VerificationRecord::updateAll(['result' => 'fixed', 'conditions' => '[{"id":"x","state":"held!"}]', 'checks' => '[{"diagnosticId":"test.check","status":"triumphant"}]'], ['id' => $verification->id]);
+        VerificationRecord::updateAll([
+            'result' => 'fixed',
+            'conditions' => '[{"id":"x","state":"held!"}]',
+            'checks' => '[{"diagnosticId":"test.check","status":"triumphant","role":"original"}]',
+            'comparison' => '{not json',
+        ], ['id' => $verification->id]);
+        // MySQL's zero date, which strict mode refuses to write but a database without it holds.
+        self::withoutStrictDates(static fn() => VerificationRecord::updateAll(['finishedAt' => '0000-00-00 00:00:00'], ['id' => $verification->id]));
         $read = $this->verifications->get($verification->id);
 
-        self::assertSame(VerificationStatus::INCONCLUSIVE, $read?->result);
-        self::assertSame(VerificationCondition::UNDETERMINED, $read->conditions[0]->state);
+        // Not inconclusive, which is an answer, not undetermined, not "not run", not the epoch, not
+        // empty: each is null or left out, and named.
+        self::assertNull($read?->result);
+        self::assertSame([], $read->conditions);
         self::assertNull($read->checks[0]['status']);
+        self::assertTrue($read->checks[0]['statusUnreadable']);
+        self::assertNull($read->finishedAt);
+        self::assertSame(['result', 'finishedAt', 'checks', 'conditions', 'comparison'], $read->unreadable);
+
+        // The page says so, and offers nothing that reads it as an answer.
+        $this->request('GET');
+        $html = $this->render('detail', ['issueId' => $issue->id, 'repairId' => $repair->id]);
+        self::assertStringContainsString(\Craft::t('web-doctor', 'Could not be read'), $html);
+        self::assertStringContainsString('result, finishedAt, checks, conditions, comparison', $html);
+
+        // Valid JSON in a shape this model never writes is as unreadable: a check whose "persists" is
+        // not a yes or no, a comparison missing one of its lists, an error that names no fingerprint.
+        $fresh = $this->verifications->verify($repair->id, $issue->id);
+        $row = VerificationRecord::findOne($fresh->id);
+        $checks = (array)json_decode((string)$row?->checks, true);
+        $checks[0]['persists'] = 'yes';
+        VerificationRecord::updateAll([
+            'checks' => json_encode($checks),
+            'comparison' => '{"persisting":[],"appeared":[]}',
+            'errors' => '[{"groupId":3}]',
+        ], ['id' => $fresh->id]);
+
+        self::assertSame(['checks', 'comparison', 'errors'], $this->verifications->get($fresh->id)?->unreadable);
     }
 
     public function testNoCredentialReachesAVerificationsRowItsIssuesHistoryOrItsPage(): void
@@ -1974,6 +2098,23 @@ class VerificationTest extends TestCase
             self::fail("A request that should have been refused with $expected was not.");
         } catch (\Throwable $e) {
             self::assertInstanceOf($expected, $e, $e->getMessage());
+        }
+    }
+
+    /**
+     * Runs a write with this connection's SQL mode relaxed, so a moment strict mode would refuse can be
+     * stored the way a database without strict mode would hold it, then puts the mode back.
+     */
+    public static function withoutStrictDates(\Closure $write): void
+    {
+        $db = Craft::$app->getDb();
+        $mode = (string)$db->createCommand('SELECT @@SESSION.sql_mode')->queryScalar();
+        $db->createCommand("SET SESSION sql_mode = ''")->execute();
+
+        try {
+            $write();
+        } finally {
+            $db->createCommand('SET SESSION sql_mode = :mode', [':mode' => $mode])->execute();
         }
     }
 

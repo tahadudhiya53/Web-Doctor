@@ -10,6 +10,7 @@ use RuntimeException;
 use Tahadudhiya\WebDoctor\base\Diagnostic;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Throwable;
 
 /**
@@ -128,7 +129,9 @@ abstract class QueueDiagnostic extends Diagnostic
                     return (string)$id;
                 }
             }
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            SafeException::log('Which channel the queue writes to could not be established', $e);
+
             return null;
         }
 

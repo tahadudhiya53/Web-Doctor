@@ -57,7 +57,7 @@
     {% set redactions = evidence.redactions() %}
     <details class="wd-evidence"{{ open ? ' open' }}>
         <summary class="wd-evidence__summary">
-            <span class="wd-evidence__type">{{ evidence.type.label() }}</span>
+            <span class="wd-evidence__type">{{ evidence.typeKnown ? evidence.type.label() : shared.unreadable() }}</span>
             <span class="wd-evidence__label">{{ shared.text(evidence.label) }}</span>
             {% if redactions %}
                 <span class="wd-mark wd-mark--redacted">{{ "{count, plural, =1{1 value withheld} other{# values withheld}}"|t('web-doctor', { count: redactions }) }}</span>
@@ -79,10 +79,10 @@
             {% if evidence.confidence %}
                 <div><dt>{{ "Confidence"|t('web-doctor') }}</dt><dd>{{ evidence.confidence.label() }}</dd></div>
             {% endif %}
-            <div><dt>{{ "First seen"|t('web-doctor') }}</dt><dd>{{ stored.firstSeen|datetime('short') }}</dd></div>
-            <div><dt>{{ "Last seen"|t('web-doctor') }}</dt><dd>{{ stored.lastSeen|datetime('short') }}</dd></div>
+            <div><dt>{{ "First seen"|t('web-doctor') }}</dt><dd>{{ shared.when(stored.firstSeen) }}</dd></div>
+            <div><dt>{{ "Last seen"|t('web-doctor') }}</dt><dd>{{ shared.when(stored.lastSeen) }}</dd></div>
             <div><dt>{{ "Times seen"|t('web-doctor') }}</dt><dd>{{ stored.occurrences }}</dd></div>
-            <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ evidence.environment }}</dd></div>
+            <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ shared.text(evidence.environment) }}</dd></div>
         </dl>
 
         {% if canViewEvidence %}

@@ -15,7 +15,7 @@
     {% import "web-doctor/_macros" as shared %}
     <section class="wd-recommendation" id="recommendation-{{ r.diagnosticId|replace({ '.': '-' }) }}-{{ r.ruleId|replace({ '.': '-' }) }}">
         <h3 class="wd-recommendation__title">
-            <span class="wd-pill wd-pill--risk-{{ r.risk.value }}">{{ r.risk.label() }}</span>
+            {{ shared.pill('wd-pill--risk-', r.risk) }}
             {{ shared.text(r.title) }}
         </h3>
 
@@ -51,7 +51,7 @@
         <h4 class="wd-recommendation__heading">{{ "Likely cause"|t('web-doctor') }}</h4>
         {% if r.cause %}
             <p>
-                <span class="wd-pill wd-pill--confidence-{{ r.cause.confidence.value }}">{{ r.cause.confidence.label() }}</span>
+                {{ shared.pill('wd-pill--confidence-', r.cause.confidence) }}
                 {% if where == 'investigation' %}
                     <a href="#cause-{{ r.cause.position }}">{{ shared.text(r.cause.title) }}</a>
                 {% elseif r.issueId and r.cause.investigationId %}
@@ -81,7 +81,7 @@
         {% endif %}
 
         <h4 class="wd-recommendation__heading">{{ "Risk"|t('web-doctor') }}</h4>
-        <p><span class="wd-pill wd-pill--risk-{{ r.risk.value }}">{{ r.risk.label() }}</span> {{ shared.text(r.riskReason) }}</p>
+        <p>{{ shared.pill('wd-pill--risk-', r.risk) }} {{ shared.text(r.riskReason) }}</p>
         <p class="light">{{ r.risk.explanation() }}</p>
 
         <h4 class="wd-recommendation__heading">{{ "Verification"|t('web-doctor') }}</h4>

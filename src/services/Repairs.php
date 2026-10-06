@@ -3,23 +3,32 @@
 namespace Tahadudhiya\WebDoctor\services;
 
 use Craft;
-use craft\helpers\Db;
 use DateTimeImmutable;
 use RuntimeException;
 use Tahadudhiya\WebDoctor\base\RepairActionInterface;
+use Tahadudhiya\WebDoctor\enums\AuditAction;
+use Tahadudhiya\WebDoctor\enums\AuditObjectType;
+use Tahadudhiya\WebDoctor\enums\AuditResult;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\RepairStatus;
 use Tahadudhiya\WebDoctor\enums\VerificationStatus;
 use Tahadudhiya\WebDoctor\errors\Refusal;
+use Tahadudhiya\WebDoctor\helpers\Actor;
+use Tahadudhiya\WebDoctor\helpers\QueryParams;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\helpers\Savepoint;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
+use Tahadudhiya\WebDoctor\helpers\Text;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\Issue;
+use Tahadudhiya\WebDoctor\models\ListPage;
 use Tahadudhiya\WebDoctor\models\Prerequisite;
 use Tahadudhiya\WebDoctor\models\RecommendationCase;
 use Tahadudhiya\WebDoctor\models\Repair;
 use Tahadudhiya\WebDoctor\models\RepairContext;
+use Tahadudhiya\WebDoctor\models\RepairFilter;
 use Tahadudhiya\WebDoctor\models\RepairReport;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\models\StoredEvidence;
@@ -77,6 +86,9 @@ class Repairs extends Component
     /** @var Permissions|null Who may carry out repairs. The plugin's own unless injected. */
     public ?Permissions $permissions = null;
 
+    /** @var Audit|null Where previewing and carrying out are recorded. The plugin's own unless injected. */
+    public ?Audit $audit = null;
+
     /**
      * @var string|null The environment this installation is running as. Craft's answer unless set,
      * which a test does so that an issue recorded under its own environment can be repaired.
@@ -93,7 +105,7 @@ class Repairs extends Component
      */
     public function available(Issue $issue, iterable $evidence): array
     {
-        if ($issue->status === IssueStatus::RESOLVED) {
+        if ($issue->status === IssueStatus::RESOLVED || !$issue->isIntact()) {
             return [];
         }
 
@@ -118,6 +130,10 @@ class Repairs extends Component
      */
     public function refusal(Issue $issue): ?string
     {
+        if (!$issue->isIntact()) {
+            return $issue->integrityRefusal();
+        }
+
         // An issue left repairing by a repair that is no longer running is not being repaired, and
         // the next preview puts it back where it stood; refusing it here would leave it stuck.
         $status = $issue->status === IssueStatus::REPAIRING && !$this->isBeingRepaired($issue->id)
@@ -138,7 +154,7 @@ class Repairs extends Component
         }
 
         // Craft soft-deletes sites, so a site in the trash still has its ID on the issue.
-        if (($issue->siteId === null && $issue->siteName !== null) || ($issue->siteId !== null && !$this->siteExists($issue->siteId))) {
+        if (SiteName::isGone($issue->siteId, $issue->siteName)) {
             return Craft::t('web-doctor', 'The site this issue was found on, “{site}”, has been deleted, so there is nothing left to repair it against.', [
                 'site' => $issue->siteName ?? '#' . $issue->siteId,
             ]);
@@ -213,10 +229,44 @@ class Repairs extends Component
      */
     public function prepare(int $issueId, string $actionId): Repair
     {
+        // Not the shape of any repair's ID: refused before it is logged or echoed, since it is text
+        // a request chose — a line break in it would forge a log line.
+        if (!Diagnostics::isValidId($actionId)) {
+            throw new Refusal(Craft::t('web-doctor', 'That is not a repair.'));
+        }
+
+        // Logged as a refused confirmation is: somebody asked to repair something and was stopped.
+        try {
+            return $this->preview($issueId, $actionId);
+        } catch (Refusal $e) {
+            Craft::info(Redaction::redactString(sprintf(
+                'Preview of repair %s for issue %d refused for user %s: %s',
+                $actionId,
+                $issueId,
+                $this->signedInId(),
+                $e->getMessage(),
+            )), WebDoctor::LOG_CATEGORY);
+
+            throw $e;
+        }
+    }
+
+    private function preview(int $issueId, string $actionId): Repair
+    {
         $userId = $this->authorize();
         $action = $this->actions()->get($actionId)
             ?? throw new Refusal(Craft::t('web-doctor', 'Web Doctor has no repair called “{action}”.', ['action' => $actionId]));
         $this->authorize($action);
+
+        // Before anything is ended or put back on the issue's behalf, that this preview is for it at
+        // all: an issue here, of the check this action answers. A preview of the wrong repair, or of
+        // another environment's issue, changes nothing, a stopped repair of it included.
+        $found = $this->issues()->get($issueId)
+            ?? throw new Refusal(Craft::t('web-doctor', 'No issue exists with the ID {id}.', ['id' => $issueId]));
+
+        if ($found->environment !== $this->environment() || $action->diagnosticId() !== $found->diagnosticId) {
+            throw new Refusal((string)($this->refusal($found) ?? Craft::t('web-doctor', '“{name}” answers a different check’s findings, not this issue’s.', ['name' => Redaction::redactString($action->name())])));
+        }
 
         $issue = $this->currentIssue($issueId);
         $context = $this->contextFor($issue, $action, $userId);
@@ -225,32 +275,59 @@ class Repairs extends Component
         $now = new DateTimeImmutable();
         $record = new RepairRecord();
         $record->issueId = $issue->id;
-        $record->issueTitle = $this->fit($issue->title, 255);
+        $record->issueTitle = Text::fit($issue->title, 255);
         $record->diagnosticId = $issue->diagnosticId;
         $record->findingRunId = $issue->latestRunId;
         $record->action = $action->id();
-        $record->actionName = $this->fit(Redaction::redactString($action->name()), 255);
+        $record->actionName = Text::fit(Redaction::redactString($action->name()), 255);
         $record->risk = $action->risk()->value;
         $record->riskReason = Redaction::redactString($action->riskReason());
         $record->status = RepairStatus::PREVIEWED->value;
         $record->verificationStatus = VerificationStatus::NONE->value;
         $record->verifyWith = Evidence::encode($action->verifyWith());
         $record->verificationNote = Redaction::redactString($action->verification());
-        $record->environment = $this->fit($context->environment, 255);
+        $record->environment = Text::fit($context->environment, 255);
         $record->siteId = $issue->siteId;
+        $record->siteName = SiteName::of($issue->siteId);
         $record->preview = Evidence::encode($preview);
         $record->fingerprint = (string)$preview->fingerprint;
         $record->definitionFingerprint = self::definitionOf($action, $prerequisites);
         $record->prerequisites = Evidence::encode($prerequisites);
         $record->acknowledged = Evidence::encode([]);
         $record->previewedBy = $userId;
-        $record->previewedAt = $this->forDb($now);
+        $record->previewedByName = $this->signedInName();
+        $record->previewedAt = StoredTime::forDb($now);
 
         $transaction = Craft::$app->getDb()->beginTransaction();
 
         try {
             $this->supersede($issue->id, $action->id(), $userId);
             $this->save($record);
+            // In the same transaction: a preview with no entry, or an entry for no preview, would be
+            // a trail that cannot be trusted either way.
+            $this->audit()->record(
+                AuditAction::REPAIR_PREVIEWED,
+                AuditResult::NONE,
+                Craft::t('web-doctor', 'Previewed “{name}” ({risk}): {summary}', [
+                    'name' => $record->actionName,
+                    'risk' => $action->risk()->label(),
+                    'summary' => $preview->summary,
+                ]),
+                AuditObjectType::REPAIR,
+                (string)$record->id,
+                $record->actionName,
+                $issue->id,
+                $record->environment,
+                $issue->siteId,
+                [
+                    'repairAction' => $action->id(),
+                    'risk' => $action->risk()->value,
+                    'changes' => count($preview->items) + $preview->omitted,
+                    'prerequisites' => count($prerequisites),
+                    'issueTitle' => $issue->title,
+                ],
+                $record->siteName,
+            );
             $transaction->commit();
         } catch (Throwable $e) {
             $transaction->rollBack();
@@ -288,7 +365,7 @@ class Repairs extends Component
                 'Repair %d of issue %d refused for user %s: %s',
                 $repairId,
                 $issueId,
-                $this->signedInId() ?? '(none)',
+                $this->signedInId(),
                 $e->getMessage(),
             )), WebDoctor::LOG_CATEGORY);
 
@@ -327,6 +404,122 @@ class Repairs extends Component
     }
 
     /**
+     * The repair history: one page of every repair kept, previewed or carried out, as a filter asks
+     * for it — newest previewed first unless the oldest are asked for, the ID breaking ties. A page
+     * past the end shows the last. Reads only.
+     *
+     * @return ListPage<Repair>
+     */
+    public function find(RepairFilter $filter): ListPage
+    {
+        $query = RepairRecord::find();
+
+        if ($filter->action !== null) {
+            $query->andWhere(['action' => $filter->action]);
+        }
+
+        if ($filter->statuses !== []) {
+            $query->andWhere(['status' => array_map(static fn(RepairStatus $s): string => $s->value, $filter->statuses)]);
+        }
+
+        if ($filter->verifications !== []) {
+            $query->andWhere(['verificationStatus' => array_map(static fn(VerificationStatus $v): string => $v->value, $filter->verifications)]);
+        }
+
+        if ($filter->userId !== null) {
+            $query->andWhere(['or', ['previewedBy' => $filter->userId], ['executedBy' => $filter->userId]]);
+        }
+
+        if ($filter->environment !== null) {
+            $query->andWhere(['environment' => $filter->environment]);
+        }
+
+        if ($filter->withoutSite) {
+            $query->andWhere(SiteName::place(null));
+        } elseif ($filter->siteId !== null) {
+            $query->andWhere(SiteName::place($filter->siteId));
+        }
+
+        if ($filter->from !== null) {
+            $query->andWhere(['>=', 'previewedAt', QueryParams::localDayStart($filter->from)]);
+        }
+
+        if ($filter->to !== null) {
+            $query->andWhere(['<=', 'previewedAt', QueryParams::localDayEnd($filter->to)]);
+        }
+
+        $total = (int)$query->count();
+        $pages = max(1, (int)ceil($total / $filter->perPage));
+
+        if ($filter->page > $pages) {
+            $filter = $filter->onPage($pages);
+        }
+
+        $repairs = [];
+
+        foreach ($query->orderBy(self::order($filter->oldestFirst))->offset($filter->offset())->limit($filter->perPage)->all() as $record) {
+            if ($record instanceof RepairRecord) {
+                $repairs[] = Repair::fromRecord($record);
+            }
+        }
+
+        return new ListPage($repairs, $total, $filter);
+    }
+
+    /**
+     * The order a page is read in: the moment, then the ID, both one way round. The ID is what keeps
+     * two repairs in the same second from swapping places between pages, whatever index the
+     * database chooses.
+     *
+     * @return array<string, int>
+     */
+    public static function order(bool $oldestFirst): array
+    {
+        $direction = $oldestFirst ? SORT_ASC : SORT_DESC;
+
+        return ['previewedAt' => $direction, 'id' => $direction];
+    }
+
+    /**
+     * The repair actions the history holds, by ID, each under a name it was kept with — those no
+     * longer registered included, since their repairs are still history. One row per distinct pair
+     * is read, never the history itself.
+     *
+     * @return array<string, string>
+     */
+    public function knownActions(): array
+    {
+        $out = [];
+
+        foreach (RepairRecord::find()->select(['action', 'actionName'])->distinct()->orderBy(['action' => SORT_ASC, 'actionName' => SORT_ASC])->asArray()->all() as $row) {
+            $out[(string)$row['action']] ??= Redaction::redactString((string)$row['actionName']);
+        }
+
+        ksort($out);
+
+        return $out;
+    }
+
+    /**
+     * The people the history names who can still be filtered by, by ID, each under a username a
+     * repair kept. One row per distinct pair is read, never the history itself.
+     *
+     * @return array<int, string>
+     */
+    public function knownUsers(): array
+    {
+        return Actor::choicesIn(RepairRecord::tableName(), [['previewedBy', 'previewedByName'], ['executedBy', 'executedByName']]);
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function knownEnvironments(): array
+    {
+        return QueryParams::choicesIn(RepairRecord::tableName(), 'environment');
+    }
+
+    /**
      * The repair of an issue carried out most recently, cleanly or not. A later one has changed
      * things since any earlier one, so only this one's result can still be verified.
      */
@@ -358,7 +551,7 @@ class Repairs extends Component
 
         Craft::$app->getDb()->createCommand()->update(RepairRecord::TABLE, [
             'verificationStatus' => $result->value,
-            'dateUpdated' => $this->forDb(new DateTimeImmutable()),
+            'dateUpdated' => StoredTime::forDb(new DateTimeImmutable()),
         ], ['id' => $repairId, 'status' => RepairStatus::SUCCEEDED->value])->execute();
     }
 
@@ -703,7 +896,7 @@ class Repairs extends Component
     private function claim(RepairRecord $record, RepairContext $context, array $acknowledged, int $userId): void
     {
         $lockKey = self::lockKey((string)$record->action, $context->environment);
-        $now = $this->forDb(new DateTimeImmutable());
+        $now = StoredTime::forDb(new DateTimeImmutable());
 
         for ($attempt = 0; ; $attempt++) {
             try {
@@ -711,6 +904,7 @@ class Repairs extends Component
                     'status' => RepairStatus::RUNNING->value,
                     'lockKey' => $lockKey,
                     'executedBy' => $userId,
+                    'executedByName' => $this->signedInName(),
                     'startedAt' => $now,
                     'acknowledged' => Evidence::encode(array_values($acknowledged)),
                     'dateUpdated' => $now,
@@ -820,6 +1014,7 @@ class Repairs extends Component
             'status' => RepairStatus::PREVIEWED->value,
             'lockKey' => null,
             'executedBy' => null,
+            'executedByName' => null,
             'startedAt' => null,
             'acknowledged' => Evidence::encode([]),
         ], ['id' => $record->id, 'status' => RepairStatus::RUNNING->value, 'lockKey' => $record->lockKey])->execute();
@@ -868,7 +1063,7 @@ class Repairs extends Component
             'failure' => $succeeded ? null : $this->failureText($failure),
             'issueStatusBefore' => $before->value,
             'lockKey' => null,
-            'finishedAt' => $this->forDb(new DateTimeImmutable()),
+            'finishedAt' => StoredTime::forDb(new DateTimeImmutable()),
             'durationMs' => round($durationMs, 3),
         ];
         $lockKey = (string)$record->lockKey;
@@ -884,6 +1079,7 @@ class Repairs extends Component
             }
 
             $this->issues()->endRepair((int)$record->issueId, $before, $note, $userId);
+            $this->auditEnd($record, $succeeded, $succeeded ? $note : (string)$columns['failure'], $durationMs);
             $this->commit($transaction);
         } catch (Throwable $e) {
             if ($transaction->getIsActive()) {
@@ -907,9 +1103,37 @@ class Repairs extends Component
     {
         return Craft::$app->getDb()->createCommand()->update(
             RepairRecord::TABLE,
-            $columns + ['dateUpdated' => $this->forDb(new DateTimeImmutable())],
+            $columns + ['dateUpdated' => StoredTime::forDb(new DateTimeImmutable())],
             ['id' => $record->id, 'status' => RepairStatus::RUNNING->value, 'lockKey' => $lockKey],
         )->execute();
+    }
+
+    /**
+     * Records how a repair ended, inside the transaction that ends it. Whoever is signed in is the
+     * one recorded — for a repair ended as stopped, the person whose request found it so; who
+     * carried it out is in the details.
+     */
+    private function auditEnd(RepairRecord $record, bool $succeeded, string $summary, ?float $durationMs): void
+    {
+        $this->audit()->record(
+            AuditAction::REPAIR_EXECUTED,
+            $succeeded ? AuditResult::SUCCEEDED : AuditResult::FAILED,
+            Craft::t('web-doctor', '“{name}”: {summary}', ['name' => $record->actionName, 'summary' => $summary]),
+            AuditObjectType::REPAIR,
+            (string)$record->id,
+            $record->actionName,
+            $record->issueId === null ? null : (int)$record->issueId,
+            $record->environment,
+            $record->siteId === null ? null : (int)$record->siteId,
+            array_filter([
+                'repairAction' => $record->action,
+                'risk' => $record->risk,
+                'executedBy' => $record->executedByName,
+                'issueTitle' => $record->issueTitle,
+                'durationMs' => $durationMs === null ? null : round($durationMs, 1),
+            ], static fn(mixed $value): bool => $value !== null),
+            $record->siteName,
+        );
     }
 
     /**
@@ -957,9 +1181,11 @@ class Repairs extends Component
                 return;
             }
 
+            // The latest repair that began: where an earlier one found the issue is older than what
+            // the latest changed, so where the latest kept nothing the documented answer is used.
             $latest = RepairRecord::find()
                 ->where(['issueId' => $issueId])
-                ->andWhere(['not', ['issueStatusBefore' => null]])
+                ->andWhere(['not', ['startedAt' => null]])
                 ->orderBy(['startedAt' => SORT_DESC, 'id' => SORT_DESC])
                 ->one();
             $restore = $latest instanceof RepairRecord ? IssueStatus::tryFrom((string)$latest->issueStatusBefore) : null;
@@ -1007,6 +1233,8 @@ class Repairs extends Component
                     );
                 }
 
+                $this->auditEnd($holder, false, (string)$holder->failure, null);
+
                 $released = true;
             }
 
@@ -1041,12 +1269,17 @@ class Repairs extends Component
     private function failureText(Throwable $failure): string
     {
         return Craft::t('web-doctor', 'It stopped with an error ({type}). It may have made some of its changes; run the checks listed to see where things stand. The details are in Craft’s logs.', [
-            'type' => (new \ReflectionClass($failure))->getShortName(),
+            'type' => SafeException::kind($failure),
         ]);
     }
 
     private function applies(RepairActionInterface $action, RecommendationCase $finding): bool
     {
+        // An action decides from what the finding recorded; a part it cannot read is not an answer.
+        if (!$finding->evidenceComplete) {
+            return false;
+        }
+
         try {
             return $action->isApplicable($finding);
         } catch (Throwable $e) {
@@ -1067,14 +1300,27 @@ class Repairs extends Component
         }
     }
 
-    private function signedInId(): ?int
+    /**
+     * The signed-in person's username, kept beside their ID so the history still says who after the
+     * account is deleted.
+     */
+    private function signedInName(): string
+    {
+        // Authorisation has already established somebody is signed in; who, by name, is Craft's answer
+        // or an error, never a blank in the history.
+        $name = Actor::current()[1] ?? throw new RuntimeException('A repair was asked for with nobody signed in.');
+
+        return Text::fit(Redaction::redactString($name), 255);
+    }
+
+
+    /** Who asked, for a log line about a refusal: Craft's answer, or that it could not be established. */
+    private function signedInId(): string
     {
         try {
-            $id = Craft::$app->getUser()->getIdentity()?->id;
-
-            return $id === null ? null : (int)$id;
+            return (string)(Actor::current()[0] ?? '(none)');
         } catch (Throwable) {
-            return null;
+            return '(could not be established)';
         }
     }
 
@@ -1095,17 +1341,6 @@ class Repairs extends Component
         )), WebDoctor::LOG_CATEGORY);
     }
 
-    private function siteExists(int $siteId): bool
-    {
-        try {
-            return Craft::$app->getSites()->getSiteById($siteId, true) !== null;
-        } catch (Throwable $e) {
-            SafeException::log('Whether a site still exists could not be established', $e);
-
-            return false;
-        }
-    }
-
     /**
      * A seam rather than a private call, so a test can make a repair's row fail to save and prove the
      * issue goes back with it.
@@ -1120,16 +1355,6 @@ class Repairs extends Component
                 Redaction::redactString(json_encode($record->getErrors()) ?: 'unknown error'),
             ));
         }
-    }
-
-    private function forDb(DateTimeImmutable $when): string
-    {
-        return Db::prepareDateForDb($when) ?? gmdate('Y-m-d H:i:s');
-    }
-
-    private function fit(string $value, int $length): string
-    {
-        return mb_strlen($value) > $length ? mb_substr($value, 0, $length - 1) . '…' : $value;
     }
 
     /**
@@ -1152,6 +1377,11 @@ class Repairs extends Component
     private function evidenceStore(): EvidenceStore
     {
         return $this->evidence ??= WebDoctor::getInstance()?->getEvidence() ?? throw new InvalidConfigException('Repairs needs the evidence store, and Web Doctor is not installed to provide it.');
+    }
+
+    private function audit(): Audit
+    {
+        return $this->audit ??= WebDoctor::getInstance()?->getAudit() ?? throw new InvalidConfigException('Repairs needs the audit trail, and Web Doctor is not installed to provide it.');
     }
 
     private function permissions(): Permissions

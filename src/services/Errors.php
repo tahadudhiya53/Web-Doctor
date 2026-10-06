@@ -3,14 +3,16 @@
 namespace Tahadudhiya\WebDoctor\services;
 
 use Craft;
-use craft\helpers\Db;
 use DateTimeImmutable;
-use DateTimeInterface;
 use RuntimeException;
 use Tahadudhiya\WebDoctor\helpers\ErrorNormalizer;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
+use Tahadudhiya\WebDoctor\helpers\QueryParams;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\helpers\Savepoint;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
+use Tahadudhiya\WebDoctor\helpers\Text;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\ErrorGroup;
@@ -19,7 +21,6 @@ use Tahadudhiya\WebDoctor\models\ErrorRecording;
 use Tahadudhiya\WebDoctor\models\ErrorSignature;
 use Tahadudhiya\WebDoctor\models\ErrorSource;
 use Tahadudhiya\WebDoctor\models\Evidence;
-use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\records\ErrorGroupRecord;
 use Tahadudhiya\WebDoctor\records\ErrorSourceRecord;
 use Tahadudhiya\WebDoctor\WebDoctor;
@@ -98,8 +99,8 @@ class Errors extends Component
             return new ErrorRecording();
         }
 
-        $seenAt = $this->forDb($run->finishedAt);
-        $siteName = $this->siteName($siteId);
+        $seenAt = StoredTime::forDb($run->finishedAt);
+        $siteName = SiteName::of($siteId);
         $occurrences = $created = 0;
 
         $transaction = Craft::$app->getDb()->beginTransaction();
@@ -295,13 +296,7 @@ class Errors extends Component
      */
     public function knownEnvironments(): array
     {
-        $rows = ErrorGroupRecord::find()
-            ->select(['environment'])
-            ->distinct()
-            ->orderBy(['environment' => SORT_ASC])
-            ->column();
-
-        return array_values(array_filter(array_map('strval', $rows), static fn(string $e): bool => $e !== ''));
+        return QueryParams::choicesIn(ErrorGroupRecord::tableName(), 'environment');
     }
 
     /**
@@ -331,12 +326,12 @@ class Errors extends Component
     {
         $record = new ErrorGroupRecord();
         $record->fingerprint = $fingerprint;
-        $record->exceptionClass = (string)$this->fit($signature->class, 255);
+        $record->exceptionClass = (string)Text::fit($signature->class, 255);
         $record->normalizedMessage = Redaction::redactString($signature->message);
-        $record->origin = (string)$this->fit(Redaction::redactString($signature->origin), 500);
+        $record->origin = (string)Text::fit(Redaction::redactString($signature->origin), 500);
         $record->previous = $signature->previous === [] ? null : Evidence::encode(Redaction::redact($signature->previous));
         $record->stackFingerprint = $signature->stackFingerprint;
-        $record->environment = (string)$this->fit($run->context->environment, 255);
+        $record->environment = (string)Text::fit($run->context->environment, 255);
         $record->siteId = $run->context->siteId;
         $record->siteName = $siteName;
         $record->occurrences = $occurrences;
@@ -390,7 +385,7 @@ class Errors extends Component
     {
         $record = new ErrorSourceRecord();
         $record->errorGroupId = $groupId;
-        $record->diagnosticId = (string)$this->fit($result->diagnosticId, 100);
+        $record->diagnosticId = (string)Text::fit($result->diagnosticId, 100);
         $record->occurrences = 1;
         $record->firstSeen = $seenAt;
         $record->lastSeen = $seenAt;
@@ -419,7 +414,7 @@ class Errors extends Component
      */
     private function describeSource(ErrorSourceRecord $record, DiagnosticResult $result, ?int $issueId, bool $save = true): void
     {
-        $record->diagnosticName = (string)$this->fit(Redaction::redactString($result->name !== '' ? $result->name : $result->diagnosticId), 255);
+        $record->diagnosticName = (string)Text::fit(Redaction::redactString($result->name !== '' ? $result->name : $result->diagnosticId), 255);
         $record->issueId = $issueId;
         $record->lastStatus = $result->status->value;
 
@@ -447,7 +442,7 @@ class Errors extends Component
                 'occurrences' => new Expression('[[occurrences]] + ' . (int)$count),
                 'lastSeen' => $seenAt,
                 'lastRunId' => $run->id(),
-                'dateUpdated' => $this->forDb(new DateTimeImmutable()),
+                'dateUpdated' => StoredTime::forDb(new DateTimeImmutable()),
             ], ['id' => $ids]);
         }
     }
@@ -484,9 +479,7 @@ class Errors extends Component
         // A run about no particular site shares its place with nothing else. A deleted site's
         // groups also have no site ID, but they keep its name, and they are not the
         // installation's to be pushed out by.
-        $place = $run->context->siteId === null
-            ? ['environment' => $run->context->environment, 'siteId' => null, 'siteName' => null]
-            : ['environment' => $run->context->environment, 'siteId' => $run->context->siteId];
+        $place = ['environment' => $run->context->environment] + SiteName::place($run->context->siteId);
         $current = (int)ErrorGroupRecord::find()->where($place + ['lastRunId' => $runId])->count();
 
         $stale = ErrorGroupRecord::find()
@@ -535,23 +528,6 @@ class Errors extends Component
         );
     }
 
-    /**
-     * The site's name now, kept for the reason {@see Issues} keeps it.
-     */
-    private function siteName(?int $siteId): ?string
-    {
-        if ($siteId === null) {
-            return null;
-        }
-
-        try {
-            return $this->fit(Craft::$app->getSites()->getSiteById($siteId, true)?->getName(), 255);
-        } catch (Throwable $e) {
-            SafeException::log('A site\'s name could not be read for an error group', $e);
-
-            return null;
-        }
-    }
 
     /**
      * The configured bound, refused when it cannot be one. A limit of zero or less would either
@@ -579,7 +555,7 @@ class Errors extends Component
 
     private function issues(): Issues
     {
-        return $this->issues ??= WebDoctor::getInstance()?->getIssues() ?? new Issues();
+        return $this->issues ??= WebDoctor::getInstance()?->getIssues() ?? throw new InvalidConfigException('Error grouping needs the Issue Center, and Web Doctor is not installed to provide it.');
     }
 
     /**
@@ -593,19 +569,5 @@ class Errors extends Component
                 Redaction::redactString(json_encode($record->getErrors()) ?: 'unknown error'),
             ));
         }
-    }
-
-    private function forDb(DateTimeInterface $when): string
-    {
-        return Db::prepareDateForDb($when) ?? Db::prepareDateForDb(new DateTimeImmutable()) ?? gmdate('Y-m-d H:i:s');
-    }
-
-    private function fit(?string $value, int $length): ?string
-    {
-        if ($value === null) {
-            return null;
-        }
-
-        return mb_strlen($value) > $length ? mb_substr($value, 0, $length - 1) . '…' : $value;
     }
 }

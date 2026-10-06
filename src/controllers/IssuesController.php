@@ -9,7 +9,9 @@ use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
 use Tahadudhiya\WebDoctor\errors\Refusal;
+use Tahadudhiya\WebDoctor\helpers\Actor;
 use Tahadudhiya\WebDoctor\helpers\RequestInput;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
 use Tahadudhiya\WebDoctor\models\ErrorGroup;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\Investigation;
@@ -48,6 +50,9 @@ class IssuesController extends Controller
 
         // Reading the Issue Center is its own permission, nested under reaching Web Doctor at
         // all. Changing an issue needs another, checked where the change happens.
+        // The section's own permission as well as this one's: Craft nests them only in its own
+        // screens, and a permission set written another way can hold a child without its parent.
+        $this->requirePermission(Permissions::VIEW);
         $this->requirePermission(Permissions::VIEW_ISSUES);
 
         return true;
@@ -107,7 +112,7 @@ class IssuesController extends Controller
             'severities' => Severity::cases(),
             'diagnostics' => $diagnostics,
             'environments' => $environments,
-            'sites' => $this->siteOptions(),
+            'sites' => SiteName::options(),
             'canManage' => $plugin->getPermissions()->canManageIssues(),
         ]);
     }
@@ -249,7 +254,7 @@ class IssuesController extends Controller
             'title' => Craft::t('web-doctor', 'Issues'),
             'issue' => $issue,
             'events' => $events,
-            'siteLabel' => $this->siteLabel($issue->siteId, $issue->siteName),
+            'siteLabel' => SiteName::label($issue->siteId, $issue->siteName),
             // Only the statuses a person may set, which is what makes resolution unavailable
             // here rather than merely discouraged.
             'settableStatuses' => IssueStatus::settableByHand(),
@@ -281,6 +286,7 @@ class IssuesController extends Controller
             'repairsFailure' => $repairsFailure,
             'repairLimit' => Repairs::HISTORY_LIMIT,
             'canRunRepairs' => $plugin->getPermissions()->canRunRepairs(),
+            'canViewAuditTrail' => $plugin->getPermissions()->canViewAuditTrail(),
         ]);
     }
 
@@ -435,59 +441,12 @@ class IssuesController extends Controller
     }
 
     /**
-     * The sites a reader can filter by, where Craft can say.
-     *
-     * @return array<int, string>
-     */
-    private function siteOptions(): array
-    {
-        try {
-            $sites = [];
-
-            foreach (Craft::$app->getSites()->getAllSites() as $site) {
-                $sites[$site->id] = $site->getName();
-            }
-
-            return $sites;
-        } catch (Throwable) {
-            return [];
-        }
-    }
-
-    /**
-     * What to call the site an issue belongs to.
-     *
-     * A finding made with no particular site in view and one made about a site that has since
-     * been deleted are different facts. Deleting a site nulls the reference but leaves the name
-     * behind, so the second still reads as the site it was rather than as the installation.
-     */
-    private function siteLabel(?int $siteId, ?string $siteName = null): string
-    {
-        if ($siteId === null) {
-            return $siteName === null
-                ? Craft::t('web-doctor', 'All sites')
-                : Craft::t('web-doctor', '{name} (deleted)', ['name' => $siteName]);
-        }
-
-        try {
-            $name = Craft::$app->getSites()->getSiteById($siteId)?->getName();
-        } catch (Throwable) {
-            $name = null;
-        }
-
-        return $name ?? $siteName ?? Craft::t('web-doctor', 'Site #{id} (no longer available)', ['id' => $siteId]);
-    }
-
-    /**
      * Who is asking, where Craft knows. Recorded against a change, never used to authorise one.
      */
     private function userId(): ?int
     {
-        try {
-            return Craft::$app->getUser()->getIdentity()?->id;
-        } catch (Throwable) {
-            return null;
-        }
+        // Craft's answer, or an error: a failed lookup is never recorded as nobody having asked.
+        return Actor::current()[0];
     }
 
     private function plugin(): WebDoctor

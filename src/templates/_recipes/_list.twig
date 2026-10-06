@@ -12,6 +12,7 @@
     <p class="light">
         {{ "Each recipe says what it cannot inspect. Web Doctor does not read Craft’s, the web server’s or PHP’s logs, and does not capture the exceptions a site throws while serving requests; those are listed as not inspected, to be looked at by hand."|t('web-doctor') }}
     </p>
+    {% if not failure %}
     <p class="light">
         {% if siteName %}
             {{ "Recipes run in this request, against the “{environment}” environment and the site “{site}”."|t('web-doctor', { environment: environment, site: siteName }) }}
@@ -19,6 +20,7 @@
             {{ "Recipes run in this request, against the “{environment}” environment."|t('web-doctor', { environment: environment }) }}
         {% endif %}
     </p>
+    {% endif %}
 </div>
 
 {% if failure %}
@@ -93,9 +95,9 @@
                     {% for investigation in runs %}
                         {% set url = cpUrl('web-doctor/recipes/' ~ recipe.id ~ '/investigations/' ~ investigation.id) %}
                         <tr>
-                            <td class="wd-col-narrow"><a href="{{ url }}">{{ investigation.startedAt|datetime('short') }}</a></td>
-                            <td class="wd-col-narrow"><span class="wd-pill wd-pill--investigation-{{ investigation.status.value }}">{{ investigation.statusLabel() }}</span></td>
-                            <td class="wd-col-narrow">{{ investigation.depth.label() }}</td>
+                            <td class="wd-col-narrow"><a href="{{ url }}">{{ shared.when(investigation.startedAt) }}</a></td>
+                            <td class="wd-col-narrow">{{ shared.pill('wd-pill--investigation-', investigation.status, investigation.statusLabel()) }}</td>
+                            <td class="wd-col-narrow">{{ shared.label(investigation.depth) }}</td>
                             <td>{{ investigation.checksRun }}</td>
                             <td>{{ investigation.checksWithProblems }}</td>
                             <td>{{ investigation.checksIncomplete }}</td>
@@ -104,7 +106,7 @@
                                 {% if causesFailure %}
                                     <span class="light">{{ "Could not be read"|t('web-doctor') }}</span>
                                 {% elseif cause %}
-                                    <span class="wd-pill wd-pill--confidence-{{ cause.confidence.value }}">{{ cause.confidence.label() }}</span>
+                                    {{ shared.pill('wd-pill--confidence-', cause.confidence) }}
                                     <a href="{{ url }}#causes">{{ shared.text(cause.title) }}</a>
                                 {% else %}
                                     <span class="light">{{ "None"|t('web-doctor') }}</span>

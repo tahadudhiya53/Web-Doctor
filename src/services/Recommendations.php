@@ -3,8 +3,11 @@
 namespace Tahadudhiya\WebDoctor\services;
 
 use Tahadudhiya\WebDoctor\enums\InvestigationStatus;
+use Tahadudhiya\WebDoctor\enums\InvestigationStepType;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
+use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
+use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\Investigation;
 use Tahadudhiya\WebDoctor\models\InvestigationStep;
@@ -19,6 +22,7 @@ use Tahadudhiya\WebDoctor\rules\RecommendationRules;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
 use yii\base\Component;
+use yii\base\InvalidConfigException;
 
 /**
  * Chooses what to recommend for a finding, from the written-out rules.
@@ -127,6 +131,46 @@ class Recommendations extends Component
     }
 
     /**
+     * What each finding of a run was recommended, by the check that reported it — what the dashboard
+     * shows for the run, as the audit trail records it.
+     *
+     * @return array<string, RecommendationSet>
+     */
+    public function forRun(DiagnosticRun $run): array
+    {
+        $out = [];
+
+        foreach ($run->results() as $result) {
+            if ($result->status->isProblem()) {
+                $out[$result->diagnosticId] = $this->forResult($result);
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * What each finding of a stored investigation was recommended, by the check that reported it —
+     * what the investigation's page shows, read from the steps and causes it kept.
+     *
+     * @param Issue|null $issue The issue investigated; null for a recipe's investigation.
+     * @return array<string, RecommendationSet>
+     */
+    public function forStoredInvestigation(Investigation $investigation, ?Issue $issue): array
+    {
+        $steps = $this->investigations()->steps($investigation->id);
+        $checks = array_values(array_filter($steps, static fn(InvestigationStep $s): bool => $s->type === InvestigationStepType::CHECKED));
+        $diagnosed = array_values(array_filter($steps, static fn(InvestigationStep $s): bool => $s->type === InvestigationStepType::DIAGNOSED))[0] ?? null;
+        $out = [];
+
+        foreach ($this->forInvestigation($checks, $this->rootCauses()->forInvestigation($investigation->id), $issue, $diagnosed) as $entry) {
+            $out[(string)$entry['step']->diagnosticId] = $entry['recommendations'];
+        }
+
+        return $out;
+    }
+
+    /**
      * The recommendations for an issue, from the evidence its latest finding left and the causes its
      * latest investigation weighed. A resolved issue has nothing left to act on.
      *
@@ -138,6 +182,10 @@ class Recommendations extends Component
     {
         if ($issue->status === IssueStatus::RESOLVED) {
             return new RecommendationSet();
+        }
+
+        if (!$issue->isIntact()) {
+            throw new Refusal((string)$issue->integrityRefusal());
         }
 
         return $this->recommend(RecommendationCase::fromIssue($issue, $evidence, $this->causesFor($issue, $investigations)));
@@ -197,11 +245,11 @@ class Recommendations extends Component
 
     private function investigations(): Investigations
     {
-        return $this->investigations ??= WebDoctor::getInstance()?->getInvestigations() ?? new Investigations();
+        return $this->investigations ??= WebDoctor::getInstance()?->getInvestigations() ?? throw new InvalidConfigException('Recommendations need the investigations, and Web Doctor is not installed to provide them.');
     }
 
     private function rootCauses(): RootCauses
     {
-        return $this->rootCauses ??= WebDoctor::getInstance()?->getRootCauses() ?? new RootCauses();
+        return $this->rootCauses ??= WebDoctor::getInstance()?->getRootCauses() ?? throw new InvalidConfigException('Recommendations need the root causes, and Web Doctor is not installed to provide them.');
     }
 }

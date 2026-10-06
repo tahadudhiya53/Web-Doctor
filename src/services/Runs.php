@@ -31,9 +31,11 @@ class Runs extends Component
     /**
      * @var int Bumped whenever the stored object graph changes shape. A remembered run is a
      * serialized object, and an old one deserialized into new classes would be worse than no
-     * run at all — so the key changes and the old entry is simply never asked for again.
+     * run at all — so the key changes and the old entry is simply never asked for again. Bumped too
+     * when what a stored run says changes: a run kept before a broken check's exception left its
+     * prose would otherwise go on showing it.
      */
-    private const FORMAT = 2;
+    private const FORMAT = 3;
 
     /**
      * @var CacheInterface|null Where runs are kept. Settable so a caller — a test, or a site
@@ -72,16 +74,13 @@ class Runs extends Component
      * written under a key, including something written by a version of this plugin that no
      * longer exists, and a dashboard built from a half-deserialized object would be a failure
      * report about Web Doctor dressed up as a health report about the site.
+     *
+     * A cache that cannot be read is not "no run": it throws, so the page can say the last run could
+     * not be read rather than that nothing has ever been run.
      */
     public function latest(?int $siteId = null, ?string $environment = null): ?DiagnosticRun
     {
-        try {
-            $stored = $this->cache()->get($this->key($environment ?? $this->environment(), $siteId));
-        } catch (Throwable $e) {
-            Craft::warning(sprintf('The latest diagnostic run could not be read: %s', SafeException::from($e)->summary()), WebDoctor::LOG_CATEGORY);
-
-            return null;
-        }
+        $stored = $this->cache()->get($this->key($environment ?? $this->environment(), $siteId));
 
         return $stored instanceof DiagnosticRun ? $stored : null;
     }

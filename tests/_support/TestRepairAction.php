@@ -25,6 +25,7 @@ class TestRepairAction extends RepairAction
     public string $check = 'test.check';
     public RepairRisk $riskLevel = RepairRisk::LOW;
     public bool $authorized = true;
+    public string $authorizationText = 'Craft would not let you do this yourself.';
     public bool $applicable = true;
     public bool $prerequisiteMet = true;
     public bool $needsAcknowledgement = false;
@@ -105,7 +106,7 @@ class TestRepairAction extends RepairAction
 
     public function authorization(): string
     {
-        return 'Craft would not let you do this yourself.';
+        return $this->authorizationText;
     }
 
     public function prerequisites(RepairContext $context): array

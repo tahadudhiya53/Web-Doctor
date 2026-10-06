@@ -4,8 +4,10 @@ namespace Tahadudhiya\WebDoctor\controllers;
 
 use Craft;
 use craft\web\Controller;
+use Tahadudhiya\WebDoctor\enums\AuditObjectType;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\helpers\RequestInput;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
 use Tahadudhiya\WebDoctor\models\Dashboard;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
@@ -51,10 +53,12 @@ class OverviewController extends Controller
     public function actionIndex(): Response
     {
         $plugin = $this->plugin();
-        $siteId = DiagnosticContext::currentSiteId();
+        $siteId = null;
         $failure = null;
 
         try {
+            // Inside the boundary: a site Craft cannot tell is a page that says so, never "no site".
+            $siteId = DiagnosticContext::currentSiteId();
             $dashboard = Dashboard::build(
                 $plugin->getDiagnostics()->all(),
                 $plugin->getRuns()->latest($siteId),
@@ -83,6 +87,7 @@ class OverviewController extends Controller
         // costs its row the recommendation, and anything else costs the dashboard its
         // recommendations rather than the reader the dashboard.
         $recommendations = [];
+        $recommendationsFailure = null;
 
         try {
             foreach ($dashboard->rows as $row) {
@@ -93,6 +98,7 @@ class OverviewController extends Controller
         } catch (Throwable $e) {
             SafeException::log('The dashboard\'s recommendations could not be chosen', $e);
             $recommendations = [];
+            $recommendationsFailure = Craft::t('web-doctor', 'Web Doctor could not work out what to recommend for these results. The details are in Craft’s logs.');
         }
 
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
@@ -105,8 +111,9 @@ class OverviewController extends Controller
             'maxScore' => HealthSummary::MAX_SCORE,
             'depths' => DiagnosticDepth::cases(),
             'canRun' => $plugin->getPermissions()->canRun(),
-            'siteLabel' => $this->siteLabel($dashboard->run?->context->siteId ?? $siteId),
+            'siteLabel' => SiteName::label($dashboard->run?->context->siteId ?? $siteId),
             'failure' => $failure,
+            'recommendationsFailure' => $recommendationsFailure,
             'recipes' => $recipes,
             'recommendations' => $recommendations,
         ]);
@@ -132,6 +139,8 @@ class OverviewController extends Controller
         $all = RequestInput::flag($this->request->getBodyParam('all'));
         $requested = RequestInput::names($this->request->getBodyParam('diagnostics'));
 
+        $context = null;
+
         try {
             $selected = [];
 
@@ -149,6 +158,7 @@ class OverviewController extends Controller
 
             $context = DiagnosticContext::current($depth);
             $engine = $plugin->getDiagnosticEngine();
+            $plugin->getAudit()->runStarted($context, count($plugin->getDiagnostics()->ids()), $selected);
 
             $run = $selected === []
                 ? $engine->runAll($context)
@@ -157,6 +167,11 @@ class OverviewController extends Controller
             // The engine contains a diagnostic that throws; nothing contains the engine itself,
             // the registry that hands it the checks, or the context that identifies the run.
             SafeException::log('A diagnostic run could not be completed', $e);
+
+            if ($context !== null) {
+                $plugin->getAudit()->runCompleted($context, null, null, null, false);
+            }
+
             $this->setFailFlash(Craft::t('web-doctor', 'The checks could not be run. The details are in Craft’s logs.'));
 
             return $this->redirectToPostedUrl();
@@ -188,6 +203,33 @@ class OverviewController extends Controller
             $errors = null;
             SafeException::log('The errors a diagnostic run recorded could not be grouped', $e);
             $problems[] = Craft::t('web-doctor', 'The errors the checks ran into could not be recorded.');
+        }
+
+        // The run as it happened, with its health snapshot, kept beside the cached latest answer.
+        try {
+            $historyId = $plugin->getHistory()->record($run, $plugin->getDiagnostics()->all())->id;
+        } catch (Throwable $e) {
+            $historyId = null;
+            SafeException::log('A diagnostic run could not be kept in the history', $e);
+            $problems[] = Craft::t('web-doctor', 'The run could not be kept in the diagnostic history.');
+        }
+
+        $plugin->getAudit()->runCompleted($run->context, $run, $reconciliation, $errors, $problems === [], $historyId);
+
+        // What the dashboard will now advise for each finding, recorded once, as the run produced it.
+        // Choosing it again for the record must not cost the run its notice.
+        try {
+            $plugin->getAudit()->recommendationsGenerated(
+                AuditObjectType::RUN,
+                $run->id(),
+                null,
+                null,
+                $run->context->environment,
+                $run->context->siteId,
+                $plugin->getRecommendations()->forRun($run),
+            );
+        } catch (Throwable $e) {
+            SafeException::log('The recommendations a diagnostic run produced could not be recorded', $e);
         }
 
         $summary = $this->summary($run, $reconciliation, $errors);
@@ -231,28 +273,6 @@ class OverviewController extends Controller
         }
 
         return implode(' ', $parts);
-    }
-
-    /**
-     * What to call the site a run belongs to.
-     *
-     * A run with no site and a run whose site has since been deleted are different facts. Naming
-     * the second "all sites" would take findings made while looking at one site and present them
-     * as though they described the installation.
-     */
-    private function siteLabel(?int $siteId): string
-    {
-        if ($siteId === null) {
-            return Craft::t('web-doctor', 'All sites');
-        }
-
-        try {
-            $name = Craft::$app->getSites()->getSiteById($siteId)?->getName();
-        } catch (Throwable) {
-            $name = null;
-        }
-
-        return $name ?? Craft::t('web-doctor', 'Site #{id} (no longer available)', ['id' => $siteId]);
     }
 
     /**

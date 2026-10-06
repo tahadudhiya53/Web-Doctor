@@ -4,12 +4,14 @@ namespace Tahadudhiya\WebDoctor\services;
 
 use Craft;
 use craft\console\Application as ConsoleApplication;
-use craft\helpers\Db;
 use DateTimeImmutable;
 use DateTimeInterface;
 use RuntimeException;
 use Tahadudhiya\WebDoctor\base\DiagnosticInterface;
 use Tahadudhiya\WebDoctor\base\VerificationActionInterface;
+use Tahadudhiya\WebDoctor\enums\AuditAction;
+use Tahadudhiya\WebDoctor\enums\AuditObjectType;
+use Tahadudhiya\WebDoctor\enums\AuditResult;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\ExecutionMode;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
@@ -19,7 +21,10 @@ use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\DiagnosticMeta;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\Retention;
 use Tahadudhiya\WebDoctor\helpers\Savepoint;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
@@ -98,6 +103,9 @@ class Verifications extends Component
     /** @var EvidenceStore|null Where the issue's recorded finding is read. The plugin's own unless injected. */
     public ?EvidenceStore $evidence = null;
 
+    /** @var Audit|null Where each verification is recorded. The plugin's own unless injected. */
+    public ?Audit $audit = null;
+
     /**
      * @var string|null The environment this installation is running as. Craft's answer unless set,
      * which a test does so that a repair made under its own environment can be verified.
@@ -113,14 +121,19 @@ class Verifications extends Component
             return Craft::t('web-doctor', 'No such repair of this issue.');
         }
 
-        if ($repair->status !== RepairStatus::SUCCEEDED) {
-            return $repair->status === RepairStatus::FAILED
-                ? Craft::t('web-doctor', 'This repair did not finish cleanly, so there is no result of it to verify. Run the checks listed, or investigate the issue, to see where things stand.')
-                : Craft::t('web-doctor', 'This repair has not been carried out, so there is nothing to verify yet.');
+        // First: a row that cannot be read in full says nothing reliable about where it stands.
+        if (!$issue->isIntact()) {
+            return $issue->integrityRefusal();
         }
 
         if (!$repair->isIntact()) {
             return Craft::t('web-doctor', 'This repair’s record cannot be read in full, so what it should have left true is not known and it cannot be verified.');
+        }
+
+        if ($repair->status !== RepairStatus::SUCCEEDED) {
+            return $repair->status === RepairStatus::FAILED
+                ? Craft::t('web-doctor', 'This repair did not finish cleanly, so there is no result of it to verify. Run the checks listed, or investigate the issue, to see where things stand.')
+                : Craft::t('web-doctor', 'This repair has not been carried out, so there is nothing to verify yet.');
         }
 
         if ($this->repairs()->latestCarriedOut($issue->id)?->id !== $repair->id) {
@@ -147,7 +160,7 @@ class Verifications extends Component
         }
 
         // Craft soft-deletes sites, so a site in the trash still has its ID on the issue.
-        if (($issue->siteId === null && $issue->siteName !== null) || ($issue->siteId !== null && !$this->siteExists($issue->siteId))) {
+        if (SiteName::isGone($issue->siteId, $issue->siteName)) {
             return Craft::t('web-doctor', 'The site this repair was carried out on, “{site}”, has been deleted, so there is nothing left to verify it against.', [
                 'site' => $issue->siteName ?? '#' . $issue->siteId,
             ]);
@@ -255,7 +268,8 @@ class Verifications extends Component
 
         // What stands when the checks begin, to be compared under lock when the answer is applied.
         $knownVerification = $this->latestVerificationId($repair->id, false);
-        $since = $repair->startedAt ?? $repair->previewedAt;
+        // A repair read back whole has both; one that is not was refused above.
+        $since = $repair->startedAt ?? $repair->previewedAt ?? throw new RuntimeException('The repair being verified has no readable start.');
         $context = new DiagnosticContext(
             siteId: $issue->siteId,
             environment: $issue->environment,
@@ -299,7 +313,7 @@ class Verifications extends Component
         $record->comparison = Evidence::encode($this->compare($before, $after));
         $record->errors = Evidence::encode($errors);
         $record->verifiedBy = $userId;
-        $record->startedAt = $this->forDb($context->startedAt);
+        $record->startedAt = StoredTime::forDb($context->startedAt);
 
         $note = fn(VerificationStatus $stands): string => match ($stands) {
             VerificationStatus::VERIFIED => Craft::t('web-doctor', '“{name}” was verified.', ['name' => $repair->actionName]),
@@ -337,7 +351,7 @@ class Verifications extends Component
 
             $record->result = $stands->value;
             $record->failures = Evidence::encode($failures);
-            $record->finishedAt = $this->forDb(new DateTimeImmutable());
+            $record->finishedAt = StoredTime::forDb(new DateTimeImmutable());
             $record->durationMs = round(max(0.0, (microtime(true) - (float)$context->startedAt->format('U.u')) * 1000), 3);
 
             $this->save($record);
@@ -345,6 +359,33 @@ class Verifications extends Component
             if (!$superseded) {
                 $this->repairs()->recordVerification($repair->id, $stands);
             }
+
+            // In the same transaction: the answer and the record that somebody established it.
+            $this->audit()->record(
+                AuditAction::VERIFICATION_EXECUTED,
+                match ($stands) {
+                    VerificationStatus::VERIFIED => AuditResult::SUCCEEDED,
+                    VerificationStatus::FAILED => AuditResult::FAILED,
+                    default => AuditResult::INCONCLUSIVE,
+                },
+                $note($stands),
+                AuditObjectType::VERIFICATION,
+                (string)$record->id,
+                $repair->actionName,
+                $issue->id,
+                $context->environment,
+                $issue->siteId,
+                [
+                    'repairId' => $repair->id,
+                    'repairAction' => $repair->action,
+                    'answer' => $stands->value,
+                    'checks' => count($checks),
+                    'reasons' => count($failures),
+                    'runId' => $run->id(),
+                    'issueTitle' => $issue->title,
+                ],
+                $issue->siteName,
+            );
 
             $transaction->commit();
         } catch (Throwable $e) {
@@ -390,10 +431,20 @@ class Verifications extends Component
     private function before(Issue $issue, array &$failures): ?array
     {
         try {
-            return array_map(
+            $before = array_map(
                 static fn(StoredEvidence $stored): Evidence => $stored->evidence,
                 $this->evidenceStore()->latest($issue->id, $issue->latestRunId),
             );
+
+            foreach ($before as $evidence) {
+                if (!$evidence->readable) {
+                    $failures[] = Craft::t('web-doctor', 'Part of the evidence the issue last recorded could not be read, so what the check found now cannot be fully compared with it.');
+
+                    break;
+                }
+            }
+
+            return $before;
         } catch (Throwable $e) {
             SafeException::log('The evidence behind an issue could not be read to verify its repair', $e);
             $failures[] = Craft::t('web-doctor', 'The evidence the issue last recorded could not be read, so there is nothing to compare what the check found now with. The details are in Craft’s logs.');
@@ -630,7 +681,8 @@ class Verifications extends Component
 
             if ($group !== null) {
                 $met[$fingerprint]['groupId'] = $group->id;
-                $met[$fingerprint]['new'] = $group->firstSeen->getTimestamp() >= $since->getTimestamp();
+                // A group whose first sighting cannot be read cannot be told to be new or old.
+                $met[$fingerprint]['new'] = $group->firstSeen === null ? null : $group->firstSeen->getTimestamp() >= $since->getTimestamp();
             }
 
             $met[$fingerprint]['diagnosticIds'] = array_values(array_unique($met[$fingerprint]['diagnosticIds']));
@@ -798,16 +850,7 @@ class Verifications extends Component
     private function prune(int $repairId): void
     {
         try {
-            $stale = VerificationRecord::find()
-                ->select(['id'])
-                ->where(['repairId' => $repairId])
-                ->orderBy(['startedAt' => SORT_DESC, 'id' => SORT_DESC])
-                ->offset($this->maxPerRepair)
-                ->column();
-
-            if ($stale !== []) {
-                VerificationRecord::deleteAll(['id' => $stale]);
-            }
+            Retention::keepNewest(VerificationRecord::tableName(), ['repairId' => $repairId], $this->maxPerRepair);
         } catch (Throwable $e) {
             SafeException::log('Old verifications could not be removed', $e);
         }
@@ -843,17 +886,6 @@ class Verifications extends Component
         }
     }
 
-    private function siteExists(int $siteId): bool
-    {
-        try {
-            return Craft::$app->getSites()->getSiteById($siteId, true) !== null;
-        } catch (Throwable $e) {
-            SafeException::log('Whether a site still exists could not be established', $e);
-
-            return false;
-        }
-    }
-
     /**
      * A seam rather than a private call, so a test can make a verification's row fail to save and
      * prove nothing of it stands.
@@ -868,11 +900,6 @@ class Verifications extends Component
                 Redaction::redactString(json_encode($record->getErrors()) ?: 'unknown error'),
             ));
         }
-    }
-
-    private function forDb(DateTimeInterface $when): string
-    {
-        return Db::prepareDateForDb($when) ?? gmdate('Y-m-d H:i:s');
     }
 
     /**
@@ -909,6 +936,11 @@ class Verifications extends Component
     private function errors(): Errors
     {
         return $this->errors ??= WebDoctor::getInstance()?->getErrors() ?? throw new InvalidConfigException('Verifications needs the error groups, and Web Doctor is not installed to provide them.');
+    }
+
+    private function audit(): Audit
+    {
+        return $this->audit ??= WebDoctor::getInstance()?->getAudit() ?? throw new InvalidConfigException('Verifications needs the audit trail, and Web Doctor is not installed to provide it.');
     }
 
     private function evidenceStore(): EvidenceStore

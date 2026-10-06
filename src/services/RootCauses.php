@@ -5,6 +5,7 @@ namespace Tahadudhiya\WebDoctor\services;
 use Craft;
 use RuntimeException;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\Text;
 use Tahadudhiya\WebDoctor\models\ConditionOutcome;
 use Tahadudhiya\WebDoctor\models\CorrelationCase;
 use Tahadudhiya\WebDoctor\models\Evidence;
@@ -153,9 +154,9 @@ class RootCauses extends Component
         $record = new RootCauseRecord();
         $record->investigationId = $investigationId;
         $record->position = $cause->position;
-        $record->ruleId = $this->fit($cause->ruleId, 64);
-        $record->confidence = $cause->confidence->value;
-        $record->title = $this->fit(Redaction::redactString($cause->title), 255);
+        $record->ruleId = Text::fit($cause->ruleId, 64);
+        $record->confidence = ($cause->confidence ?? throw new \RuntimeException('A cause without a confidence cannot be recorded.'))->value;
+        $record->title = Text::fit(Redaction::redactString($cause->title), 255);
         $record->statement = Redaction::redactString($cause->statement);
         $record->problem = Redaction::redactString($cause->problem);
         $record->supporting = $outcomes($cause->supporting());
@@ -182,10 +183,5 @@ class RootCauses extends Component
                 Redaction::redactString(json_encode($record->getErrors()) ?: 'unknown error'),
             ));
         }
-    }
-
-    private function fit(string $value, int $length): string
-    {
-        return mb_strlen($value) > $length ? mb_substr($value, 0, $length - 1) . '…' : $value;
     }
 }

@@ -100,7 +100,9 @@ class FailedJobsDiagnostic extends QueueDiagnostic
         foreach ($groups as $group) {
             $evidence[] = new Evidence(
                 type: EvidenceType::QUEUE_JOB,
-                label: $group['description'],
+                // What a job is called is the job's own text — often who or what it was for — so it
+                // is the fact, read with permission to read evidence, never the label every reader sees.
+                label: Craft::t('web-doctor', 'Failed job'),
                 source: $this->id(),
                 data: [
                     'description' => $group['description'],

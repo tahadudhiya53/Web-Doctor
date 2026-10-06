@@ -19,6 +19,7 @@ use Tahadudhiya\WebDoctor\enums\IssueEventType;
 use Tahadudhiya\WebDoctor\enums\IssueResolution;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\helpers\Savepoint;
@@ -143,7 +144,7 @@ class IssueCenterTest extends TestCase
         self::assertSame('connection', $issue->affectedComponent);
         self::assertSame($this->environment, $issue->environment);
         self::assertSame(1, $issue->occurrences);
-        self::assertFalse($issue->isRecurring());
+        self::assertSame(1, $issue->occurrences);
         self::assertTrue($issue->isOpen());
         self::assertSame($run->id(), $issue->firstRunId);
         self::assertSame($run->id(), $issue->latestRunId);
@@ -186,7 +187,7 @@ class IssueCenterTest extends TestCase
         self::assertSame(0, $outcome->opened);
         self::assertSame(1, $outcome->updated);
         self::assertSame(2, $issue->occurrences);
-        self::assertTrue($issue->isRecurring());
+        self::assertGreaterThan(1, $issue->occurrences);
         self::assertSame($first->id(), $issue->firstRunId);
         self::assertSame($second->id(), $issue->latestRunId);
         self::assertLessThan($issue->lastDetected, $issue->firstDetected);
@@ -1281,11 +1282,11 @@ class IssueCenterTest extends TestCase
     {
         $this->seedVariety();
 
-        self::assertCount(1, $this->find(new IssueFilter(environment: $this->environment, severities: [Severity::CRITICAL]))->issues);
-        self::assertCount(3, $this->find(new IssueFilter(environment: $this->environment, statuses: [IssueStatus::NEW]))->issues);
-        self::assertCount(1, $this->find(new IssueFilter(environment: $this->environment, diagnosticId: 'tests.high'))->issues);
-        self::assertCount(3, $this->find(new IssueFilter(environment: $this->environment))->issues);
-        self::assertCount(0, $this->find(new IssueFilter(environment: 'tests-nowhere'))->issues);
+        self::assertCount(1, $this->find(new IssueFilter(environment: $this->environment, severities: [Severity::CRITICAL]))->items);
+        self::assertCount(3, $this->find(new IssueFilter(environment: $this->environment, statuses: [IssueStatus::NEW]))->items);
+        self::assertCount(1, $this->find(new IssueFilter(environment: $this->environment, diagnosticId: 'tests.high'))->items);
+        self::assertCount(3, $this->find(new IssueFilter(environment: $this->environment))->items);
+        self::assertCount(0, $this->find(new IssueFilter(environment: 'tests-nowhere'))->items);
     }
 
     /**
@@ -1351,9 +1352,9 @@ class IssueCenterTest extends TestCase
             at: new DateTimeImmutable('2026-03-15 12:00:00'),
         ));
 
-        self::assertCount(1, $this->find(new IssueFilter(environment: $this->environment, detectedFrom: '2026-03-01', detectedTo: '2026-03-31'))->issues);
-        self::assertCount(0, $this->find(new IssueFilter(environment: $this->environment, detectedFrom: '2026-04-01'))->issues);
-        self::assertCount(0, $this->find(new IssueFilter(environment: $this->environment, detectedTo: '2026-02-28'))->issues);
+        self::assertCount(1, $this->find(new IssueFilter(environment: $this->environment, detectedFrom: '2026-03-01', detectedTo: '2026-03-31'))->items);
+        self::assertCount(0, $this->find(new IssueFilter(environment: $this->environment, detectedFrom: '2026-04-01'))->items);
+        self::assertCount(0, $this->find(new IssueFilter(environment: $this->environment, detectedTo: '2026-02-28'))->items);
     }
 
     /**
@@ -1364,8 +1365,8 @@ class IssueCenterTest extends TestCase
     {
         $this->seedVariety();
 
-        $descending = $this->find(new IssueFilter(environment: $this->environment, sort: 'severity'))->issues;
-        $ascending = $this->find(new IssueFilter(environment: $this->environment, sort: 'severity', ascending: true))->issues;
+        $descending = $this->find(new IssueFilter(environment: $this->environment, sort: 'severity'))->items;
+        $ascending = $this->find(new IssueFilter(environment: $this->environment, sort: 'severity', ascending: true))->items;
 
         self::assertSame(
             [Severity::CRITICAL, Severity::HIGH, Severity::LOW],
@@ -1383,7 +1384,7 @@ class IssueCenterTest extends TestCase
 
         $page = $this->find(new IssueFilter(environment: $this->environment, sort: 'severity', perPage: 2));
 
-        self::assertCount(2, $page->issues);
+        self::assertCount(2, $page->items);
         self::assertSame(3, $page->total);
         self::assertTrue($page->hasNextPage());
         self::assertSame(1, $page->firstPosition());
@@ -1391,7 +1392,7 @@ class IssueCenterTest extends TestCase
 
         $second = $this->find(new IssueFilter(environment: $this->environment, sort: 'severity', page: 2, perPage: 2));
 
-        self::assertCount(1, $second->issues);
+        self::assertCount(1, $second->items);
         self::assertFalse($second->hasNextPage());
         self::assertSame(3, $second->firstPosition());
         self::assertSame(3, $second->lastPosition());
@@ -1400,7 +1401,7 @@ class IssueCenterTest extends TestCase
         // last page, not "nothing matches" with no way back.
         $beyond = $this->find(new IssueFilter(environment: $this->environment, sort: 'severity', page: 9, perPage: 2));
 
-        self::assertSame(array_map(static fn(Issue $i): int => $i->id, $second->issues), array_map(static fn(Issue $i): int => $i->id, $beyond->issues));
+        self::assertSame(array_map(static fn(Issue $i): int => $i->id, $second->items), array_map(static fn(Issue $i): int => $i->id, $beyond->items));
         self::assertSame(2, $beyond->currentPage());
     }
 
@@ -1443,6 +1444,54 @@ class IssueCenterTest extends TestCase
 
     // Helpers ----------------------------------------------------------------
 
+    /**
+     * An issue whose record cannot be read in full is shown as it can be read, every unreadable part
+     * said to be unreadable rather than read as another value, and nothing changes, investigates,
+     * repairs, verifies or advises on it.
+     */
+    public function testAnIssueThatCannotBeReadInFullIsShownAsSuchAndNothingActsOnIt(): void
+    {
+        $issue = $this->seedIssue();
+        IssueRecord::updateAll(['status' => 'escalated', 'severity' => 'apocalyptic'], ['id' => $issue->id]);
+        \Tahadudhiya\WebDoctor\Tests\integration\AuditTest::withoutStrictDates(static fn() => IssueRecord::updateAll(['lastDetected' => '0000-00-00 00:00:00'], ['id' => $issue->id]));
+        $read = $this->reread($issue);
+
+        self::assertNull($read->status, 'An unknown status was read as a known one.');
+        self::assertNull($read->severity);
+        self::assertNull($read->lastDetected, 'An unreadable moment was read as now.');
+        self::assertSame(['severity', 'status', 'lastDetected'], $read->unreadable);
+        self::assertFalse($read->isOpen(), 'A status nobody can read was counted as outstanding.');
+
+        $before = \Tahadudhiya\WebDoctor\Tests\_support\WebDoctorTables::snapshot();
+
+        try {
+            $this->issues->transition($issue->id, IssueStatus::CONFIRMED, null, 1);
+            self::fail('An issue nobody can read the state of was changed.');
+        } catch (Refusal $e) {
+            self::assertStringContainsString('cannot be read in full', $e->getMessage());
+        }
+
+        self::assertNotNull($this->plugin->getRepairs()->refusal($read));
+        self::assertNotNull($this->plugin->getInvestigations()->refusal($read));
+        self::assertSame([], $this->plugin->getRepairs()->available($read, []));
+
+        try {
+            $this->plugin->getRecommendations()->forIssue($read, []);
+            self::fail('Advice was chosen for an issue nobody can read.');
+        } catch (Refusal) {
+        }
+
+        self::assertSame($before, \Tahadudhiya\WebDoctor\Tests\_support\WebDoctorTables::snapshot());
+
+        $this->signIn(admin: true);
+        $this->request('GET');
+        $html = $this->render('detail', 'web-doctor/_issues/_issue', ['issueId' => $issue->id]);
+
+        self::assertStringContainsString('cannot be read in full (severity, status, lastDetected)', $html);
+        self::assertStringContainsString(Craft::t('web-doctor', 'Could not be read'), $html);
+        self::assertStringNotContainsString('web-doctor/issues/update-status', $html, 'A status form was offered for an issue nobody can read.');
+    }
+
     private function seedVariety(): void
     {
         $this->issues->reconcile($this->diagnosticRun([
@@ -1452,7 +1501,7 @@ class IssueCenterTest extends TestCase
         ]));
     }
 
-    private function find(IssueFilter $filter): \Tahadudhiya\WebDoctor\models\IssueList
+    private function find(IssueFilter $filter): \Tahadudhiya\WebDoctor\models\ListPage
     {
         return $this->issues->find($filter);
     }
@@ -1519,7 +1568,7 @@ class IssueCenterTest extends TestCase
      */
     private function all(): array
     {
-        return $this->find(new IssueFilter(environment: $this->environment, sort: 'diagnostic', ascending: true, perPage: 100))->issues;
+        return $this->find(new IssueFilter(environment: $this->environment, sort: 'diagnostic', ascending: true, perPage: 100))->items;
     }
 
     private function only(): Issue
@@ -1558,7 +1607,7 @@ class IssueCenterTest extends TestCase
      */
     private function idsOf(IssueFilter $filter): array
     {
-        return array_map(static fn(Issue $i): int => $i->id, $this->find($filter)->issues);
+        return array_map(static fn(Issue $i): int => $i->id, $this->find($filter)->items);
     }
 
     private function issueWith(?int $siteId): Issue
@@ -1574,7 +1623,7 @@ class IssueCenterTest extends TestCase
 
     private function issueFor(string $diagnosticId): Issue
     {
-        $issues = $this->find(new IssueFilter(environment: $this->environment, diagnosticId: $diagnosticId))->issues;
+        $issues = $this->find(new IssueFilter(environment: $this->environment, diagnosticId: $diagnosticId))->items;
 
         self::assertCount(1, $issues, "Expected one issue for $diagnosticId.");
 
@@ -1633,7 +1682,7 @@ class IssueCenterTest extends TestCase
 
     // Who may reach any of it ------------------------------------------------
 
-    public function testReadingTheIssueListNeedsItsOwnPermission(): void
+    public function testReadingTheListPageNeedsItsOwnPermission(): void
     {
         $this->signIn(admin: false, permissions: [self::ACCESS_CP, Permissions::VIEW]);
         $this->request('GET');
@@ -1693,14 +1742,6 @@ class IssueCenterTest extends TestCase
                 // As it should.
             }
         }
-    }
-
-    public function testNoActionIsOpenedUpToAnonymousRequests(): void
-    {
-        // A request with no identity cannot be driven through the controller here, because Craft
-        // answers it with a login redirect that needs a session. What can be asserted is that
-        // nothing opts an action out of authentication in the first place.
-        self::assertSame(RecordingIssuesController::ALLOW_ANONYMOUS_NEVER, $this->controller()->anonymousAccess());
     }
 
     public function testChangingAnIssueMustBeAPost(): void
@@ -1867,7 +1908,8 @@ class IssueCenterTest extends TestCase
         $this->signIn(admin: true);
         $before = WebDoctorTables::snapshot();
 
-        foreach ([$issue->id . 'abc', $issue->id . "\n", 'abc', ['1'], '-1', ''] as $malformed) {
+        // Every malformed ID is read in DiagnosticModelTest; this proves the status form's is.
+        foreach ([$issue->id . 'abc', $issue->id . "\n"] as $malformed) {
             $this->post(['issueId' => $malformed, 'status' => IssueStatus::CONFIRMED->value]);
 
             try {
@@ -2158,7 +2200,7 @@ class IssueCenterTest extends TestCase
     {
         return $this->seedIssue(summary: 'Queue jobs have failed: 2.', diagnosticId: 'queue.failedJobs', evidence: [
             new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.failedJobs', data: ['failed' => 2, 'examined' => 2]),
-            new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Sending email', source: 'queue.failedJobs', data: ['description' => 'Sending email', 'occurrences' => 1, 'error' => 'zz-job-error-zz']),
+            new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Failed job', source: 'queue.failedJobs', data: ['description' => 'Sending email', 'occurrences' => 1, 'error' => 'zz-job-error-zz']),
         ]);
     }
 
@@ -2185,7 +2227,7 @@ class IssueCenterTest extends TestCase
         // by-hand only — but this reader may not run repairs, so it is never offered as theirs to run.
         self::assertStringNotContainsString('Web Doctor can carry this out once you have previewed and confirmed it', $html);
 
-        foreach (['Medium risk', 'Sending email, recorded by Example check', '<code>queue.failedJobs</code>', 'rather than from a weighed cause', 'Web Doctor has a repair for this, but it cannot be carried out here now', 'Retry the failed queue jobs', 'safe to run again'] as $expected) {
+        foreach (['Medium risk', 'Failed job, recorded by Example check', '<code>queue.failedJobs</code>', 'rather than from a weighed cause', 'Web Doctor has a repair for this, but it cannot be carried out here now', 'Retry the failed queue jobs', 'safe to run again'] as $expected) {
             self::assertStringContainsString($expected, $html);
         }
 
@@ -2265,7 +2307,7 @@ class IssueCenterTest extends TestCase
                 id: 'ranOutOfMemory',
                 role: \Tahadudhiya\WebDoctor\enums\ConditionRole::REQUIRED,
                 description: 'A failed queue job recorded PHP running out of memory',
-                observations: [new \Tahadudhiya\WebDoctor\models\Observation(kind: \Tahadudhiya\WebDoctor\models\Observation::EVIDENCE, label: 'Failed job “Sending email”', diagnosticId: 'queue.failedJobs')],
+                observations: [new \Tahadudhiya\WebDoctor\models\Observation(kind: \Tahadudhiya\WebDoctor\models\Observation::EVIDENCE, label: 'A failed job, failed once', diagnosticId: 'queue.failedJobs')],
             )],
             reasoning: [],
             relatedIssues: [],

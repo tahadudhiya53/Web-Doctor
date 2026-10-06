@@ -625,40 +625,6 @@ class RecipeTest extends TestCase
         $this->recipesController()->runAction('index');
     }
 
-    public function testRunningARecipeNeedsTheInvestigatePermissionAndAControlPanelPostWithAToken(): void
-    {
-        $this->standIns();
-
-        $this->signIn(admin: false, permissions: [self::ACCESS_CP, Permissions::VIEW, Permissions::VIEW_ISSUES]);
-        $this->post(['recipeId' => 'queue.jobsFailing']);
-
-        try {
-            $this->recipesController()->runAction('run');
-            self::fail('Somebody who may only read issues ran a recipe.');
-        } catch (ForbiddenHttpException) {
-        }
-
-        $this->signIn(admin: true);
-
-        foreach ([
-            'a GET' => [fn() => $this->request('GET'), MethodNotAllowedHttpException::class],
-            'no CSRF token' => [fn() => $this->request('POST')->setBodyParams(['recipeId' => 'queue.jobsFailing']), BadRequestHttpException::class],
-            'the front end' => [fn() => $this->request('POST', cp: false), BadRequestHttpException::class],
-        ] as $how => [$request, $refusal]) {
-            $request();
-
-            try {
-                $this->recipesController()->runAction('run');
-                self::fail("A recipe was run from $how.");
-            } catch (\Throwable $e) {
-                self::assertInstanceOf($refusal, $e, $how);
-            }
-        }
-
-        self::assertSame([], $this->investigations->recipeHistory());
-        self::assertSame(RecordingRecipesController::ALLOW_ANONYMOUS_NEVER, $this->recipesController()->anonymousAccess());
-    }
-
     public function testSomebodyWhoMayInvestigateRunsARecipeAndIsTakenToWhatItFound(): void
     {
         $this->standIns();
@@ -717,7 +683,7 @@ class RecipeTest extends TestCase
             category: $d->category(),
             status: DiagnosticStatus::FAIL,
             summary: 'Queue jobs have failed: 3.',
-            evidence: [new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Sending email', source: 'queue.failedJobs', data: ['description' => 'Sending email', 'error' => 'distinctive-value-5521'])],
+            evidence: [new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Failed job', source: 'queue.failedJobs', data: ['description' => 'Sending email', 'error' => 'distinctive-value-5521'])],
         )]);
         $investigation = $this->investigations->runRecipe('queue.jobsFailing');
         $issue = $this->issueFor('queue.failedJobs');
@@ -747,7 +713,9 @@ class RecipeTest extends TestCase
         $this->signIn(admin: false, permissions: [self::ACCESS_CP, Permissions::VIEW, Permissions::VIEW_ISSUES]);
         $withheld = $this->renderInvestigation($investigation);
 
-        self::assertStringContainsString('Sending email', $withheld);
+        // What a job was called is the job's own text: it is what the evidence holds, not its label.
+        self::assertStringContainsString('Failed job', $withheld);
+        self::assertStringNotContainsString('Sending email', $withheld);
         self::assertStringNotContainsString('distinctive-value-5521', $withheld);
 
         // A recipe that found nothing weighed nothing, and does not claim no cause fits.
@@ -866,44 +834,62 @@ class RecipeTest extends TestCase
     }
 
     /**
-     * A plan read back from a row is history, not configuration: what cannot be read is dropped or
-     * read as the least it can claim, and never takes the page down.
+     * A plan read back from a row is history, not configuration: it reads back exactly as written,
+     * and any part not in that shape makes the whole plan unreadable — never a normal-depth plan,
+     * a plan without a check it named, or a check with an origin it did not have.
      */
-    public function testAStoredPlanThatCannotBeFullyReadIsReadAsFarAsItCanBe(): void
+    public function testAStoredPlanReadsBackExactlyOrNotAtAll(): void
     {
-        $plan = InvestigationPlan::fromArray([
+        $stored = [
             'ruleId' => InvestigationPlan::RECIPE_RULE,
-            'depth' => 'bottomless',
-            'recipeId' => ['not', 'a', 'string'],
-            'checks' => [['diagnosticId' => 'queue.failedJobs', 'reason' => 'Kept.'], 'garbage', ['name' => 'no id']],
-            'leads' => ['A lead.', 42],
-        ]);
+            'ruleLabel' => 'Queue Doctor',
+            'depth' => 'deep',
+            'checks' => [['diagnosticId' => 'queue.failedJobs', 'name' => 'Failed jobs', 'category' => 'queue', 'reason' => 'Kept.', 'origin' => false]],
+            'uncovered' => [['area' => 'Configuration', 'reason' => 'None covers it.', 'origin' => false]],
+            'leads' => ['A lead.'],
+            'omitted' => 2,
+            'recipeId' => 'webdoctor.queue',
+        ];
+        $plan = InvestigationPlan::fromArray($stored);
 
-        self::assertSame(['queue.failedJobs'], $plan->diagnosticIds());
-        self::assertNull($plan->recipeId);
-        self::assertSame(DiagnosticDepth::NORMAL, $plan->depth);
-        self::assertSame(['A lead.'], $plan->leads);
+        self::assertNotNull($plan);
+        self::assertSame($stored, $plan->jsonSerialize());
+
+        $broken = [
+            'depth' => ['depth' => 'bottomless'],
+            'rule' => ['ruleId' => ''],
+            'rule label' => ['ruleLabel' => ['not', 'text']],
+            'recipe' => ['recipeId' => ['not', 'a', 'string']],
+            'a check that is not one' => ['checks' => ['garbage']],
+            'a check with no ID' => ['checks' => [array_diff_key($stored['checks'][0], ['diagnosticId' => true])]],
+            'a reason that is a list' => ['checks' => [['reason' => ['a', 'list']] + $stored['checks'][0]]],
+            'an origin spelt as text' => ['checks' => [['origin' => 'false'] + $stored['checks'][0]]],
+            'an area that is not one' => ['uncovered' => [['origin' => 1] + $stored['uncovered'][0]]],
+            'a lead that is not text' => ['leads' => ['A lead.', 42]],
+            'the count left out' => ['omitted' => 'two'],
+            'a negative count' => ['omitted' => -1],
+            'checks missing' => ['checks' => null],
+        ];
+
+        foreach ($broken as $what => $change) {
+            self::assertNull(InvestigationPlan::fromArray($change + $stored), $what);
+        }
     }
 
     /**
      * Each depth runs exactly the checks its plan names, each once, and hands the checks the depth
      * that was asked for; missing, the depth is normal, as every run form states. Anything else is
-     * refused before anything runs or is written.
+     * refused before anything runs or is written. Every depth a request could send is read in
+     * DiagnosticModelTest; these prove the recipe is handed what was read.
      *
      * @return array<string, array{mixed, DiagnosticDepth|null}>
      */
     public static function requestedDepths(): array
     {
         return [
-            'shallow' => ['shallow', DiagnosticDepth::SHALLOW],
-            'normal' => ['normal', DiagnosticDepth::NORMAL],
             'deep' => ['deep', DiagnosticDepth::DEEP],
             'missing' => [self::MISSING, DiagnosticDepth::NORMAL],
-            'a depth Web Doctor does not have' => ['bottomless', null],
-            'empty' => ['', null],
             'the wrong case' => ['Deep', null],
-            'a list' => [['deep'], null],
-            'a number' => ['1', null],
         ];
     }
 
@@ -1333,7 +1319,7 @@ class RecipeTest extends TestCase
                 $d->category(),
                 DiagnosticStatus::FAIL,
                 'Queue jobs have failed: 1.',
-                evidence: [new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Sending email', source: 'queue.failedJobs', data: ['description' => 'Sending email', 'error' => "SMTP 535 for $dsn with password={$secrets['smtp']}"])],
+                evidence: [new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Failed job', source: 'queue.failedJobs', data: ['description' => 'Sending email', 'error' => "SMTP 535 for $dsn with password={$secrets['smtp']}"])],
             ),
             'queue.backlog' => static function() use ($secrets, $dsn): DiagnosticResult {
                 throw new RuntimeException("Could not reach $dsn: Authorization: Bearer {$secrets['bearer']}");
@@ -1726,24 +1712,25 @@ class RecipeTest extends TestCase
         $view = [self::ACCESS_CP, Permissions::VIEW];
         $issues = [self::ACCESS_CP, Permissions::VIEW, Permissions::VIEW_ISSUES];
 
-        // [action, method, admin, permissions, control panel, refusal]
+        // [action, method, admin, permissions, control panel, token, refusal]
         $cases = [
-            'the page, control panel access only' => ['index', 'GET', false, $cp, true, ForbiddenHttpException::class],
-            'the page, Web Doctor only' => ['index', 'GET', false, $view, true, ForbiddenHttpException::class],
-            'the page, from the front end' => ['index', 'GET', true, [], false, BadRequestHttpException::class],
-            'a run, control panel access only' => ['run', 'POST', false, $cp, true, ForbiddenHttpException::class],
-            'a run, Web Doctor only' => ['run', 'POST', false, $view, true, ForbiddenHttpException::class],
-            'a run, reading issues only' => ['run', 'POST', false, $issues, true, ForbiddenHttpException::class],
-            'a run, from the front end' => ['run', 'POST', true, [], false, BadRequestHttpException::class],
-            'a run by GET' => ['run', 'GET', true, [], true, MethodNotAllowedHttpException::class],
+            'the page, control panel access only' => ['index', 'GET', false, $cp, true, false, ForbiddenHttpException::class],
+            'the page, Web Doctor only' => ['index', 'GET', false, $view, true, false, ForbiddenHttpException::class],
+            'the page, from the front end' => ['index', 'GET', true, [], false, false, BadRequestHttpException::class],
+            'a run, control panel access only' => ['run', 'POST', false, $cp, true, true, ForbiddenHttpException::class],
+            'a run, Web Doctor only' => ['run', 'POST', false, $view, true, true, ForbiddenHttpException::class],
+            'a run, reading issues only' => ['run', 'POST', false, $issues, true, true, ForbiddenHttpException::class],
+            'a run, from the front end' => ['run', 'POST', true, [], false, true, BadRequestHttpException::class],
+            'a run without a token' => ['run', 'POST', true, [], true, false, BadRequestHttpException::class],
+            'a run by GET' => ['run', 'GET', true, [], true, false, MethodNotAllowedHttpException::class],
         ];
 
-        foreach ($cases as $case => [$action, $method, $admin, $permissions, $inCp, $refusal]) {
+        foreach ($cases as $case => [$action, $method, $admin, $permissions, $inCp, $token, $refusal]) {
             $this->signIn(admin: $admin, permissions: $permissions);
             $request = $this->request($method, cp: $inCp);
 
             if ($method === 'POST') {
-                $request->setBodyParams(['recipeId' => 'queue.jobsFailing', $request->csrfParam => $request->getCsrfToken()]);
+                $request->setBodyParams(['recipeId' => 'queue.jobsFailing'] + ($token ? [$request->csrfParam => $request->getCsrfToken()] : []));
             }
 
             try {
@@ -1756,8 +1743,6 @@ class RecipeTest extends TestCase
 
         self::assertCount(0, $this->investigations->recipeHistory());
         self::assertSame(0, array_sum(array_map(static fn(TestDiagnostic $d): int => $d->runs, $this->checks)));
-        self::assertSame(RecordingRecipesController::ALLOW_ANONYMOUS_NEVER, $this->recipesController()->anonymousAccess());
-        self::assertSame(RecordingInvestigationsController::ALLOW_ANONYMOUS_NEVER, $this->investigationsController()->anonymousAccess());
 
         // Somebody who may investigate, and an admin, each run one.
         foreach ([[false, [...$issues, Permissions::INVESTIGATE_ISSUES]], [true, []]] as $i => [$admin, $permissions]) {

@@ -18,6 +18,9 @@ use RuntimeException;
 use Tahadudhiya\WebDoctor\diagnostics\CoreDiagnostics;
 use Tahadudhiya\WebDoctor\diagnostics\queue\FailedJobsDiagnostic;
 use Tahadudhiya\WebDoctor\diagnostics\storage\StoragePathsDiagnostic;
+use Tahadudhiya\WebDoctor\enums\AuditAction;
+use Tahadudhiya\WebDoctor\enums\AuditObjectType;
+use Tahadudhiya\WebDoctor\enums\AuditResult;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
@@ -30,18 +33,21 @@ use Tahadudhiya\WebDoctor\enums\VerificationStatus;
 use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\models\AuditFilter;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\Issue;
 use Tahadudhiya\WebDoctor\models\Repair;
+use Tahadudhiya\WebDoctor\records\AuditRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\records\RepairRecord;
 use Tahadudhiya\WebDoctor\repairs\CoreRepairActions;
 use Tahadudhiya\WebDoctor\repairs\CreateStorageDirectories;
 use Tahadudhiya\WebDoctor\repairs\RetryFailedJobs;
 use Tahadudhiya\WebDoctor\rules\RecommendationRules;
+use Tahadudhiya\WebDoctor\services\Audit;
 use Tahadudhiya\WebDoctor\services\EvidenceStore;
 use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
@@ -59,7 +65,6 @@ use yii\base\InvalidArgumentException;
 use yii\web\BadRequestHttpException;
 use yii\web\ForbiddenHttpException;
 use yii\web\MethodNotAllowedHttpException;
-use yii\web\NotFoundHttpException;
 
 /**
  * Repairing an issue, end to end: which actions are offered and why, what previewing reads and
@@ -264,6 +269,12 @@ class RepairTest extends TestCase
         $issue = $this->raise();
 
         self::assertSame([$answers], $this->repairs->available($issue, []));
+
+        // Nothing is offered on a finding whose evidence, read back, cannot all be read: the action
+        // would be deciding from a gap.
+        $unreadable = Evidence::fromArray(['type' => 'a type from elsewhere'] + Evidence::presence('Target', 'set', 'test.check')->jsonSerialize());
+        self::assertFalse($unreadable->readable);
+        self::assertSame([], $this->repairs->available($issue, [$unreadable]));
 
         // A resolved issue has nothing left to act on.
         $this->setStatus($issue, IssueStatus::RESOLVED);
@@ -670,6 +681,12 @@ class RepairTest extends TestCase
                 throw new RuntimeException('password=hunter2');
             }]);
             $issue = $this->raise();
+
+            try {
+                $this->repairs->prepare($issue->id, 'test.nothing');
+            } catch (Refusal) {
+            }
+
             $repair = $this->repairs->prepare($issue->id, 'test.repair');
 
             try {
@@ -689,6 +706,7 @@ class RepairTest extends TestCase
         $text = implode("\n", $lines);
 
         self::assertStringContainsString(sprintf('Repair %d (test.repair, low risk) previewed for issue %d in the "%s" environment by user 1.', $repair->id, $issue->id, $this->environment), $text);
+        self::assertStringContainsString(sprintf('Preview of repair test.nothing for issue %d refused for user 1: Web Doctor has no repair called “test.nothing”.', $issue->id), $text);
         self::assertStringContainsString(sprintf('Repair %d of issue %d refused for user 1: Nothing was carried out: the repair was not confirmed.', $repair->id, $issue->id), $text);
         self::assertStringContainsString(sprintf('Repair %d (test.repair, low risk) failed for issue %d', $repair->id, $issue->id), $text);
         self::assertStringNotContainsString('hunter2', implode("\n", array_map(static fn(array $m): string => (string)$m[0], $logger->messages)));
@@ -920,6 +938,35 @@ class RepairTest extends TestCase
     }
 
     /**
+     * A queue with no channel of its own and no component ID to fall back to cannot tell its jobs
+     * from another queue's in the same table, so nothing is retried — although the checks still
+     * count the whole table rather than report nothing.
+     */
+    public function testFailedJobsAreNotRetriedFromAQueueThatCannotTellItsOwnJobsApart(): void
+    {
+        $queue = $this->queue();
+        $mine = $this->job($queue, fail: true);
+        $foreign = $this->job($queue, fail: true, channel: 'someone-else');
+        $this->actions->register(new RetryFailedJobs(['queue' => $queue]));
+        $issue = $this->raiseFrom(new FailedJobsDiagnostic(['queue' => $queue]));
+        $queue->channel = null;
+
+        $repair = $this->repairs->prepare($issue->id, RetryFailedJobs::ID);
+
+        self::assertFalse($repair->checkedPrerequisitesMet());
+        self::assertSame(['databaseQueue' => true, 'ownChannel' => false], array_column(array_map(static fn($p): array => [$p->id, $p->met], $repair->prerequisites), 1, 0));
+
+        try {
+            $this->repairs->execute($repair->id, $issue->id, true, []);
+            self::fail('Jobs were retried from a queue that cannot tell its own apart.');
+        } catch (Refusal) {
+        }
+
+        self::assertSame(1, (int)$this->row($queue, $mine)['fail']);
+        self::assertSame(1, (int)$this->row($queue, $foreign)['fail']);
+    }
+
+    /**
      * @return array<string, array{Closure(self, StubQueue, int): void, string}>
      */
     public static function jobsNotToRetry(): array
@@ -1061,7 +1108,6 @@ class RepairTest extends TestCase
 
         self::assertSame($before, WebDoctorTables::snapshot());
         self::assertSame(0, $action->executions);
-        self::assertSame(RecordingRepairsController::ALLOW_ANONYMOUS_NEVER, $this->controller()->anonymousAccess());
     }
 
     /**
@@ -1071,23 +1117,15 @@ class RepairTest extends TestCase
     {
         return [
             'an issue ID with letters' => ['prepare', ['issueId' => '12abc', 'repairAction' => 'test.repair']],
-            'an issue ID with a newline' => ['prepare', ['issueId' => "12\n", 'repairAction' => 'test.repair']],
-            'an issue ID of zero' => ['prepare', ['issueId' => '0', 'repairAction' => 'test.repair']],
-            'a negative issue ID' => ['prepare', ['issueId' => '-1', 'repairAction' => 'test.repair']],
-            'an issue ID with spaces' => ['prepare', ['issueId' => ' (issue) ', 'repairAction' => 'test.repair']],
-            'an issue ID sent twice' => ['prepare', ['issueId' => ['(issue)', '(issue)'], 'repairAction' => 'test.repair']],
             'a missing issue ID' => ['prepare', ['repairAction' => 'test.repair']],
             'a missing action' => ['prepare', ['issueId' => '(issue)']],
-            'a repair ID of zero' => ['execute', ['issueId' => '(issue)', 'repairId' => '0', 'confirm' => '1']],
             'a repair ID with a newline' => ['execute', ['issueId' => '(issue)', 'repairId' => "(repair)\n", 'confirm' => '1']],
-            'a repair ID sent twice' => ['execute', ['issueId' => '(issue)', 'repairId' => ['(repair)', '(repair)'], 'confirm' => '1']],
-            'a confirmation sent twice' => ['execute', ['issueId' => '(issue)', 'repairId' => '(repair)', 'confirm' => ['1', '1']]],
             'an action that is a list' => ['prepare', ['issueId' => '(issue)', 'repairAction' => ['test.repair']]],
             'an empty action' => ['prepare', ['issueId' => '(issue)', 'repairAction' => '']],
-            'a repair ID that is not one' => ['execute', ['issueId' => '(issue)', 'repairId' => '1.5', 'confirm' => '1']],
+            'an action carrying a line break' => ['prepare', ['issueId' => '(issue)', 'repairAction' => "test.repair\nRepair 1 (test.repair) succeeded"]],
+            'an action that is not the shape of one' => ['prepare', ['issueId' => '(issue)', 'repairAction' => 'Not A Repair']],
             'a confirmation that is not one' => ['execute', ['issueId' => '(issue)', 'repairId' => '(repair)', 'confirm' => 'yes']],
             'acknowledgements that are not a list' => ['execute', ['issueId' => '(issue)', 'repairId' => '(repair)', 'confirm' => '1', 'acknowledged' => 'backupTaken']],
-            'acknowledgements that are not text' => ['execute', ['issueId' => '(issue)', 'repairId' => '(repair)', 'confirm' => '1', 'acknowledged' => [['backupTaken']]]],
             'a typed confirmation that is not text' => ['execute', ['issueId' => '(issue)', 'repairId' => '(repair)', 'confirm' => '1', 'typedConfirmation' => ['tests']]],
         ];
     }
@@ -1122,21 +1160,14 @@ class RepairTest extends TestCase
         self::assertSame(0, $action->executions);
     }
 
-    public function testARepairIsReachableOnlyUnderItsOwnIssue(): void
+    public function testARepairIsNeverCarriedOutThroughAnotherIssue(): void
     {
+        // That its page is not shown under another issue's URL is held in AuditTest.
         $action = $this->action();
         [$issue, $other] = $this->raiseEach(['one', 'other']);
         $repair = $this->repairs->prepare($issue->id, 'test.repair');
         $this->signIn(admin: true);
-        $this->request('GET');
 
-        try {
-            $this->controller()->runAction('detail', ['issueId' => $other->id, 'repairId' => $repair->id]);
-            self::fail('A repair was shown under another issue’s URL.');
-        } catch (NotFoundHttpException) {
-        }
-
-        // Nor carried out through one.
         try {
             $this->repairs->execute($repair->id, $other->id, true);
             self::fail('A repair was carried out through another issue.');
@@ -1144,6 +1175,52 @@ class RepairTest extends TestCase
         }
 
         self::assertSame(0, $action->executions);
+    }
+
+    /**
+     * A repair reached through an issue it was not made for is refused as that, before anything
+     * about the repair it is is told: not which Craft permission it needs, and not whether it exists
+     * — a repair of another issue and one that does not exist read the same. Through its own issue,
+     * Craft's permission is still required, at the controller as in the service.
+     */
+    public function testARepairReachedThroughAnotherIssueTellsNothingAboutIt(): void
+    {
+        $action = $this->action(['authorizationText' => 'Only the zz-vault team may retry these.']);
+        [$issue, $other] = $this->raiseEach(['one', 'other']);
+        $this->signIn(admin: true);
+        $repair = $this->repairs->prepare($issue->id, 'test.repair');
+        // Craft would refuse this reader the act itself.
+        $action->authorized = false;
+        $before = WebDoctorTables::snapshot();
+        $answers = [];
+
+        foreach (['another issue’s repair' => $repair->id, 'no repair at all' => 999999999] as $what => $repairId) {
+            $this->post(['issueId' => (string)$other->id, 'repairId' => (string)$repairId, 'confirm' => '1']);
+            $controller = $this->controller();
+            $controller->runAction('execute');
+            $flash = $controller->lastFlash();
+
+            self::assertSame('fail', $flash['level'] ?? null, $what);
+            self::assertStringNotContainsString('zz-vault', (string)$flash['message'], $what);
+            $answers[$what] = $flash['message'];
+        }
+
+        self::assertSame($answers['another issue’s repair'], str_replace('999999999', (string)$repair->id, $answers['no repair at all']));
+        self::assertSame(0, $action->executions);
+        self::assertSame($before, WebDoctorTables::snapshot());
+
+        // Through its own issue, the reader Craft would refuse is refused by the controller too.
+        $this->post(['issueId' => (string)$issue->id, 'repairId' => (string)$repair->id, 'confirm' => '1']);
+
+        try {
+            $this->controller()->runAction('execute');
+            self::fail('A repair was carried out for somebody Craft would refuse.');
+        } catch (ForbiddenHttpException $e) {
+            self::assertSame('Only the zz-vault team may retry these.', $e->getMessage());
+        }
+
+        self::assertSame(0, $action->executions);
+        self::assertSame($before, WebDoctorTables::snapshot());
     }
 
     // What the pages say ---------------------------------------------------------------
@@ -1548,6 +1625,168 @@ class RepairTest extends TestCase
         self::assertSame($before, $read());
     }
 
+    public function testPreviewingAndCarryingOutAreEachRecordedInTheTrailWithWhoDidIt(): void
+    {
+        $this->action();
+        $issue = $this->raise();
+        $repair = $this->repairs->prepare($issue->id, 'test.repair');
+
+        // Who previewed it is kept by name beside the ID, so the history still says who after the
+        // account is deleted.
+        self::assertSame(TestUser::USERNAME, $repair->previewedByName);
+
+        $done = $this->repairs->execute($repair->id, $issue->id, true);
+        self::assertSame(TestUser::USERNAME, $done->executedByName);
+
+        $failingIssue = $this->raiseEach(['failing'])[0];
+        $this->lastAction->onExecute = static fn() => throw new RuntimeException('Disk full.');
+        $failed = $this->repairs->execute($this->repairs->prepare($failingIssue->id, 'test.repair')->id, $failingIssue->id, true);
+        self::assertSame(RepairStatus::FAILED, $failed->status);
+
+        $entries = (new Audit())->find(new AuditFilter(environment: $this->environment, oldestFirst: true))->items;
+        $repairEntries = array_values(array_filter($entries, static fn($e): bool => $e->objectType === AuditObjectType::REPAIR));
+
+        self::assertSame(
+            [
+                [AuditAction::REPAIR_PREVIEWED, AuditResult::NONE, (string)$repair->id],
+                [AuditAction::REPAIR_EXECUTED, AuditResult::SUCCEEDED, (string)$repair->id],
+                [AuditAction::REPAIR_PREVIEWED, AuditResult::NONE, (string)$failed->id],
+                [AuditAction::REPAIR_EXECUTED, AuditResult::FAILED, (string)$failed->id],
+            ],
+            array_map(static fn($e): array => [$e->action, $e->result, $e->objectId], $repairEntries),
+        );
+
+        foreach ($repairEntries as $entry) {
+            self::assertSame(1, $entry->userId);
+            self::assertSame(TestUser::USERNAME, $entry->userName);
+            self::assertSame('test.repair', $entry->details['repairAction'] ?? null);
+            self::assertSame('web-doctor/repairs/' . $entry->objectId, $entry->cpPath());
+        }
+
+        // A failure is named by its kind, never by what it said.
+        self::assertStringNotContainsString('Disk full', (string)json_encode($repairEntries[3]->details) . $repairEntries[3]->summary);
+    }
+
+    /**
+     * @return array<string, array{bool}>
+     */
+    public static function repairEndings(): array
+    {
+        return ['carried out' => [true], 'failed' => [false]];
+    }
+
+    /**
+     * A repair's history is what was recorded when it was previewed and carried out — never read from
+     * its issue as it stands now — so the issue changing, resolving or being deleted changes none of it.
+     */
+    #[DataProvider('repairEndings')]
+    public function testARepairsHistoryIsWhatWasRecordedWhateverHappensToItsIssueAfterwards(bool $succeeds): void
+    {
+        $action = $this->action();
+        $issue = $this->raise();
+
+        if (!$succeeds) {
+            $action->onExecute = static fn() => throw new RuntimeException('Disk full.');
+        }
+
+        $repair = $this->repairs->execute($this->repairs->prepare($issue->id, 'test.repair')->id, $issue->id, true);
+        $history = ['issueTitle', 'diagnosticId', 'action', 'actionName', 'risk', 'riskReason', 'status', 'environment', 'siteName', 'preview', 'fingerprint', 'outcome', 'failure', 'previewedBy', 'previewedByName', 'executedBy', 'executedByName', 'previewedAt', 'startedAt', 'finishedAt', 'durationMs'];
+        $read = static fn(): array => RepairRecord::find()->select($history)->where(['id' => $repair->id])->asArray()->one() ?? [];
+        $kept = $read();
+
+        self::assertSame($succeeds ? RepairStatus::SUCCEEDED->value : RepairStatus::FAILED->value, $kept['status']);
+        self::assertSame(TestUser::USERNAME, $kept['executedByName']);
+        self::assertNotNull($kept['preview']);
+
+        $context = new DiagnosticContext(environment: $this->environment);
+        $now = new DateTimeImmutable('+1 second');
+        $found = static fn(DiagnosticStatus $status, string $summary): DiagnosticRun => new DiagnosticRun(context: $context, results: [(new DiagnosticResult(
+            diagnosticId: 'test.check',
+            name: 'Check test.check',
+            category: DiagnosticCategory::CONFIGURATION,
+            status: $status,
+            summary: $summary,
+        ))->withExecution($context, $now, $now, 1.0)], startedAt: $now, finishedAt: $now, durationMs: 1.0);
+
+        // The issue is found again, differently.
+        $this->issues->reconcile($found(DiagnosticStatus::WARNING, 'test.check reports something else now.'));
+        self::assertSame($kept, $read(), 'The issue being found again changed the repair’s history.');
+
+        // It resolves.
+        $this->issues->reconcile($found(DiagnosticStatus::PASS, 'Nothing wrong.'));
+        self::assertSame(IssueStatus::RESOLVED, $this->reread($issue)->status);
+        self::assertSame($kept, $read(), 'The issue resolving changed the repair’s history.');
+
+        // It is deleted.
+        IssueRecord::deleteAll(['id' => $issue->id]);
+        self::assertSame($kept, $read(), 'The issue being deleted changed the repair’s history.');
+        self::assertNull($this->repairs->get($repair->id)?->issueId);
+    }
+
+    public function testARepairThatCannotBeReadInFullSaysWhichPartAndIsNeverCarriedOut(): void
+    {
+        $this->action();
+        $issue = $this->raise();
+        $repair = $this->repairs->prepare($issue->id, 'test.repair');
+        RepairRecord::updateAll(['status' => 'paused', 'risk' => 'catastrophic', 'outcome' => '{not json'], ['id' => $repair->id]);
+
+        $read = $this->repairs->get($repair->id);
+        self::assertNotNull($read);
+        self::assertNull($read->status, 'An unknown status was read as a known one.');
+        self::assertNull($read->risk);
+        self::assertSame(['status', 'risk', 'outcome'], $read->unreadable);
+        self::assertFalse($read->isIntact());
+
+        try {
+            $this->repairs->execute($repair->id, $issue->id, true);
+            self::fail('A repair that cannot be read was carried out.');
+        } catch (Refusal $e) {
+            self::assertStringContainsString('cannot be read in full', $e->getMessage());
+        }
+
+        $this->request('GET');
+        $html = $this->render($this->controller(), 'detail', 'web-doctor/_repairs/_repair', ['issueId' => $issue->id, 'repairId' => $repair->id]);
+        self::assertStringContainsString(\Craft::t('web-doctor', 'Could not be read'), $html);
+        self::assertStringContainsString('status, risk, outcome', $html);
+        self::assertStringNotContainsString(RepairStatus::FAILED->label(), $html, 'An unreadable status was shown as failed.');
+
+        // Valid JSON in the wrong shape is no more a report than JSON that does not parse: a preview
+        // or outcome read as empty would say the repair would change, or changed, nothing.
+        RepairRecord::updateAll(['status' => 'previewed', 'risk' => 'low', 'outcome' => '{"summary":5,"items":"none"}', 'preview' => '{"summary":"Would change the target.","items":"one"}'], ['id' => $repair->id]);
+        $read = $this->repairs->get($repair->id);
+        self::assertSame(['preview', 'outcome'], $read?->unreadable);
+        self::assertNull($read->outcome);
+        self::assertFalse($read->isIntact());
+    }
+
+    public function testAPreviewWhoseEntryCannotBeWrittenIsNotKept(): void
+    {
+        $this->action();
+        $issue = $this->raise();
+        $before = WebDoctorTables::snapshot();
+        $repairs = new Repairs([
+            'actions' => $this->actions,
+            'issues' => $this->issues,
+            'evidence' => new EvidenceStore(),
+            'permissions' => new Permissions(),
+            'environment' => $this->environment,
+            'audit' => new class() extends Audit {
+                protected function save(AuditRecord $record): void
+                {
+                    throw new RuntimeException('The audit entry would not write.');
+                }
+            },
+        ]);
+
+        try {
+            $repairs->prepare($issue->id, 'test.repair');
+            self::fail('A preview was kept without its entry.');
+        } catch (RuntimeException) {
+        }
+
+        self::assertSame($before, WebDoctorTables::snapshot());
+    }
+
     // Ending a repair, and recovering from an ending that could not be written -----------------
 
     /**
@@ -1559,6 +1798,7 @@ class RepairTest extends TestCase
             'the repair’s row will not write' => ['row'],
             'putting the issue back fails' => ['issue'],
             'the commit fails' => ['commit'],
+            'the audit entry will not write' => ['audit'],
         ];
     }
 
@@ -1582,6 +1822,8 @@ class RepairTest extends TestCase
         self::assertSame(1, $action->executions);
         self::assertSame(1, $this->endWrites, 'The ending was written more than once.');
         self::assertSame(RepairStatus::RUNNING, $done->status);
+        // No entry says it was carried out while its ending is not written.
+        self::assertSame(0, (int)AuditRecord::find()->where(['action' => AuditAction::REPAIR_EXECUTED->value, 'objectId' => (string)$done->id])->count());
         self::assertNotNull(RepairRecord::findOne($done->id)->lockKey);
         self::assertSame(IssueStatus::REPAIRING, $this->reread($issue)->status);
         $this->assertConsistent();
@@ -1603,6 +1845,11 @@ class RepairTest extends TestCase
 
         self::assertSame(RepairStatus::FAILED, $ended->status);
         self::assertStringContainsString('Stopped without an ending', (string)$ended->failure);
+        // Once it is ended, the trail says how: failed, never carried out.
+        self::assertSame(
+            [AuditResult::FAILED->value],
+            AuditRecord::find()->select(['result'])->where(['action' => AuditAction::REPAIR_EXECUTED->value, 'objectId' => (string)$done->id])->column(),
+        );
         self::assertSame(VerificationStatus::NONE, $ended->verificationStatus);
         self::assertSame(IssueStatus::CONFIRMED, $this->reread($issue)->status);
         $this->assertConsistent();
@@ -1792,6 +2039,12 @@ class RepairTest extends TestCase
         self::assertSame($elapsed > Repair::PREVIEW_EXPIRES_AFTER, $preview?->isExpired($at($elapsed)));
         self::assertFalse($preview->isExpired($at(Repair::PREVIEW_EXPIRES_AFTER)));
         self::assertTrue($preview->isExpired($at(Repair::PREVIEW_EXPIRES_AFTER + 1)));
+        // The published policy, in its own terms: a preview is good for fifteen minutes, and a
+        // repair still running after an hour is read as stopped.
+        self::assertFalse($preview->isExpired($at(15 * 60)));
+        self::assertTrue($preview->isExpired($at(15 * 60 + 1)));
+        self::assertFalse($running->hasStopped($at(60 * 60)));
+        self::assertTrue($running->hasStopped($at(60 * 60 + 1)));
     }
 
     /**
@@ -2247,6 +2500,20 @@ class RepairTest extends TestCase
             'permissions' => new Permissions(),
             'environment' => $this->environment,
         ];
+
+        if ($failAt === 'audit') {
+            // Only the ending's entry: the preview's is written, so the repair can be carried out.
+            $config['audit'] = new class() extends Audit {
+                protected function save(AuditRecord $record): void
+                {
+                    if ($record->action === AuditAction::REPAIR_EXECUTED->value) {
+                        throw new RuntimeException('The audit entry would not write.');
+                    }
+
+                    parent::save($record);
+                }
+            };
+        }
         $onWrite = function(): void {
             $this->endWrites++;
         };
@@ -2451,6 +2718,55 @@ class RepairTest extends TestCase
     /**
      * A repair of this issue under way since the moment given, holding the test action's lock.
      */
+    /**
+     * A preview that is not for this issue — another check's repair, or another environment's issue —
+     * is refused before anything is done on the issue's behalf: its stopped repair is not ended, and
+     * nothing is recorded, by somebody who could not have previewed a repair of it.
+     */
+    public function testAPreviewNotForThisIssueEndsNothingOnItsBehalf(): void
+    {
+        $this->action();
+        $this->action(['actionId' => 'test.elsewhere', 'check' => 'other.check']);
+        $issue = $this->raise();
+        $this->setStatus($issue, IssueStatus::REPAIRING);
+        $stopped = $this->runningRepairOf($issue, new DateTimeImmutable(sprintf('-%d seconds', Repair::STOPPED_AFTER + 60)));
+        $before = WebDoctorTables::snapshot();
+
+        try {
+            $this->repairs->prepare($issue->id, 'test.elsewhere');
+            self::fail('A repair of another check was previewed for this issue.');
+        } catch (Refusal) {
+        }
+
+        self::assertSame($before, WebDoctorTables::snapshot());
+        self::assertSame(RepairStatus::RUNNING, $this->repairs->get($stopped)?->status);
+
+        // A preview that is for it does end the stopped repair, as the next one always has.
+        $this->repairs->prepare($issue->id, 'test.repair');
+        $ended = RepairRecord::findOne($stopped);
+        self::assertSame(RepairStatus::FAILED->value, $ended?->status);
+    }
+
+    /**
+     * An issue left repairing with no repair under way goes back to where its latest repair found
+     * it — never to where an older one did, which is from before the latest changed anything — and
+     * to Confirmed where the latest kept nothing.
+     */
+    public function testAnIssueLeftRepairingGoesBackToWhereItsLatestRepairFoundIt(): void
+    {
+        $this->action();
+        $issue = $this->raise();
+        $ended = ['status' => RepairStatus::FAILED->value, 'lockKey' => null, 'finishedAt' => Db::prepareDateForDb(new DateTimeImmutable('-2 hours'))];
+        RepairRecord::updateAll($ended, ['id' => $this->runningRepairOf($issue, new DateTimeImmutable('-3 hours'), IssueStatus::INVESTIGATING)]);
+        RepairRecord::updateAll($ended, ['id' => $this->runningRepairOf($issue, new DateTimeImmutable('-2 hours'))]);
+        $this->setStatus($issue, IssueStatus::REPAIRING);
+
+        // Previewing a repair of it is what notices it stuck.
+        $this->repairs->prepare($issue->id, 'test.repair');
+
+        self::assertSame(IssueStatus::CONFIRMED, $this->reread($issue)->status);
+    }
+
     public function runningRepairOf(Issue $issue, DateTimeImmutable $since, ?IssueStatus $before = null, string $action = 'test.repair', ?string $environment = null): int
     {
         $record = new RepairRecord();

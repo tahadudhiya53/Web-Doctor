@@ -11,11 +11,14 @@
 
     <section class="wd-verification" id="verification-{{ v.id }}">
         <h3 class="wd-recommendation__title">
-            <span class="wd-pill wd-pill--verification-{{ v.result.value }}">{{ v.result.label() }}</span>
-            {{ v.finishedAt|datetime('short') }}
+            {{ shared.pill('wd-pill--verification-', v.result) }}
+            {{ shared.when(v.finishedAt) }}
         </h3>
 
-        {% if v.result.value == 'verification_failed' %}
+        {% if v.unreadable|length %}
+            <p class="warning">{{ "Part of this verification’s record could not be read, so it is not shown as anything else:"|t('web-doctor') }} {{ v.unreadable|join(', ') }}</p>
+        {% endif %}
+        {% if (v.result.value ?? null) == 'verification_failed' %}
             <p class="error"><strong>{{ "Repair completed, but verification failed."|t('web-doctor') }}</strong></p>
         {% endif %}
         <p>{{ v.summary() }}</p>
@@ -45,8 +48,10 @@
                         <td>{{ shared.text(check.name) }}<div class="light"><code>{{ check.diagnosticId }}</code></div></td>
                         <td><strong>{{ v.roleLabel(check.role) }}</strong><div class="light">{{ shared.text(check.reason) }}</div></td>
                         <td class="wd-col-narrow">
-                            {% if check.status %}
-                                <span class="wd-pill wd-pill--{{ check.status.value }}">{{ check.status.label() }}</span>
+                            {% if check.statusUnreadable %}
+                                {{ shared.unreadable() }}
+                            {% elseif check.status %}
+                                {{ shared.pill('wd-pill--', check.status) }}
                             {% else %}
                                 <span class="wd-pill wd-pill--skipped">{{ "Not run"|t('web-doctor') }}</span>
                             {% endif %}
@@ -60,7 +65,7 @@
                             {% elseif check.appeared is same as(false) %}
                                 <div class="light">{{ "A problem already reported before the repair."|t('web-doctor') }}</div>
                             {% endif %}
-                            {% if check.issueId and check.issueId != issue.id %}
+                            {% if check.issueId and check.issueId != (issue.id ?? null) %}
                                 <div><a href="{{ cpUrl('web-doctor/issues/' ~ check.issueId) }}">{{ 'Issue #{id}'|t('web-doctor', { id: check.issueId }) }}</a></div>
                             {% endif %}
                         </td>

@@ -19,6 +19,7 @@ use Throwable;
 use UnexpectedValueException;
 use yii\base\Component;
 use yii\base\InvalidArgumentException;
+use yii\base\InvalidConfigException;
 
 /**
  * Runs diagnostics and reports what happened.
@@ -134,7 +135,7 @@ class DiagnosticEngine extends Component
                 category: DiagnosticCategory::CONFIGURATION,
                 status: DiagnosticStatus::ERROR,
                 summary: Craft::t('web-doctor', 'This check could not be run.'),
-                description: $safe->summary(),
+                description: self::failureDescription(),
                 evidence: [Evidence::fromThrowable($safe, $id)],
                 confidence: Confidence::INFORMATIONAL,
             ))->withExecution($context, $now, $now, 0.0);
@@ -157,7 +158,7 @@ class DiagnosticEngine extends Component
      */
     private function registry(): Diagnostics
     {
-        return $this->registry ??= WebDoctor::getInstance()?->getDiagnostics() ?? new Diagnostics();
+        return $this->registry ??= WebDoctor::getInstance()?->getDiagnostics() ?? throw new InvalidConfigException('The diagnostic engine needs the diagnostics registry, and Web Doctor is not installed to provide it.');
     }
 
     /**
@@ -205,7 +206,7 @@ class DiagnosticEngine extends Component
             category: DiagnosticMeta::category($diagnostic),
             status: DiagnosticStatus::ERROR,
             summary: Craft::t('web-doctor', 'This check failed to run.'),
-            description: $safe->summary(),
+            description: self::failureDescription(),
             evidence: [
                 Evidence::fromThrowable($safe, $id),
                 Evidence::stackTrace($safe, $id),
@@ -213,5 +214,16 @@ class DiagnosticEngine extends Component
             recommendation: Craft::t('web-doctor', 'The check itself failed, so nothing is known about what it inspects. Investigate the error and run it again.'),
             confidence: Confidence::INFORMATIONAL,
         );
+    }
+
+    /**
+     * What a reader is told about a check that broke. What it threw — its class, message and where —
+     * is the result's evidence, which only somebody allowed to read evidence sees: a message can
+     * quote SQL, a path or a host, which redaction leaves, and the result's prose is shown to
+     * everybody who may view the dashboard.
+     */
+    private static function failureDescription(): string
+    {
+        return Craft::t('web-doctor', 'What it threw is recorded as this check’s evidence.');
     }
 }
