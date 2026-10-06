@@ -162,22 +162,6 @@ class DiagnosticCoreTest extends TestCase
         self::assertSame(['craft.a', 'craft.b', 'queue.a', 'queue.b'], $registry->ids());
     }
 
-    public function testTheSameSetAlwaysComesBackInTheSameOrder(): void
-    {
-        $first = new Diagnostics();
-        $second = new Diagnostics();
-
-        foreach (['php.x', 'craft.y', 'database.z'] as $id) {
-            $first->register($this->diagnostic($id, category: DiagnosticCategory::from(explode('.', $id)[0])));
-        }
-
-        foreach (['database.z', 'php.x', 'craft.y'] as $id) {
-            $second->register($this->diagnostic($id, category: DiagnosticCategory::from(explode('.', $id)[0])));
-        }
-
-        self::assertSame($first->ids(), $second->ids());
-    }
-
     public function testAnotherPluginContributesByHandlingTheClassLevelEvent(): void
     {
         // The way a Craft plugin actually registers: on the class, from its own init(), before
@@ -197,20 +181,6 @@ class DiagnosticCoreTest extends TestCase
         }
     }
 
-    public function testAContributorThatCannotEvenNameItselfDoesNotBreakTheRest(): void
-    {
-        // A contributor can fail in ways the registry never raises itself. Isolation has to
-        // cover those too, or one plugin's bug costs a site every diagnostic it has.
-        $registry = new Diagnostics();
-        $registry->on(Diagnostics::EVENT_REGISTER_DIAGNOSTICS, function(RegisterDiagnosticsEvent $event): void {
-            $event->diagnostics[] = new ExplodingDiagnostic();
-            $event->diagnostics[] = $this->diagnostic('goodPlugin.check');
-        });
-
-        self::assertNotNull($registry->get('goodPlugin.check'));
-        self::assertSame(1, count($registry->all()));
-    }
-
     public function testAHandlerThatThrowsCostsOnlyWhatItAndLaterHandlersWouldHaveAdded(): void
     {
         $registry = new Diagnostics();
@@ -224,32 +194,6 @@ class DiagnosticCoreTest extends TestCase
         // The first read, where the handler throws, and every read after it.
         self::assertSame(['goodPlugin.check'], $registry->ids());
         self::assertSame(['goodPlugin.check'], $registry->ids());
-    }
-
-    public function testSomethingThatIsNotADiagnosticAtAllIsRejectedWithoutBreakingTheRest(): void
-    {
-        $registry = new Diagnostics();
-        $registry->on(Diagnostics::EVENT_REGISTER_DIAGNOSTICS, function(RegisterDiagnosticsEvent $event): void {
-            // What a plugin pushing an ID instead of a diagnostic would produce. The event's
-            // array is only typed by its docblock, so nothing stops this at runtime.
-            $event->diagnostics = [...$event->diagnostics, ...['craft.version']];
-            $event->diagnostics[] = $this->diagnostic('goodPlugin.check');
-        });
-
-        self::assertNotNull($registry->get('goodPlugin.check'));
-        self::assertSame(1, count($registry->all()));
-    }
-
-    public function testAContributedDiagnosticWithAMalformedIdIsRefusedWithoutBreakingTheRest(): void
-    {
-        $registry = new Diagnostics();
-        $registry->on(Diagnostics::EVENT_REGISTER_DIAGNOSTICS, function(RegisterDiagnosticsEvent $event): void {
-            $event->diagnostics[] = $this->diagnostic('not a valid id');
-            $event->diagnostics[] = $this->diagnostic('goodPlugin.check');
-        });
-
-        self::assertNull($registry->get('not a valid id'));
-        self::assertNotNull($registry->get('goodPlugin.check'));
     }
 
     public function testContributorsAreAskedOnceRatherThanOnEveryRead(): void
@@ -267,17 +211,39 @@ class DiagnosticCoreTest extends TestCase
         self::assertSame(1, $asked);
     }
 
-    public function testOnePluginsMistakeDoesNotCostTheOthersTheirDiagnostics(): void
+    /**
+     * A contributor can fail in ways the registry never raises itself. Isolation has to cover
+     * those too, or one plugin's bug costs a site every diagnostic it has.
+     *
+     * @return array<string, array{\Closure(self): array<mixed>}>
+     */
+    public static function badContributions(): array
+    {
+        return [
+            'a diagnostic that cannot even name itself' => [static fn(self $t): array => [new ExplodingDiagnostic()]],
+            // What a plugin pushing an ID instead of a diagnostic would produce. The event's array
+            // is only typed by its docblock, so nothing stops this at runtime.
+            'something that is not a diagnostic at all' => [static fn(self $t): array => ['craft.version']],
+            'a malformed ID' => [static fn(self $t): array => [$t->diagnostic('not a valid id')]],
+            'no ID' => [static fn(self $t): array => [$t->diagnostic('')]],
+            'an ID already taken' => [static fn(self $t): array => [new ConstantIdDiagnostic()]],
+        ];
+    }
+
+    /**
+     * @param \Closure(self): array<mixed> $bad
+     */
+    #[DataProvider('badContributions')]
+    public function testOnePluginsMistakeCostsOnlyItsOwnDiagnostic(\Closure $bad): void
     {
         $registry = new Diagnostics();
         $registry->register($mine = $this->diagnostic(ConstantIdDiagnostic::ID));
-        $registry->on(Diagnostics::EVENT_REGISTER_DIAGNOSTICS, function(RegisterDiagnosticsEvent $event): void {
-            $event->diagnostics[] = new ConstantIdDiagnostic();
-            $event->diagnostics[] = $this->diagnostic('');
+        $registry->on(Diagnostics::EVENT_REGISTER_DIAGNOSTICS, function(RegisterDiagnosticsEvent $event) use ($bad): void {
+            $event->diagnostics = [...$event->diagnostics, ...$bad($this)];
             $event->diagnostics[] = $this->diagnostic('goodPlugin.check');
         });
 
-        self::assertNotNull($registry->get('goodPlugin.check'));
+        self::assertSame(['goodPlugin.check', ConstantIdDiagnostic::ID], $registry->ids());
         self::assertSame($mine, $registry->get(ConstantIdDiagnostic::ID));
     }
 
@@ -373,7 +339,10 @@ class DiagnosticCoreTest extends TestCase
 
         self::assertSame(DiagnosticStatus::ERROR, $result->status);
         self::assertSame('database.connection', $result->diagnosticId);
-        self::assertStringContainsString('Connection refused', $result->description);
+        // What it threw is evidence, read only with permission to read evidence; the prose every
+        // dashboard reader sees does not repeat it.
+        self::assertSame('Connection refused', $result->evidence()[0]->get('message'));
+        self::assertStringNotContainsString('Connection refused', $result->description);
         self::assertFalse($result->status->isConclusive());
     }
 
@@ -391,7 +360,7 @@ class DiagnosticCoreTest extends TestCase
 
         self::assertSame('tests.impostor', $result->diagnosticId);
         self::assertSame(DiagnosticStatus::ERROR, $result->status);
-        self::assertStringContainsString('craft.version', $result->description);
+        self::assertStringContainsString('craft.version', (string)$result->evidence()[0]->get('message'));
     }
 
     public function testAFailedDiagnosticRecordsWhatWentWrongAsEvidence(): void
@@ -410,46 +379,54 @@ class DiagnosticCoreTest extends TestCase
         self::assertSame('database.connection', $result->evidence()[0]->source);
     }
 
-    public function testOneBrokenDiagnosticDoesNotStopTheRest(): void
+    /**
+     * The guarantee the whole engine exists for: a site with one broken check is still owed the
+     * answers from every other one — whatever it throws, and even when asking a broken check its
+     * name throws again inside the catch block containing the first failure.
+     *
+     * @return array<string, array{\Closure(self): \Tahadudhiya\WebDoctor\base\DiagnosticInterface}>
+     */
+    public static function brokenDiagnostics(): array
     {
-        // The guarantee the whole engine exists for: a site with one broken check is still owed
-        // the answers from every other one.
-        $before = $this->diagnostic('a.before');
-        $after = $this->diagnostic('c.after');
+        return [
+            'an exception' => [static fn(self $t) => $t->diagnostic('b.broken', static fn() => throw new \RuntimeException('Boom'))],
+            // What a hastily written third-party diagnostic throws: a Throwable, not an Exception.
+            'an error that is not an exception' => [static fn(self $t) => $t->diagnostic('b.broken', static fn() => throw new \TypeError('Wrong type'))],
+            'one that cannot even name itself' => [static fn(self $t) => new ExplodingDiagnostic()],
+        ];
+    }
 
-        $run = $this->engine->runMany([
-            $before,
-            $this->diagnostic('b.broken', static fn() => throw new \RuntimeException('Boom')),
-            $after,
-        ], $this->context);
+    /**
+     * @param \Closure(self): \Tahadudhiya\WebDoctor\base\DiagnosticInterface $broken
+     */
+    #[DataProvider('brokenDiagnostics')]
+    public function testOneBrokenDiagnosticDoesNotStopTheRest(\Closure $broken): void
+    {
+        $before = $this->diagnostic('a.before');
+        $after = $this->diagnostic('c.after', static fn(TestDiagnostic $d) => $d->build('fail', ['Bad.']));
+
+        $run = $this->engine->runMany([$before, $broken($this), $after], $this->context);
 
         self::assertSame(3, $run->count());
         self::assertSame(1, $before->runs);
         self::assertSame(1, $after->runs);
-        self::assertSame(DiagnosticStatus::PASS, $run->resultFor('a.before')->status);
-        self::assertSame(DiagnosticStatus::ERROR, $run->resultFor('b.broken')->status);
-        self::assertSame(DiagnosticStatus::PASS, $run->resultFor('c.after')->status);
-    }
-
-    public function testEvenAnErrorThatIsNotAnExceptionDoesNotStopTheRun(): void
-    {
-        // A type error or an assertion failure is a Throwable, not an Exception, and is exactly
-        // what a hastily written third-party diagnostic throws.
-        $run = $this->engine->runMany([
-            $this->diagnostic('a.broken', static fn() => throw new \TypeError('Wrong type')),
-            $this->diagnostic('b.fine'),
-        ], $this->context);
-
-        self::assertSame(DiagnosticStatus::ERROR, $run->resultFor('a.broken')->status);
-        self::assertSame(DiagnosticStatus::PASS, $run->resultFor('b.fine')->status);
+        self::assertSame(DiagnosticStatus::PASS, $run->resultFor('a.before')?->status);
+        self::assertSame(DiagnosticStatus::ERROR, $run->results()[1]->status);
+        self::assertSame(DiagnosticStatus::FAIL, $run->resultFor('c.after')?->status);
     }
 
     public function testAnUnknownIdWithinARunIsReportedRatherThanEndingIt(): void
     {
         $run = $this->engine->runMany(['nothing.here', $this->diagnostic('b.fine')], $this->context);
 
-        self::assertSame(DiagnosticStatus::ERROR, $run->resultFor('nothing.here')->status);
+        $unknown = $run->resultFor('nothing.here');
+
+        self::assertSame(DiagnosticStatus::ERROR, $unknown->status);
         self::assertSame(DiagnosticStatus::PASS, $run->resultFor('b.fine')->status);
+        // What was thrown is evidence, behind permission to read evidence; the prose does not repeat it.
+        $thrown = (string)$unknown->evidence()[0]->get('message');
+        self::assertStringContainsString('nothing.here', $thrown);
+        self::assertStringNotContainsString($thrown, (string)$unknown->description);
     }
 
     public function testEveryResultInARunCarriesTheSameRunIdentity(): void
@@ -536,24 +513,6 @@ class DiagnosticCoreTest extends TestCase
         self::assertInstanceOf(DiagnosticContext::class, $seen);
         self::assertSame(7, $seen->siteId);
         self::assertSame('production', $seen->environment);
-    }
-
-    public function testADiagnosticThatCannotEvenNameItselfDoesNotEndTheRun(): void
-    {
-        // The engine records a failure against the diagnostic's ID — so asking a broken one its
-        // name happens inside the catch block that is containing the first failure. A second
-        // throw there escapes the containment entirely and takes the whole run with it, which
-        // is the one outcome the engine exists to prevent.
-        $run = $this->engine->runMany([
-            $this->diagnostic('a.first', static fn(TestDiagnostic $d) => $d->build('pass', ['Fine.'])),
-            new ExplodingDiagnostic(),
-            $this->diagnostic('a.last', static fn(TestDiagnostic $d) => $d->build('fail', ['Bad.'])),
-        ], $this->context);
-
-        self::assertSame(3, $run->count());
-        self::assertSame(DiagnosticStatus::PASS, $run->resultFor('a.first')?->status);
-        self::assertSame(DiagnosticStatus::FAIL, $run->resultFor('a.last')?->status);
-        self::assertSame(DiagnosticStatus::ERROR, $run->results()[1]->status);
     }
 
     public function testANamelessFailureIsRecordedAgainstItsClass(): void

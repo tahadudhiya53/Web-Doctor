@@ -424,13 +424,28 @@ class PlatformDiagnosticsTest extends TestCase
         self::assertSame(DiagnosticStatus::UNKNOWN, $result->status);
     }
 
-    public function testThePhpVersionResultNamesTheInterpreterItInspected(): void
+    /**
+     * The web server and the command line routinely run different builds, so a finding that did
+     * not say which one it looked at would send people to the wrong php.ini.
+     *
+     * @return array<string, array{\Closure(self): DiagnosticResult, string}>
+     */
+    public static function interpreterChecks(): array
     {
-        // The web server and the command line routinely run different builds, so a finding
-        // that did not say which one it looked at would send people to the wrong php.ini.
-        $result = $this->version('8.3.1', '^8.2')->run($this->context());
+        return [
+            'the version' => [static fn(self $t): DiagnosticResult => $t->version('8.3.1', '^8.2')->run($t->context()), 'cli'],
+            'the extensions' => [static fn(self $t): DiagnosticResult => $t->extensions(['pdo'], ['pdo', 'gd', 'imagick'])->run($t->context()), 'fpm-fcgi'],
+            'the configuration' => [static fn(self $t): DiagnosticResult => $t->configuration(), 'fpm-fcgi'],
+        ];
+    }
 
-        self::assertSame('cli', $result->evidence()[0]->get('sapi'));
+    /**
+     * @param \Closure(self): DiagnosticResult $result
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('interpreterChecks')]
+    public function testEveryPhpResultNamesTheInterpreterItInspected(\Closure $result, string $sapi): void
+    {
+        self::assertSame($sapi, $result($this)->evidence()[0]->get('sapi'));
     }
 
     /**
@@ -530,13 +545,6 @@ class PlatformDiagnosticsTest extends TestCase
         self::assertSame(DiagnosticStatus::UNKNOWN, $result->status);
     }
 
-    public function testTheExtensionResultNamesTheInterpreterItInspected(): void
-    {
-        $result = $this->extensions(['pdo'], ['pdo', 'gd', 'imagick'])->run($this->context());
-
-        self::assertSame('fpm-fcgi', $result->evidence()[0]->get('sapi'));
-    }
-
     /**
      * @param array<string, mixed> $overrides
      */
@@ -597,21 +605,6 @@ class PlatformDiagnosticsTest extends TestCase
         self::assertStringContainsString('memory_limit', $result->summary);
     }
 
-    public function testAnUnlimitedMemoryLimitIsNotAFinding(): void
-    {
-        // `-1` normalises to a negative byte count, which is no limit at all rather than a
-        // very small one.
-        self::assertSame(DiagnosticStatus::PASS, $this->configuration(['memory_limit' => '-1'])->status);
-    }
-
-    public function testAShortExecutionLimitIsAWarningAndNoLimitIsNot(): void
-    {
-        self::assertSame(DiagnosticStatus::WARNING, $this->configuration(['max_execution_time' => '10'])->status);
-
-        // Zero means no limit, which is the command line's ordinary state.
-        self::assertSame(DiagnosticStatus::PASS, $this->configuration(['max_execution_time' => '0'])->status);
-    }
-
     public function testAnUploadLimitLargerThanThePostLimitIsAWarning(): void
     {
         $result = $this->configuration(['upload_max_filesize' => '128M', 'post_max_size' => '64M']);
@@ -629,11 +622,6 @@ class PlatformDiagnosticsTest extends TestCase
         self::assertStringContainsString('max_execution_time', $result->summary);
     }
 
-    public function testTheConfigurationResultNamesTheInterpreterItInspected(): void
-    {
-        self::assertSame('fpm-fcgi', $this->configuration()->evidence()[0]->get('sapi'));
-    }
-
     /**
      * @return array<string, array{string, bool}>
      */
@@ -645,6 +633,9 @@ class PlatformDiagnosticsTest extends TestCase
             'above what Craft asks for' => ['257M', false],
             'the same figure in kilobytes' => ['262144K', false],
             'one kilobyte short' => ['262143K', true],
+            // `-1` normalises to a negative byte count, which is no limit at all rather than a
+            // very small one.
+            'no limit at all' => ['-1', false],
         ];
     }
 
@@ -671,6 +662,7 @@ class PlatformDiagnosticsTest extends TestCase
             'below the minimum' => ['29', true],
             'exactly the minimum' => ['30', false],
             'above the minimum' => ['31', false],
+            // Zero means no limit, which is the command line's ordinary state.
             'no limit at all' => ['0', false],
         ];
     }

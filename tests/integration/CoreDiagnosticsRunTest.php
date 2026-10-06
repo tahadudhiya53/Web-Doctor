@@ -106,18 +106,6 @@ class CoreDiagnosticsRunTest extends TestCase
         ));
     }
 
-    public function testEveryShippedCheckProducesExactlyOneResult(): void
-    {
-        $run = $this->fullRun();
-        $expected = $this->shippedIds();
-
-        self::assertCount(count($expected), $this->shippedResults($run));
-
-        foreach ($expected as $id) {
-            self::assertNotNull($run->resultFor($id), "No result was produced for $id.");
-        }
-    }
-
     public function testEveryResultIsAttributedToTheRunAndTheCheckThatMadeIt(): void
     {
         $run = $this->fullRun();
@@ -164,21 +152,6 @@ class CoreDiagnosticsRunTest extends TestCase
         }
     }
 
-    public function testTwoRunsOfTheSameInstallationAgree(): void
-    {
-        // Determinism is what makes two runs comparable, which is what health history and
-        // environment comparison are built on.
-        $statuses = static fn(DiagnosticRun $run): array => array_combine(
-            array_map(static fn(DiagnosticResult $r): string => $r->diagnosticId, $run->results()),
-            array_map(static fn(DiagnosticResult $r): string => $r->status->value, $run->results()),
-        );
-
-        $first = $this->engine()->runAll(DiagnosticContext::current());
-        $second = $this->engine()->runAll(DiagnosticContext::current());
-
-        self::assertSame($statuses($first), $statuses($second));
-    }
-
     public function testNothingARunRecordsIsACredential(): void
     {
         // The whole run serialized, the way a report, an API response or a webhook payload
@@ -203,8 +176,9 @@ class CoreDiagnosticsRunTest extends TestCase
     public function testAFullRunChangesNothingAboutTheInstallation(): void
     {
         // The read-only guarantee, proved rather than asserted. Every table's row count, the
-        // rows of the ones that carry state a diagnostic touches, and the contents of Craft's
-        // working directories are compared either side of the most thorough run there is.
+        // rows of the ones that carry state a diagnostic touches, the contents of Craft's
+        // working directories and project config are compared either side of the most thorough
+        // run there is, and no mail may be sent during it.
         $db = Craft::$app->getDb();
         $tables = $db->getSchema()->getTableNames();
 
@@ -244,41 +218,26 @@ class CoreDiagnosticsRunTest extends TestCase
         $countsBefore = $counts();
         $statefulBefore = $stateful();
         $directoriesBefore = $directories();
-
-        $this->engine()->runAll(DiagnosticContext::current(DiagnosticDepth::DEEP));
-
-        self::assertSame($countsBefore, $counts(), 'A diagnostic run changed the number of rows in a table.');
-        self::assertSame($statefulBefore, $stateful(), 'A diagnostic run changed a row.');
-        self::assertSame($directoriesBefore, $directories(), 'A diagnostic run created or removed a file.');
-    }
-
-    public function testAFullRunSendsNoMail(): void
-    {
+        $projectConfig = Craft::$app->getProjectConfig();
+        $projectConfigBefore = $projectConfig->get();
         $sends = 0;
         $mailer = Craft::$app->getMailer();
-
         $mailer->on(\yii\mail\BaseMailer::EVENT_BEFORE_SEND, static function() use (&$sends): void {
             $sends++;
         });
 
         try {
             $this->engine()->runAll(DiagnosticContext::current(DiagnosticDepth::DEEP));
-
-            self::assertSame(0, $sends, 'A diagnostic run sent mail.');
         } finally {
             $mailer->off(\yii\mail\BaseMailer::EVENT_BEFORE_SEND);
         }
-    }
 
-    public function testAFullRunLeavesProjectConfigUntouched(): void
-    {
-        $projectConfig = Craft::$app->getProjectConfig();
-        $before = $projectConfig->get();
-
-        $this->engine()->runAll(DiagnosticContext::current(DiagnosticDepth::DEEP));
-
-        self::assertSame($before, $projectConfig->get(), 'A diagnostic run changed project config.');
+        self::assertSame($countsBefore, $counts(), 'A diagnostic run changed the number of rows in a table.');
+        self::assertSame($statefulBefore, $stateful(), 'A diagnostic run changed a row.');
+        self::assertSame($directoriesBefore, $directories(), 'A diagnostic run created or removed a file.');
+        self::assertSame($projectConfigBefore, $projectConfig->get(), 'A diagnostic run changed project config.');
         self::assertSame([], $projectConfig->getAppliedChanges(), 'A diagnostic run applied project config changes.');
+        self::assertSame(0, $sends, 'A diagnostic run sent mail.');
     }
 
     public function testEveryCheckReachesARealConclusionOnAWorkingInstallation(): void
@@ -369,12 +328,15 @@ class CoreDiagnosticsRunTest extends TestCase
         self::assertSame([], $offenders, 'Credential-named keys carrying a value: ' . implode('; ', $offenders));
     }
 
-    public function testTheSameEvidenceStructureComesBackEveryTime(): void
+    public function testTwoRunsOfTheSameInstallationAgreeInWhatTheyConcludeAndRecord(): void
     {
-        // Timestamps and durations vary by nature; the shape of what was recorded must not.
+        // Determinism is what makes two runs comparable, which is what health history and
+        // environment comparison are built on. Timestamps and durations vary by nature; the
+        // conclusions and the shape of what was recorded must not.
         $shape = static fn(DiagnosticRun $run): array => array_map(
             static fn(DiagnosticResult $r): array => [
                 'id' => $r->diagnosticId,
+                'status' => $r->status->value,
                 'category' => $r->category->value,
                 'evidence' => array_map(
                     static fn($e): array => ['type' => $e->type->value, 'keys' => array_keys($e->data)],

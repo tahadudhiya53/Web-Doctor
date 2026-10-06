@@ -92,19 +92,13 @@ class RequirementsTest extends TestCase
 
         self::assertNotSame(Requirements::manifestExtensions(), $all);
 
-        foreach (Requirements::manifestExtensions() as $extension) {
-            self::assertContains($extension, $all);
-        }
+        // Exactly both lists, each named once, in a stable order — and, since the manifest's are
+        // read without Composer's `ext-` prefix and the pinned ones are PHP's own names, named the
+        // way PHP names them.
+        $expected = array_values(array_unique([...Requirements::manifestExtensions(), ...Requirements::pinnedMandatoryExtensions()]));
+        sort($expected);
 
-        foreach (Requirements::pinnedMandatoryExtensions() as $extension) {
-            self::assertContains($extension, $all);
-        }
-
-        $sorted = $all;
-        sort($sorted);
-
-        self::assertSame($sorted, $all);
-        self::assertSame(array_values(array_unique($all)), $all);
+        self::assertSame($expected, $all);
     }
 
     public function testTheExtensionsThisHelperNamesItselfAreStillMandatoryInCraft(): void
@@ -180,36 +174,6 @@ class RequirementsTest extends TestCase
                 "The $key minimum should be the one Craft's own requirements checker declares.",
             );
         }
-    }
-
-    public function testTheRequiredExtensionsAreNamedWithoutTheirPrefix(): void
-    {
-        $extensions = Requirements::extensions();
-
-        self::assertNotEmpty($extensions);
-
-        foreach ($extensions as $extension) {
-            self::assertStringStartsNotWith('ext-', $extension, 'The `ext-` prefix is Composer’s, not PHP’s.');
-        }
-    }
-
-    public function testTheRequiredExtensionsIncludeOnesCraftCannotRunWithout(): void
-    {
-        // Named individually rather than as a count: the assertion is that the right list was
-        // found, not that it is a particular length.
-        self::assertContains('pdo', Requirements::extensions());
-        self::assertContains('mbstring', Requirements::extensions());
-    }
-
-    public function testTheRequiredExtensionsAreInAStableOrder(): void
-    {
-        self::assertSame(Requirements::extensions(), Requirements::extensions());
-
-        $extensions = Requirements::extensions();
-        $sorted = $extensions;
-        sort($sorted);
-
-        self::assertSame($sorted, $extensions);
     }
 
     public function testRereadingAfterForgettingGivesTheSameAnswer(): void
