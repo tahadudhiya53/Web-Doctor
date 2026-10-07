@@ -1,0 +1,84 @@
+{# One diagnostic run as it finished, with its health snapshot where it has one. #}
+
+{% import "web-doctor/_macros" as shared %}
+
+<p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/history') }}">&larr; {{ "History"|t('web-doctor') }}</a></p>
+
+<div class="pane">
+    <h2 class="wd-issue__title">{{ "Diagnostic run"|t('web-doctor') }}: {{ shared.when(run.startedAt) }}</h2>
+
+    {% if run.unreadable|length %}
+        <p class="warning">{{ "Part of this run’s record could not be read, so it is shown as unreadable rather than as anything else:"|t('web-doctor') }} {{ run.unreadable|join(', ') }}</p>
+    {% endif %}
+
+    <dl class="wd-meta">
+        <div><dt>{{ "Run"|t('web-doctor') }}</dt><dd><code>{{ run.runId }}</code></dd></div>
+        <div><dt>{{ "Who"|t('web-doctor') }}</dt><dd>{{ shared.text(run.userLabel()) }}</dd></div>
+        <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ shared.text(run.environment) }}</dd></div>
+        <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ shared.text(run.siteLabel()) }}</dd></div>
+        <div><dt>{{ "Depth"|t('web-doctor') }}</dt><dd>{{ shared.label(run.depth) }}</dd></div>
+        <div><dt>{{ "Execution mode"|t('web-doctor') }}</dt><dd>{{ shared.label(run.mode) }}</dd></div>
+        <div><dt>{{ "Started"|t('web-doctor') }}</dt><dd>{{ shared.when(run.startedAt) }}</dd></div>
+        <div><dt>{{ "Finished"|t('web-doctor') }}</dt><dd>{{ shared.when(run.finishedAt) }}</dd></div>
+        <div><dt>{{ "Checks"|t('web-doctor') }}</dt><dd>{{ "{run} of {registered} registered then"|t('web-doctor', { run: run.checksRun, registered: run.checksRegistered }) }}</dd></div>
+    </dl>
+</div>
+
+<div class="pane" id="snapshot">
+    <h2>{{ "Health snapshot"|t('web-doctor') }}</h2>
+    {% if run.isUnreadable('snapshot') %}
+        <p>{{ shared.unreadable() }}</p>
+    {% elseif run.hasSnapshot() %}
+        <p class="wd-issues__headline">{{ "Health score {score} out of {max}"|t('web-doctor', { score: run.score, max: run.maxScore }) }}</p>
+        <p class="light">{{ "Worked out when the run finished, with the weights below as they were then. A run starts at the maximum and loses each result’s penalty."|t('web-doctor') }}</p>
+        <div class="wd-table-scroll">
+        <table class="data fullwidth">
+            <thead><tr><th scope="col">{{ "Severity"|t('web-doctor') }}</th><th scope="col">{{ "Penalty"|t('web-doctor') }}</th><th scope="col">{{ "Results"|t('web-doctor') }}</th></tr></thead>
+            <tbody>
+                {% for severity in severities %}
+                    <tr>
+                        <td>{{ severity.label() }}</td>
+                        <td>{{ run.weights[severity.value] ?? '—' }}</td>
+                        <td>{{ run.severityCounts[severity.value] ?? 0 }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+        {% if run.contributions|length %}
+            <h3 class="wd-plan__heading">{{ "What cost the score"|t('web-doctor') }}</h3>
+            <ul class="wd-plan__list">
+                {% for c in run.contributions %}
+                    <li><code>{{ c.diagnosticId }}</code> — {{ c.status }}, {{ c.severity }}: −{{ c.penalty }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+    {% else %}
+        <p class="light">{{ "This run did not cover every check registered then, so no health score was kept — the overview shows none for a partial run either."|t('web-doctor') }}</p>
+    {% endif %}
+</div>
+
+<div class="pane" id="results">
+    <h2>{{ "What each check answered"|t('web-doctor') }}</h2>
+    {% if run.isUnreadable('results') %}
+        <p class="warning">{{ "Some of these answers could not be read; those are shown as unreadable."|t('web-doctor') }}</p>
+    {% endif %}
+    <div class="wd-table-scroll">
+    <table class="data fullwidth wd-ledger">
+        <thead><tr><th scope="col">{{ "Check"|t('web-doctor') }}</th><th scope="col" class="wd-col-narrow">{{ "Result"|t('web-doctor') }}</th><th scope="col" class="wd-col-narrow">{{ "Severity"|t('web-doctor') }}</th><th scope="col">{{ "Summary"|t('web-doctor') }}</th></tr></thead>
+        <tbody>
+            {% for r in run.results %}
+                <tr>
+                    <td>{{ shared.text(r.name) }}<div class="light"><code>{{ r.diagnosticId }}</code> &middot; {{ shared.label(r.category) }}</div></td>
+                    <td class="wd-col-narrow">{{ shared.pill('wd-pill--', r.status) }}</td>
+                    <td class="wd-col-narrow">{{ shared.label(r.severity) }}</td>
+                    <td>{{ shared.text(r.summary) }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% if run.resultsOmitted %}
+        <p class="light">{{ "{count, plural, =1{1 more result was} other{# more results were}} not kept."|t('web-doctor', { count: run.resultsOmitted }) }}</p>
+    {% endif %}
+</div>

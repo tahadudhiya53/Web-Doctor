@@ -4,6 +4,7 @@ namespace Tahadudhiya\WebDoctor\controllers;
 
 use Craft;
 use craft\web\Controller;
+use Tahadudhiya\WebDoctor\helpers\QueryParams;
 use Tahadudhiya\WebDoctor\helpers\RequestInput;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\services\Permissions;
@@ -32,6 +33,9 @@ class ErrorsController extends Controller
 
         // A plugin action route is reachable from the front end unless something refuses it.
         $this->requireCpRequest();
+        // The section's own permission as well as this one's: Craft nests them only in its own
+        // screens, and a permission set written another way can hold a child without its parent.
+        $this->requirePermission(Permissions::VIEW);
         $this->requirePermission(Permissions::VIEW_ISSUES);
 
         return true;
@@ -44,13 +48,13 @@ class ErrorsController extends Controller
     {
         $plugin = $this->plugin();
         $page = RequestInput::page($this->request->getQueryParam('page'));
-        $environment = $this->request->getQueryParam('environment');
 
-        // Any environment when none is named. One that is named is looked for as it was written,
-        // so an environment nothing has been recorded in shows nothing rather than everything.
-        if ($environment === '') {
-            $environment = null;
-        } elseif ($environment !== null && !is_string($environment)) {
+        // Any environment when none is named, read as every list reads it. One that is named is looked
+        // for as written, so an environment nothing has been recorded in shows nothing rather than
+        // everything.
+        try {
+            $environment = QueryParams::text($this->request->getQueryParams(), 'environment', 255);
+        } catch (\InvalidArgumentException) {
             throw new BadRequestHttpException(Craft::t('web-doctor', 'That is not an environment.'));
         }
 

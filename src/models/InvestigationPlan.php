@@ -222,48 +222,72 @@ final class InvestigationPlan implements JsonSerializable
     }
 
     /**
-     * Reads back a plan as it was stored. Anything malformed is dropped rather than trusted, so a
-     * row written by another version still reads as the plan it was, as far as it can be read.
+     * Reads back a plan as it was stored, or null where any part of it is not in the shape this
+     * model writes — its depth, its rule, a check, an area, a lead or the count left out. A plan is
+     * what was set out to do, so one shown without a check it named, or with an origin it did not
+     * have, would misreport what was done: it cannot be read, and the investigation says so.
      *
      * @param array<array-key, mixed> $stored
      */
-    public static function fromArray(array $stored): self
+    public static function fromArray(array $stored): ?self
     {
+        $text = static fn(mixed $value): bool => is_string($value);
         $checks = [];
+        $uncovered = [];
 
-        foreach ((array)($stored['checks'] ?? []) as $check) {
-            if (is_array($check) && is_string($check['diagnosticId'] ?? null)) {
-                $checks[] = [
-                    'diagnosticId' => $check['diagnosticId'],
-                    'name' => (string)($check['name'] ?? $check['diagnosticId']),
-                    'category' => (string)($check['category'] ?? ''),
-                    'reason' => (string)($check['reason'] ?? ''),
-                    'origin' => (bool)($check['origin'] ?? false),
-                ];
+        if (!is_array($stored['checks'] ?? null) || !is_array($stored['uncovered'] ?? null) || !is_array($stored['leads'] ?? null)) {
+            return null;
+        }
+
+        foreach ($stored['checks'] as $check) {
+            if (!is_array($check) || !is_string($check['diagnosticId'] ?? null) || $check['diagnosticId'] === ''
+                || !$text($check['name'] ?? null) || !$text($check['category'] ?? null)
+                || !$text($check['reason'] ?? null) || !is_bool($check['origin'] ?? null)) {
+                return null;
+            }
+
+            $checks[] = [
+                'diagnosticId' => $check['diagnosticId'],
+                'name' => $check['name'],
+                'category' => $check['category'],
+                'reason' => $check['reason'],
+                'origin' => $check['origin'],
+            ];
+        }
+
+        foreach ($stored['uncovered'] as $area) {
+            if (!is_array($area) || !$text($area['area'] ?? null) || !$text($area['reason'] ?? null) || !is_bool($area['origin'] ?? null)) {
+                return null;
+            }
+
+            $uncovered[] = ['area' => $area['area'], 'reason' => $area['reason'], 'origin' => $area['origin']];
+        }
+
+        foreach ($stored['leads'] as $lead) {
+            if (!is_string($lead)) {
+                return null;
             }
         }
 
-        $uncovered = [];
+        $depth = DiagnosticDepth::tryFrom(is_string($stored['depth'] ?? null) ? $stored['depth'] : '');
+        $recipeId = $stored['recipeId'] ?? null;
 
-        foreach ((array)($stored['uncovered'] ?? []) as $area) {
-            if (is_array($area)) {
-                $uncovered[] = [
-                    'area' => (string)($area['area'] ?? ''),
-                    'reason' => (string)($area['reason'] ?? ''),
-                    'origin' => (bool)($area['origin'] ?? false),
-                ];
-            }
+        if ($depth === null || !is_string($stored['ruleId'] ?? null) || $stored['ruleId'] === ''
+            || !$text($stored['ruleLabel'] ?? null)
+            || !is_int($stored['omitted'] ?? null) || $stored['omitted'] < 0
+            || ($recipeId !== null && (!is_string($recipeId) || $recipeId === ''))) {
+            return null;
         }
 
         return new self(
-            ruleId: (string)($stored['ruleId'] ?? InvestigationRules::FALLBACK),
-            ruleLabel: (string)($stored['ruleLabel'] ?? ''),
-            depth: DiagnosticDepth::tryFrom((string)($stored['depth'] ?? '')) ?? DiagnosticDepth::NORMAL,
+            ruleId: $stored['ruleId'],
+            ruleLabel: $stored['ruleLabel'],
+            depth: $depth,
             checks: $checks,
             uncovered: $uncovered,
-            leads: array_values(array_map('strval', array_filter((array)($stored['leads'] ?? []), 'is_string'))),
-            omitted: (int)($stored['omitted'] ?? 0),
-            recipeId: is_string($stored['recipeId'] ?? null) && $stored['recipeId'] !== '' ? $stored['recipeId'] : null,
+            leads: array_values($stored['leads']),
+            omitted: $stored['omitted'],
+            recipeId: $recipeId,
         );
     }
 

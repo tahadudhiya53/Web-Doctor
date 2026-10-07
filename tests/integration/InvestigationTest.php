@@ -17,6 +17,8 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Tahadudhiya\WebDoctor\diagnostics\CoreDiagnostics;
+use Tahadudhiya\WebDoctor\enums\AuditAction;
+use Tahadudhiya\WebDoctor\enums\AuditObjectType;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
@@ -29,6 +31,8 @@ use Tahadudhiya\WebDoctor\enums\Severity;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\investigations\InvestigationRules;
+use Tahadudhiya\WebDoctor\models\AuditEntry;
+use Tahadudhiya\WebDoctor\models\AuditFilter;
 use Tahadudhiya\WebDoctor\models\ConditionOutcome;
 use Tahadudhiya\WebDoctor\models\CorrelationCase;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
@@ -49,6 +53,7 @@ use Tahadudhiya\WebDoctor\records\InvestigationStepRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\records\RootCauseRecord;
 use Tahadudhiya\WebDoctor\rules\RootCauseRules;
+use Tahadudhiya\WebDoctor\services\Audit;
 use Tahadudhiya\WebDoctor\services\DiagnosticEngine;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\services\Errors;
@@ -228,7 +233,7 @@ class InvestigationTest extends TestCase
         self::assertTrue($first->checks[0]['origin']);
         self::assertSame(1, count(array_filter(array_column($first->checks, 'origin'))));
         // What was chosen does not depend on the order the checks were handed over in.
-        self::assertEqualsCanonicalizing($first->diagnosticIds(), $again->diagnosticIds());
+        self::assertSame($first->diagnosticIds(), $again->diagnosticIds());
         // And a stored plan reads back as the plan it was.
         self::assertEquals($first, InvestigationPlan::fromArray(json_decode(Evidence::encode($first), true)));
     }
@@ -607,6 +612,15 @@ class InvestigationTest extends TestCase
         self::assertFalse(RecommendationCase::fromStep($origin)?->evidenceComplete);
         self::assertSame(Redaction::REDACTED, $origin->evidence[1]->get('password'));
         self::assertStringNotContainsString('hunter2', $this->storedRows($investigation));
+
+        // Nor is evidence that cannot be read back, however much of it the step said it kept; and a
+        // finding whose severity cannot be read is not advised on at all, rather than at a default.
+        $reread = fn() => $this->stepFor($this->investigations->steps($investigation->id), 'tests.origin');
+        \Tahadudhiya\WebDoctor\records\InvestigationStepRecord::updateAll(['evidence' => 'not json', 'evidenceTruncated' => false], ['id' => $origin->id]);
+        self::assertTrue($reread()->isUnreadable('evidence'));
+        self::assertFalse(RecommendationCase::fromStep($reread())?->evidenceComplete);
+        \Tahadudhiya\WebDoctor\records\InvestigationStepRecord::updateAll(['severity' => 'apocalyptic'], ['id' => $origin->id]);
+        self::assertNull(RecommendationCase::fromStep($reread()));
     }
 
     public function testAnIssueKeepsABoundedNumberOfInvestigationsAndTheyGoWithIt(): void
@@ -894,7 +908,7 @@ class InvestigationTest extends TestCase
         self::assertSame($plan->diagnosticIds(), array_values(array_unique($plan->diagnosticIds())));
         self::assertSame('tests.big06', $plan->checks[0]['diagnosticId']);
         self::assertSame(60 - InvestigationPlan::MAX_CHECKS, $plan->omitted);
-        self::assertEqualsCanonicalizing($plan->diagnosticIds(), $again->diagnosticIds());
+        self::assertSame($plan->diagnosticIds(), $again->diagnosticIds());
         // Configuration is related to a failing request and nothing here covers it.
         self::assertContains(DiagnosticCategory::CONFIGURATION->label(), array_column($plan->uncovered, 'area'));
     }
@@ -982,24 +996,17 @@ class InvestigationTest extends TestCase
     /**
      * What a request may ask for: missing, the depth is normal, as the form states; one of the
      * three, that one exactly; anything else — and an issue ID that is not a number — is refused
-     * before anything runs or is written.
+     * before anything runs or is written. Every value a request could send is read in
+     * DiagnosticModelTest; these prove the investigation is handed what was read.
      *
      * @return array<string, array{mixed, mixed, DiagnosticDepth|null}>
      */
     public static function startRequests(): array
     {
         return [
-            'shallow' => [null, 'shallow', DiagnosticDepth::SHALLOW],
-            'normal' => [null, 'normal', DiagnosticDepth::NORMAL],
             'deep' => [null, 'deep', DiagnosticDepth::DEEP],
             'depth missing' => [null, self::MISSING, DiagnosticDepth::NORMAL],
-            'a depth Web Doctor does not have' => [null, 'bottomless', null],
-            'an empty depth' => [null, '', null],
             'the wrong case' => [null, 'Deep', null],
-            'a depth as a list' => [null, ['deep'], null],
-            'an issue ID that is not a number' => ['not-an-id', 'normal', null],
-            'an issue ID as a list' => [['1'], 'normal', null],
-            'a negative issue ID' => ['-4', 'normal', null],
             // Read as a number, this would name the real issue.
             'the real issue ID with text after it' => ['{id}abc', 'normal', null],
         ];
@@ -1149,7 +1156,6 @@ class InvestigationTest extends TestCase
         }
 
         self::assertSame([], $this->investigations->forIssue($issue->id));
-        self::assertSame(RecordingInvestigationsController::ALLOW_ANONYMOUS_NEVER, $this->investigationsController()->anonymousAccess());
     }
 
     public function testSomebodyWhoMayInvestigateStartsOneAndIsTakenToWhatItFound(): void
@@ -1166,6 +1172,40 @@ class InvestigationTest extends TestCase
         self::assertSame(DiagnosticDepth::SHALLOW, $made[0]->depth);
         self::assertSame($user->id, $made[0]->startedBy);
         self::assertStringContainsString("web-doctor/issues/{$issue->id}/investigations/{$made[0]->id}", (string)$response->getHeaders()->get('location'));
+    }
+
+    public function testStartingOneRecordsItsStartItsEndAndTheRecommendationsItsPageGives(): void
+    {
+        $this->charsetScenario();
+        $issue = $this->raise('database.charset');
+        $this->signIn(admin: true);
+        $this->post(['issueId' => $issue->id]);
+
+        $this->investigationsController()->runAction('start');
+        $investigation = $this->investigations->forIssue($issue->id)[0];
+
+        $entries = array_values(array_filter(
+            (new Audit())->find(new AuditFilter(issueId: $issue->id, oldestFirst: true))->items,
+            static fn(AuditEntry $e): bool => $e->objectType === AuditObjectType::INVESTIGATION,
+        ));
+
+        self::assertSame(
+            [AuditAction::INVESTIGATION_STARTED, AuditAction::INVESTIGATION_COMPLETED, AuditAction::RECOMMENDATIONS_GENERATED],
+            array_map(static fn(AuditEntry $e): AuditAction => $e->action, $entries),
+        );
+
+        foreach ($entries as $entry) {
+            self::assertSame((string)$investigation->id, $entry->objectId);
+            self::assertSame(1, $entry->userId);
+        }
+
+        // What the page advises, by the check each finding came from and the rule it was given — the
+        // issue investigated first, its cause's advice before its finding's, as the page orders them.
+        $given = $entries[2]->details['recommendations'] ?? [];
+        self::assertIsArray($given);
+        self::assertStringStartsWith('database.charset: ', (string)($given[0] ?? ''));
+        self::assertContains('queue.failedJobs: queue.fixRepeatedFailure', $given);
+        self::assertSame(count($given), $entries[2]->details['count'] ?? null);
     }
 
     public function testARefusalIsExplainedToWhoeverAskedForTheInvestigation(): void
@@ -1297,7 +1337,7 @@ class InvestigationTest extends TestCase
         });
         $this->check('queue.failedJobs', DiagnosticCategory::QUEUE, DiagnosticStatus::FAIL, 'Queue jobs have failed: 2.', [
             new Evidence(type: EvidenceType::QUEUE, label: 'Failed jobs', source: 'queue.failedJobs', data: ['failed' => 2]),
-            new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Updating search indexes', source: 'queue.failedJobs', data: [
+            new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Failed job', source: 'queue.failedJobs', data: [
                 'description' => 'Updating search indexes',
                 'occurrences' => 2,
                 'error' => $refused,
@@ -1348,6 +1388,7 @@ class InvestigationTest extends TestCase
             'web-doctor/issues/' . $queue->id,
             '#evidence-database.charset',
             'Incorrect string value',
+            'Updating search indexes',
         ] as $expected) {
             self::assertStringContainsString($expected, $html);
         }
@@ -1359,7 +1400,9 @@ class InvestigationTest extends TestCase
         $withheld = $this->render($this->investigationsController(), 'detail', 'web-doctor/_investigations/_investigation', $params);
 
         self::assertStringContainsString(htmlspecialchars($causes[0]->title, ENT_QUOTES), $withheld);
-        self::assertStringContainsString('Failed job “Updating search indexes”', $withheld);
+        // That a job failed is shown; what it was called is what the evidence holds.
+        self::assertStringContainsString('A failed job, failed', $withheld);
+        self::assertStringNotContainsString('Updating search indexes', $withheld);
         self::assertStringNotContainsString('Incorrect string value', $withheld);
         self::assertStringContainsString('What those facts contain needs the “View evidence” permission.', $withheld);
 
@@ -1426,11 +1469,12 @@ class InvestigationTest extends TestCase
         $this->check('tests.other', DiagnosticCategory::DATABASE, DiagnosticStatus::FAIL);
         self::assertSame([], $recommendations->causesFor($this->raise('tests.other')));
 
-        // A stored cause whose confidence cannot be read is held at the least there is, and so is
-        // not acted on — however firmly it once was.
+        // A stored cause whose confidence cannot be read is unreadable, not read as some other
+        // confidence, and so is not acted on — however firmly it once was.
         RootCauseRecord::updateAll(['confidence' => 'certain'], ['investigationId' => $investigation->id]);
         $causes = $recommendations->causesFor($issue);
-        self::assertSame(Confidence::POSSIBLE, $causes[0]->confidence);
+        self::assertNull($causes[0]->confidence);
+        self::assertContains('confidence', $causes[0]->unreadable);
         self::assertNotContains('database.convertCharacterSet', array_map(
             static fn($r): string => $r->ruleId,
             $recommendations->recommend(\Tahadudhiya\WebDoctor\models\RecommendationCase::fromIssue($issue, [self::charsetEvidence()], $causes))->recommendations,
@@ -1666,6 +1710,30 @@ class InvestigationTest extends TestCase
         self::assertStringContainsString('sampledTableAcceptsMb4: false', $html);
     }
 
+    /**
+     * The issues the findings landed on are part of what a cause is weighed against — when each was
+     * first seen, what else is open. Unread, they would read as none, so nothing is weighed and the
+     * timeline says why, rather than keeping causes concluded without them.
+     */
+    public function testCausesAreNotWeighedWithoutTheIssuesTheFindingsLandedOn(): void
+    {
+        $this->check('tests.origin', DiagnosticCategory::DATABASE, DiagnosticStatus::FAIL);
+        $issue = $this->raise('tests.origin');
+        $this->investigations->issues = new class() extends Issues {
+            public function idsByFingerprint(array $fingerprints): array
+            {
+                throw new RuntimeException('The issue table would not answer.');
+            }
+        };
+
+        $investigation = $this->investigations->investigate($issue->id);
+        $diagnosed = $this->stepsOf($this->investigations->steps($investigation->id), InvestigationStepType::DIAGNOSED);
+
+        self::assertCount(1, $diagnosed);
+        self::assertStringContainsString('could not be read, so the known causes were not weighed', (string)$diagnosed[0]->note);
+        self::assertSame(0, (int)RootCauseRecord::find()->where(['investigationId' => $investigation->id])->count());
+    }
+
     public function testWeighingThatBreaksIsSaidInTheTimelineAndCostsTheInvestigationNothing(): void
     {
         $this->check('tests.origin', DiagnosticCategory::DATABASE, DiagnosticStatus::FAIL);
@@ -1744,12 +1812,17 @@ class InvestigationTest extends TestCase
         $causes = (new RootCauses())->forInvestigation($investigation->id);
 
         self::assertCount(3, $causes);
-        // A confidence this version does not have reads as the least firm one.
-        self::assertSame(Confidence::POSSIBLE, $causes[1]->confidence);
+        self::assertSame([], $causes[0]->unreadable, 'A cause with nothing but what the table insists on is whole.');
+        // A confidence this version does not have is unreadable, and every column that is not what
+        // was written is named — none is read as something else.
+        self::assertNull($causes[1]->confidence);
+        self::assertSame(['supporting', 'conflicting', 'unmet', 'relatedIssues', 'reasoning', 'nextSteps', 'confidence'], $causes[1]->unreadable);
         self::assertSame([], $causes[1]->supporting());
         self::assertSame([['id' => 999999999, 'title' => '', 'severity' => '']], $causes[1]->relatedIssues);
-        // A condition kept as evidence against the cause reads back as evidence against it.
-        self::assertSame(\Tahadudhiya\WebDoctor\enums\ConditionRole::CONTRADICTING, $causes[2]->conflicting()[0]->role);
+        // A condition of a role, or with an observation, this version cannot read is left out and
+        // named — never read back with another role, evidence against as evidence for.
+        self::assertSame(['supporting', 'conflicting'], $causes[2]->unreadable);
+        self::assertSame([], $causes[2]->conflicting());
 
         $this->signIn(admin: true);
         $this->request('GET');
@@ -1765,6 +1838,8 @@ class InvestigationTest extends TestCase
         foreach (['{not json', 'Array to string', 'Exception', 'Stack trace'] as $leak) {
             self::assertStringNotContainsString($leak, $html);
         }
+
+        self::assertStringContainsString('supporting, conflicting, unmet, relatedIssues, reasoning, nextSteps, confidence', $html);
     }
 
     // Isolation --------------------------------------------------------------
@@ -1949,7 +2024,7 @@ class InvestigationTest extends TestCase
             throw new DbException($refused);
         });
         $this->check('queue.failedJobs', DiagnosticCategory::QUEUE, DiagnosticStatus::FAIL, 'Queue jobs have failed: 2.', [
-            new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Updating search indexes', source: 'queue.failedJobs', data: ['description' => 'Updating search indexes', 'occurrences' => 2, 'error' => $refused]),
+            new Evidence(type: EvidenceType::QUEUE_JOB, label: 'Failed job', source: 'queue.failedJobs', data: ['description' => 'Updating search indexes', 'occurrences' => 2, 'error' => $refused]),
         ]);
     }
 

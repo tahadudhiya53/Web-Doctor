@@ -4,35 +4,41 @@ namespace Tahadudhiya\WebDoctor\services;
 
 use Craft;
 use craft\db\ActiveQuery;
-use craft\helpers\Db;
 use DateTimeImmutable;
 use DateTimeInterface;
-use DateTimeZone;
 use RuntimeException;
+use Tahadudhiya\WebDoctor\enums\AuditAction;
+use Tahadudhiya\WebDoctor\enums\AuditObjectType;
+use Tahadudhiya\WebDoctor\enums\AuditResult;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
 use Tahadudhiya\WebDoctor\enums\IssueEventType;
 use Tahadudhiya\WebDoctor\enums\IssueResolution;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\enums\VerificationStatus;
 use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
+use Tahadudhiya\WebDoctor\helpers\QueryParams;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 use Tahadudhiya\WebDoctor\helpers\Savepoint;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
+use Tahadudhiya\WebDoctor\helpers\Text;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
 use Tahadudhiya\WebDoctor\models\DiagnosticRun;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\Issue;
 use Tahadudhiya\WebDoctor\models\IssueEvent;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
-use Tahadudhiya\WebDoctor\models\IssueList;
 use Tahadudhiya\WebDoctor\models\IssueReconciliation;
-use Tahadudhiya\WebDoctor\models\SafeException;
+use Tahadudhiya\WebDoctor\models\ListPage;
 use Tahadudhiya\WebDoctor\records\IssueEventRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
 use yii\base\Component;
 use yii\base\InvalidArgumentException;
+use yii\base\InvalidConfigException;
 use yii\db\Expression;
 
 /**
@@ -61,13 +67,23 @@ class Issues extends Component
     public ?EvidenceStore $evidence = null;
 
     /**
+     * @var Audit|null Where a resolution or a status change is recorded, in the same transaction as
+     * the change. Settable for the reason the evidence store is.
+     */
+    public ?Audit $audit = null;
+
+    /**
      * Brings the Issue Center up to date with what a run found.
      *
      * Done as one transaction. A run that is half-reconciled — new issues raised but nothing
      * resolved — would show a reader problems that the same run had already established were
      * gone.
+     *
+     * @param list<string> $leaveOpen Fingerprints this reconciliation must not resolve, whatever the
+     * run found: a repair's verification settles its own issue itself, because only a verified repair
+     * may resolve it, and a check gone quiet while the verification could not tell is not that.
      */
-    public function reconcile(DiagnosticRun $run): IssueReconciliation
+    public function reconcile(DiagnosticRun $run, array $leaveOpen = []): IssueReconciliation
     {
         $environment = $run->context->environment;
         $siteId = $run->context->siteId;
@@ -90,7 +106,7 @@ class Issues extends Component
         }
 
         $opened = $updated = $recurred = $resolved = 0;
-        $detectedAt = $this->forDb($run->finishedAt);
+        $detectedAt = StoredTime::forDb($run->finishedAt);
         $transaction = Craft::$app->getDb()->beginTransaction();
 
         try {
@@ -108,7 +124,7 @@ class Issues extends Component
                 };
             }
 
-            $resolved = $this->resolveCleared($run, array_keys($findings), array_keys($conclusive));
+            $resolved = $this->resolveCleared($run, [...array_keys($findings), ...$leaveOpen], array_keys($conclusive));
 
             $transaction->commit();
         } catch (Throwable $e) {
@@ -147,7 +163,7 @@ class Issues extends Component
                 ?? throw new RuntimeException(sprintf('The issue for fingerprint %s could not be created or found.', $fingerprint));
         }
 
-        $previousStatus = IssueStatus::tryFrom((string)$record->status) ?? IssueStatus::NEW;
+        $previousStatus = $this->statusOf($record);
         $previousSeverity = Severity::tryFrom((string)$record->severity);
         $previousTitle = (string)$record->title;
 
@@ -171,6 +187,11 @@ class Issues extends Component
 
             $this->save($record);
             $this->logEvent($record, IssueEventType::RECURRED, from: $previousStatus, to: IssueStatus::NEW, severity: $severity, runId: $run->id());
+            $this->audit($record, AuditAction::ISSUE_STATUS_CHANGED, AuditResult::NONE, Craft::t('web-doctor', 'Opened again: the check that found it reported it again.'), [
+                'from' => $previousStatus->value,
+                'to' => IssueStatus::NEW->value,
+                'runId' => $run->id(),
+            ]);
 
             return [IssueEventType::RECURRED, $record];
         }
@@ -240,13 +261,13 @@ class Issues extends Component
             // A run about no particular site speaks only for issues that never had one. A deleted
             // site's issues have a null siteId too, and a run that never looked at that site must
             // not close them.
-            ->andWhere($this->place($run->context->siteId));
+            ->andWhere(SiteName::place($run->context->siteId));
 
         if ($foundFingerprints !== []) {
             $query->andWhere(['not in', 'fingerprint', $foundFingerprints]);
         }
 
-        $resolvedAt = $this->forDb($run->finishedAt);
+        $resolvedAt = StoredTime::forDb($run->finishedAt);
         $count = 0;
 
         // A locking read of what is committed now, not the snapshot this transaction began with:
@@ -257,7 +278,7 @@ class Issues extends Component
                 continue;
             }
 
-            $from = IssueStatus::tryFrom((string)$record->status) ?? IssueStatus::NEW;
+            $from = $this->statusOf($record);
 
             $record->status = IssueStatus::RESOLVED->value;
             $record->resolution = IssueResolution::OBSERVED_CLEAR->value;
@@ -269,6 +290,11 @@ class Issues extends Component
 
             $this->save($record);
             $this->logEvent($record, IssueEventType::RESOLVED, from: $from, to: IssueStatus::RESOLVED, runId: $run->id());
+            $this->audit($record, AuditAction::ISSUE_RESOLVED, AuditResult::SUCCEEDED, Craft::t('web-doctor', 'Resolved: the check that found it ran again and no longer reports it.'), [
+                'from' => $from->value,
+                'resolution' => IssueResolution::OBSERVED_CLEAR->value,
+                'runId' => $run->id(),
+            ]);
 
             $count++;
         }
@@ -311,7 +337,14 @@ class Issues extends Component
             throw new Refusal(Craft::t('web-doctor', 'No issue exists with the ID {id}.', ['id' => $issueId]));
         }
 
-        $from = IssueStatus::tryFrom((string)$record->status) ?? IssueStatus::NEW;
+        // An issue that cannot be read in full is not one anybody can be told the state of.
+        $refusal = Issue::fromRecord($record)->integrityRefusal();
+
+        if ($refusal !== null) {
+            throw new Refusal($refusal);
+        }
+
+        $from = $this->statusOf($record);
         // Redacted as the history entry beside it is: a reason is typed by a person, and a person
         // pasting a failing connection string into it is not a hypothetical.
         $storedNote = $note === null || $note === '' ? null : Redaction::redactString($note);
@@ -334,11 +367,18 @@ class Issues extends Component
             $record->resolvedAt = null;
             $record->resolvedByRunId = null;
             $record->statusNote = $storedNote;
-            $record->statusChangedAt = $this->forDb(new DateTimeImmutable());
+            $record->statusChangedAt = StoredTime::forDb(new DateTimeImmutable());
             $record->statusChangedBy = $userId;
 
             $this->save($record);
             $this->logEvent($record, IssueEventType::STATUS_CHANGED, from: $from, to: $to, note: $note, userId: $userId);
+            $this->audit($record, AuditAction::ISSUE_STATUS_CHANGED, AuditResult::NONE, $from === $to
+                ? Craft::t('web-doctor', 'Restated as “{status}” with a new reason.', ['status' => $to->label()])
+                : Craft::t('web-doctor', 'Moved from “{from}” to “{to}”.', ['from' => $from->label(), 'to' => $to->label()]), array_filter([
+                    'from' => $from->value,
+                    'to' => $to->value,
+                    'reason' => $storedNote,
+                ], static fn(?string $value): bool => $value !== null));
 
             $transaction->commit();
         } catch (Throwable $e) {
@@ -351,9 +391,223 @@ class Issues extends Component
     }
 
     /**
+     * Sets an issue repairing while a repair somebody confirmed is carried out.
+     *
+     * Only an open issue that is not already being repaired: a resolved issue has nothing left to
+     * repair, a dismissed one is somebody's decision not to act, and one being repaired already is
+     * one repair at a time. Read with a lock, so a decision committed a moment ago is the one
+     * checked rather than the one this request first saw.
+     *
+     * @return IssueStatus Where it stood, so {@see self::endRepair()} can put it back.
+     * @throws Refusal if the issue does not exist or cannot be repaired as it stands.
+     */
+    public function beginRepair(int $issueId, string $repairName, ?int $userId = null): IssueStatus
+    {
+        $transaction = Craft::$app->getDb()->beginTransaction();
+
+        try {
+            $record = Savepoint::committed(IssueRecord::find()->where(['id' => $issueId]))[0] ?? null;
+
+            if (!$record instanceof IssueRecord) {
+                throw new Refusal(Craft::t('web-doctor', 'No issue exists with the ID {id}.', ['id' => $issueId]));
+            }
+
+            $from = $this->statusOf($record);
+            $refusal = self::repairRefusal($from);
+
+            if ($refusal !== null) {
+                throw new Refusal($refusal);
+            }
+
+            $record->status = IssueStatus::REPAIRING->value;
+            $record->statusChangedAt = StoredTime::forDb(new DateTimeImmutable());
+            $record->statusChangedBy = $userId;
+
+            $this->save($record);
+            $this->logEvent($record, IssueEventType::REPAIR_STARTED, from: $from, to: IssueStatus::REPAIRING, note: $repairName, userId: $userId);
+
+            $transaction->commit();
+        } catch (Throwable $e) {
+            $transaction->rollBack();
+
+            throw $e;
+        }
+
+        return $from;
+    }
+
+    /**
+     * Puts an issue back where it stood once its repair has finished, cleanly or not: a repair that
+     * ran is not a problem that went away, and only the check that found it can say it has gone.
+     *
+     * Only while it is still repairing. A run that observed it clear in the meantime, or a person who
+     * moved it on, has said something newer about it, which this does not overwrite.
+     */
+    public function endRepair(int $issueId, IssueStatus $restore, string $note, ?int $userId = null): void
+    {
+        $transaction = Craft::$app->getDb()->beginTransaction();
+
+        try {
+            $record = Savepoint::committed(IssueRecord::find()->where(['id' => $issueId]))[0] ?? null;
+
+            if ($record instanceof IssueRecord && $record->status === IssueStatus::REPAIRING->value) {
+                // Never back to repairing itself, which would leave it there for good.
+                $restore = $restore === IssueStatus::REPAIRING ? IssueStatus::CONFIRMED : $restore;
+
+                $record->status = $restore->value;
+                $record->statusChangedAt = StoredTime::forDb(new DateTimeImmutable());
+                $record->statusChangedBy = $userId;
+
+                $this->save($record);
+                $this->logEvent($record, IssueEventType::REPAIR_FINISHED, from: IssueStatus::REPAIRING, to: $restore, note: $note, userId: $userId);
+            }
+
+            $transaction->commit();
+        } catch (Throwable $e) {
+            $transaction->rollBack();
+
+            throw $e;
+        }
+    }
+
+    /**
+     * Applies a repair's verification to its issue and records it in the history, as one act, and
+     * returns the answer that stands.
+     *
+     * Verified resolves an open issue on those grounds, or makes an already resolved one's grounds
+     * that; a failed verification opens a resolved issue again; an inconclusive one changes nothing.
+     * A person's decision to ignore an issue stands whatever a verification says.
+     *
+     * Read with a lock, so the issue is the one standing now. If it changed while the verification
+     * ran — a repair of it began, or a later run recorded a finding on it — the verification's answer
+     * describes a state that has gone, and inconclusive is what stands.
+     *
+     * @param string|null $expectedRunId The run the issue's latest finding was from when the
+     * verification began.
+     * @param IssueStatus $expectedStatus Where the issue stood when the verification began.
+     * @param callable(VerificationStatus): string $note The history's note for the answer that stands.
+     */
+    public function recordVerification(int $issueId, VerificationStatus $result, ?string $expectedRunId, IssueStatus $expectedStatus, callable $note, string $runId, ?int $userId = null): VerificationStatus
+    {
+        if (!$result->isResult()) {
+            throw new InvalidArgumentException(sprintf('"%s" is not a verification\'s answer.', $result->value));
+        }
+
+        $transaction = Craft::$app->getDb()->beginTransaction();
+
+        try {
+            $record = Savepoint::committed(IssueRecord::find()->where(['id' => $issueId]))[0] ?? null;
+
+            if (!$record instanceof IssueRecord) {
+                $transaction->commit();
+
+                return VerificationStatus::INCONCLUSIVE;
+            }
+
+            $from = $this->statusOf($record);
+            // A failed verification's own run records the finding on the issue — which moves its
+            // latest run, and reopens it if it was resolved — so only a repair beginning counts as
+            // a change against that answer. Any other answer has to find the issue as it left it:
+            // the same finding, and the same status, nobody having decided anything meanwhile.
+            $changed = $from === IssueStatus::REPAIRING
+                || ($result !== VerificationStatus::FAILED && ($record->latestRunId !== $expectedRunId || $from !== $expectedStatus));
+            $stands = $changed ? VerificationStatus::INCONCLUSIVE : $result;
+            $now = StoredTime::forDb(new DateTimeImmutable());
+
+            if ($stands === VerificationStatus::VERIFIED && ($from->isOpen() || $from === IssueStatus::RESOLVED)) {
+                $record->status = IssueStatus::RESOLVED->value;
+                $record->resolution = IssueResolution::VERIFIED->value;
+                $record->resolvedAt = $from === IssueStatus::RESOLVED ? $record->resolvedAt : $now;
+                $record->resolvedByRunId = $runId;
+                $record->statusNote = null;
+                $this->save($record);
+
+                if ($from !== IssueStatus::RESOLVED) {
+                    $this->logEvent($record, IssueEventType::RESOLVED, from: $from, to: IssueStatus::RESOLVED, runId: $runId, userId: $userId);
+                    $this->audit($record, AuditAction::ISSUE_RESOLVED, AuditResult::SUCCEEDED, Craft::t('web-doctor', 'Resolved: a repair of it was verified.'), [
+                        'from' => $from->value,
+                        'resolution' => IssueResolution::VERIFIED->value,
+                        'runId' => $runId,
+                    ]);
+                }
+            } elseif ($stands === VerificationStatus::FAILED && $from === IssueStatus::RESOLVED) {
+                $record->status = IssueStatus::NEW->value;
+                $record->resolution = IssueResolution::NONE->value;
+                $record->resolvedAt = null;
+                $record->resolvedByRunId = null;
+                $record->statusNote = null;
+                $record->statusChangedAt = null;
+                $record->statusChangedBy = null;
+                $this->save($record);
+                $this->logEvent($record, IssueEventType::RECURRED, from: $from, to: IssueStatus::NEW, runId: $runId, userId: $userId);
+                $this->audit($record, AuditAction::ISSUE_STATUS_CHANGED, AuditResult::NONE, Craft::t('web-doctor', 'Opened again: verifying a repair of it failed.'), [
+                    'from' => $from->value,
+                    'to' => IssueStatus::NEW->value,
+                    'runId' => $runId,
+                ]);
+            }
+
+            $to = $this->statusOf($record);
+            $this->logEvent($record, IssueEventType::REPAIR_VERIFIED, from: $to, to: $to, note: $note($stands), runId: $runId, userId: $userId);
+
+            $transaction->commit();
+        } catch (Throwable $e) {
+            $transaction->rollBack();
+
+            throw $e;
+        }
+
+        return $stands;
+    }
+
+    /**
+     * Which of these issues appeared at or after a moment: first detected then, or found again then
+     * after having been resolved. A moment is whole seconds, so one in the same second counts — the
+     * cautious reading, since what is asked is whether something could be new.
+     *
+     * @param list<int> $issueIds
+     * @return list<int>
+     */
+    public function appearedSince(array $issueIds, DateTimeInterface $since): array
+    {
+        if ($issueIds === []) {
+            return [];
+        }
+
+        $at = StoredTime::forDb($since);
+        $first = IssueRecord::find()->select(['id'])->where(['id' => $issueIds])->andWhere(['>=', 'firstDetected', $at])->column();
+        $recurred = IssueEventRecord::find()
+            ->select(['issueId'])
+            ->distinct()
+            ->where(['issueId' => $issueIds, 'type' => IssueEventType::RECURRED->value])
+            ->andWhere(['>=', 'dateCreated', $at])
+            ->column();
+
+        $ids = array_values(array_unique(array_map('intval', [...$first, ...$recurred])));
+        sort($ids);
+
+        return $ids;
+    }
+
+    /**
+     * Why an issue in this status cannot be repaired, or null where it can.
+     */
+    public static function repairRefusal(IssueStatus $status): ?string
+    {
+        return match (true) {
+            $status === IssueStatus::REPAIRING => Craft::t('web-doctor', 'This issue is already being repaired. Wait for that repair to finish.'),
+            $status === IssueStatus::RESOLVED => Craft::t('web-doctor', 'This issue is resolved, so there is nothing to repair.'),
+            $status->isDismissal() => Craft::t('web-doctor', 'This issue is set to “{status}”, which is a decision not to act on it. Change its status first if that decision no longer stands.', [
+                'status' => $status->label(),
+            ]),
+            default => null,
+        };
+    }
+
+    /**
      * The issues matching a filter, one page of them.
      */
-    public function find(IssueFilter $filter): IssueList
+    public function find(IssueFilter $filter): ListPage
     {
         $query = $this->filtered($filter);
         $total = (int)$query->count();
@@ -374,7 +628,7 @@ class Issues extends Component
             }
         }
 
-        return new IssueList(issues: $issues, total: $total, filter: $filter);
+        return new ListPage(items: $issues, total: $total, filter: $filter);
     }
 
     public function get(int $id): ?Issue
@@ -532,13 +786,7 @@ class Issues extends Component
      */
     public function knownEnvironments(): array
     {
-        $rows = IssueRecord::find()
-            ->select(['environment'])
-            ->distinct()
-            ->orderBy(['environment' => SORT_ASC])
-            ->column();
-
-        return array_values(array_filter(array_map('strval', $rows), static fn(string $e): bool => $e !== ''));
+        return QueryParams::choicesIn(IssueRecord::tableName(), 'environment');
     }
 
     /**
@@ -599,7 +847,7 @@ class Issues extends Component
         }
 
         // "No particular site" is its own place, as it is in the filter.
-        $query->andWhere($this->place($siteId));
+        $query->andWhere(SiteName::place($siteId));
 
         if ($exceptRunId !== null) {
             $query->andWhere(['or', ['latestRunId' => null], ['not', ['latestRunId' => $exceptRunId]]]);
@@ -627,18 +875,6 @@ class Issues extends Component
     }
 
     /**
-     * The issues recorded about one site, or about no particular site. The second means never
-     * associated with one: a deleted site's issues also have a null siteId, and the siteName they
-     * kept is what tells the two apart.
-     *
-     * @return array<string, int|null>
-     */
-    private function place(?int $siteId): array
-    {
-        return $siteId === null ? ['siteId' => null, 'siteName' => null] : ['siteId' => $siteId];
-    }
-
-    /**
      * Applies a filter to a query. Every value arrives already checked against something that
      * knows the answers, so nothing here has to guess what it was handed.
      */
@@ -659,7 +895,7 @@ class Issues extends Component
         }
 
         if ($filter->withoutSite || $filter->siteId !== null) {
-            $query->andWhere($this->place($filter->withoutSite ? null : $filter->siteId));
+            $query->andWhere(SiteName::place($filter->withoutSite ? null : $filter->siteId));
         }
 
         if ($filter->environment !== null) {
@@ -670,11 +906,11 @@ class Issues extends Component
         // two are converted rather than compared as strings, or "today" would mean a window
         // offset by the server's distance from the reader for half of every day.
         if ($filter->detectedFrom !== null) {
-            $query->andWhere(['>=', 'lastDetected', $this->localDayBoundary($filter->detectedFrom, '00:00:00')]);
+            $query->andWhere(['>=', 'lastDetected', QueryParams::localDayStart($filter->detectedFrom)]);
         }
 
         if ($filter->detectedTo !== null) {
-            $query->andWhere(['<=', 'lastDetected', $this->localDayBoundary($filter->detectedTo, '23:59:59')]);
+            $query->andWhere(['<=', 'lastDetected', QueryParams::localDayEnd($filter->detectedTo)]);
         }
 
         return $query;
@@ -734,41 +970,23 @@ class Issues extends Component
     private function applyFinding(IssueRecord $record, DiagnosticResult $result, DiagnosticRun $run, string $detectedAt): void
     {
         $record->diagnosticId = $result->diagnosticId;
-        $record->diagnosticName = $this->fit($result->name !== '' ? $result->name : $result->diagnosticId, 255);
+        $record->diagnosticName = Text::fit($result->name !== '' ? $result->name : $result->diagnosticId, 255);
         $record->category = $result->category->value;
         $record->title = $this->title($result);
         $record->description = $result->description !== '' ? $result->description : null;
         $record->recommendation = $result->recommendation;
         $record->severity = $result->severity()->value;
         $record->resultStatus = $result->status->value;
-        $record->environment = $this->fit($run->context->environment, 255);
+        $record->environment = Text::fit($run->context->environment, 255);
         $record->siteId = $run->context->siteId;
-        $record->siteName = $this->siteName($run->context->siteId);
-        $record->affectedComponent = $this->fit($result->affectedComponent, 255);
-        $record->affectedPlugin = $this->fit($result->affectedPlugin, 255);
+        $record->siteName = SiteName::of($run->context->siteId);
+        $record->affectedComponent = Text::fit($result->affectedComponent, 255);
+        $record->affectedPlugin = Text::fit($result->affectedPlugin, 255);
         $record->latestResult = $this->snapshot($result);
         $record->latestRunId = $run->id();
         $record->lastDetected = $detectedAt;
     }
 
-    /**
-     * The site's name now, kept against the issue so that deleting the site — which nulls the
-     * reference — leaves a finding that still says which site it was about.
-     */
-    private function siteName(?int $siteId): ?string
-    {
-        if ($siteId === null) {
-            return null;
-        }
-
-        try {
-            return $this->fit(Craft::$app->getSites()->getSiteById($siteId)?->getName(), 255);
-        } catch (Throwable $e) {
-            SafeException::log('A site\'s name could not be read for an issue', $e);
-
-            return null;
-        }
-    }
 
     /**
      * What the issue is called: the one line the check wrote for a person, or its own name where
@@ -782,7 +1000,7 @@ class Issues extends Component
             $title = $result->name !== '' ? $result->name : $result->diagnosticId;
         }
 
-        return $this->fit($title, 255) ?? $result->diagnosticId;
+        return Text::fit($title, 255);
     }
 
     /**
@@ -831,9 +1049,55 @@ class Issues extends Component
      * Where evidence is kept. Resolved on first use, so an Issues built before the plugin finished
      * booting still ends up with the plugin's store rather than one of its own.
      */
+    /**
+     * The plugin's audit trail, or the one injected; never a second, unconfigured one.
+     *
+     * @throws InvalidConfigException
+     */
+    private function auditTrail(): Audit
+    {
+        return $this->audit ??= WebDoctor::getInstance()?->getAudit() ?? throw new InvalidConfigException('The Issue Center needs the audit trail, and Web Doctor is not installed to provide it.');
+    }
+
     private function evidenceStore(): EvidenceStore
     {
-        return $this->evidence ??= WebDoctor::getInstance()?->getEvidence() ?? new EvidenceStore();
+        return $this->evidence ??= WebDoctor::getInstance()?->getEvidence() ?? throw new InvalidConfigException('The Issue Center needs the evidence store, and Web Doctor is not installed to provide it.');
+    }
+
+    /**
+     * Where an issue stands, read strictly. A status this version does not know is not read as new or
+     * as anything else: whatever was about to act on the issue stops, inside its transaction, so
+     * nothing is decided on a status nobody can read.
+     *
+     * @throws RuntimeException
+     */
+    private function statusOf(IssueRecord $record): IssueStatus
+    {
+        return IssueStatus::tryFrom((string)$record->status)
+            ?? throw new RuntimeException(sprintf('Issue %d has a status that cannot be read, so it was not changed.', (int)$record->id));
+    }
+
+    /**
+     * Records a change to an issue in the audit trail, inside the transaction making the change, so
+     * the two stand or fall together.
+     *
+     * @param array<string, mixed> $details
+     */
+    private function audit(IssueRecord $record, AuditAction $action, AuditResult $result, string $summary, array $details): void
+    {
+        $this->auditTrail()->record(
+            $action,
+            $result,
+            $summary,
+            AuditObjectType::ISSUE,
+            (string)$record->id,
+            $record->title,
+            (int)$record->id,
+            $record->environment,
+            $record->siteId === null ? null : (int)$record->siteId,
+            $details + ['diagnosticId' => $record->diagnosticId],
+            $record->siteName,
+        );
     }
 
     /**
@@ -875,41 +1139,5 @@ class Issues extends Component
                 Redaction::redactString(json_encode($record->getErrors()) ?: 'unknown error'),
             ));
         }
-    }
-
-    /**
-     * A moment as the database stores it: UTC, in Craft's own format. Formatting the object as
-     * it stands would write the server's local time into a column everything else reads as UTC.
-     */
-    private function forDb(DateTimeInterface $when): string
-    {
-        return Db::prepareDateForDb($when) ?? Db::prepareDateForDb(new DateTimeImmutable()) ?? gmdate('Y-m-d H:i:s');
-    }
-
-    /**
-     * The start or end of a calendar day where the reader is, as a UTC timestamp.
-     */
-    private function localDayBoundary(string $date, string $time): string
-    {
-        try {
-            $moment = new DateTimeImmutable("$date $time", new DateTimeZone(Craft::$app->getTimeZone()));
-        } catch (Throwable) {
-            $moment = new DateTimeImmutable("$date $time", new DateTimeZone('UTC'));
-        }
-
-        return $this->forDb($moment);
-    }
-
-    /**
-     * Cuts a value to what its column holds. A title longer than the column is a truncated title,
-     * not a failed run.
-     */
-    private function fit(?string $value, int $length): ?string
-    {
-        if ($value === null) {
-            return null;
-        }
-
-        return mb_strlen($value) > $length ? mb_substr($value, 0, $length - 1) . '…' : $value;
     }
 }

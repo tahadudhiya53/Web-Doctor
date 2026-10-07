@@ -55,23 +55,14 @@
                     </select>
                 </div>
 
-                <label for="wd-filter-site">{{ "Site"|t('web-doctor') }}</label>
-                <div class="select fullwidth">
-                    <select id="wd-filter-site" name="siteId">
-                        <option value="">{{ "Any site"|t('web-doctor') }}</option>
-                        <option value="none"{{ filter.withoutSite ? ' selected' : '' }}>{{ "No particular site"|t('web-doctor') }}</option>
-                        {% for id, name in sites %}
-                            <option value="{{ id }}"{{ filter.siteId == id ? ' selected' : '' }}>{{ name }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
+                {{ shared.siteFilter('wd-filter-site', filter, sites) }}
 
                 <label for="wd-filter-environment">{{ "Environment"|t('web-doctor') }}</label>
                 <div class="select fullwidth">
                     <select id="wd-filter-environment" name="environment">
                         <option value="">{{ "Any environment"|t('web-doctor') }}</option>
                         {% for environment in environments %}
-                            <option value="{{ environment }}"{{ filter.environment == environment ? ' selected' : '' }}>{{ environment }}</option>
+                            <option value="{{ environment }}"{{ filter.environment == environment ? ' selected' : '' }}>{{ shared.plainText(environment) }}</option>
                         {% endfor %}
                     </select>
                 </div>
@@ -125,10 +116,10 @@
                     </tr>
                 </thead>
                 <tbody>
-                    {% for issue in issues.issues %}
+                    {% for issue in issues.items %}
                         <tr>
                             <td class="wd-col-narrow">
-                                <span class="wd-pill wd-pill--severity wd-pill--severity-{{ issue.severity.value }}">{{ issue.severity.label() }}</span>
+                                {{ shared.pill('wd-pill--severity wd-pill--severity-', issue.severity) }}
                             </td>
                             <td class="wd-col-detail">
                                 <div class="wd-result__name">
@@ -136,43 +127,24 @@
                                 </div>
                                 <div class="wd-result__id">
                                     <code>{{ issue.diagnosticId }}</code>
-                                    &middot; {{ issue.category.label() }}
-                                    &middot; {{ issue.environment }}
+                                    &middot; {{ shared.label(issue.category) }}
+                                    &middot; {{ shared.text(issue.environment) }}
                                     {%- if issue.affectedPlugin %} &middot; {{ shared.text(issue.affectedPlugin) }}{% endif %}
                                 </div>
                             </td>
                             <td class="wd-col-narrow">
-                                <span class="wd-pill wd-pill--issue-{{ issue.status.value }}">{{ issue.status.label() }}</span>
+                                {{ shared.pill('wd-pill--issue-', issue.status) }}
                             </td>
                             <td class="wd-col-narrow">{{ issue.occurrences }}</td>
-                            <td class="wd-col-narrow">{{ issue.firstDetected|datetime('short') }}</td>
-                            <td class="wd-col-narrow">{{ issue.lastDetected|datetime('short') }}</td>
+                            <td class="wd-col-narrow">{{ shared.when(issue.firstDetected) }}</td>
+                            <td class="wd-col-narrow">{{ shared.when(issue.lastDetected) }}</td>
                         </tr>
                     {% endfor %}
                 </tbody>
             </table>
             </div>
 
-            <div class="wd-pager">
-                <p class="light">
-                    {{ "Showing {first}–{last} of {total}."|t('web-doctor', {
-                        first: issues.firstPosition(),
-                        last: issues.lastPosition(),
-                        total: issues.total,
-                    }) }}
-                </p>
-                {% if issues.hasPages() %}
-                    <nav class="wd-pager__links" aria-label="{{ "Pagination"|t('web-doctor') }}">
-                        {% if issues.hasPreviousPage() %}
-                            <a class="btn" href="{{ cpUrl('web-doctor/issues', filter.onPage(issues.currentPage() - 1).toParams()) }}">{{ "Previous"|t('web-doctor') }}</a>
-                        {% endif %}
-                        <span class="light">{{ "Page {page} of {pages}"|t('web-doctor', { page: issues.currentPage(), pages: issues.pageCount() }) }}</span>
-                        {% if issues.hasNextPage() %}
-                            <a class="btn" href="{{ cpUrl('web-doctor/issues', filter.onPage(issues.currentPage() + 1).toParams()) }}">{{ "Next"|t('web-doctor') }}</a>
-                        {% endif %}
-                    </nav>
-                {% endif %}
-            </div>
+            {{ shared.pager(issues, 'web-doctor/issues', filter) }}
         </div>
     {% endif %}
 {% endif %}

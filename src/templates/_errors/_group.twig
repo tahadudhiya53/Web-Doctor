@@ -17,13 +17,17 @@
 
     <p class="light">{{ "This is a record of what happened, not a diagnosis: an error a check ran into is where to start looking, not necessarily the cause of anything."|t('web-doctor') }}</p>
 
+    {% if group.unreadable|length %}
+        <p class="warning">{{ "Part of this error’s record could not be read, so it is shown as unreadable rather than as anything else:"|t('web-doctor') }} {{ group.unreadable|join(', ') }}</p>
+    {% endif %}
+
     <dl class="wd-meta">
-        <div><dt>{{ "Error type"|t('web-doctor') }}</dt><dd><code>{{ group.exceptionClass }}</code></dd></div>
+        <div><dt>{{ "Error type"|t('web-doctor') }}</dt><dd><code>{{ shared.text(group.exceptionClass) }}</code></dd></div>
         <div><dt>{{ "Times seen"|t('web-doctor') }}</dt><dd>{{ group.occurrences }}</dd></div>
-        <div><dt>{{ "First seen"|t('web-doctor') }}</dt><dd>{{ group.firstSeen|datetime('short') }}</dd></div>
-        <div><dt>{{ "Last seen"|t('web-doctor') }}</dt><dd>{{ group.lastSeen|datetime('short') }}</dd></div>
-        <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ group.environment }}</dd></div>
-        <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ siteLabel }}</dd></div>
+        <div><dt>{{ "First seen"|t('web-doctor') }}</dt><dd>{{ shared.when(group.firstSeen) }}</dd></div>
+        <div><dt>{{ "Last seen"|t('web-doctor') }}</dt><dd>{{ shared.when(group.lastSeen) }}</dd></div>
+        <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ shared.text(group.environment) }}</dd></div>
+        <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ shared.text(siteLabel) }}</dd></div>
         {% if canViewEvidence %}
             <div><dt>{{ "Thrown at"|t('web-doctor') }}</dt><dd><code>{{ shared.text(group.origin) }}</code></dd></div>
         {% endif %}
@@ -88,14 +92,14 @@
                         <div class="wd-result__name">{{ shared.text(source.diagnosticName) }}</div>
                         <div class="wd-result__id"><code>{{ source.diagnosticId }}</code></div>
                     </td>
-                    <td class="wd-col-narrow"><span class="wd-pill wd-pill--{{ source.lastStatus.value }}">{{ source.lastStatus.label() }}</span></td>
+                    <td class="wd-col-narrow">{{ shared.pill('wd-pill--', source.lastStatus) }}</td>
                     <td class="wd-col-narrow">{{ source.occurrences }}</td>
-                    <td class="wd-col-narrow">{{ source.firstSeen|datetime('short') }}</td>
-                    <td class="wd-col-narrow">{{ source.lastSeen|datetime('short') }}</td>
+                    <td class="wd-col-narrow">{{ shared.when(source.firstSeen) }}</td>
+                    <td class="wd-col-narrow">{{ shared.when(source.lastSeen) }}</td>
                     <td>
                         {% if relatedIssue %}
                             <a href="{{ cpUrl('web-doctor/issues/' ~ relatedIssue.id) }}">{{ shared.text(relatedIssue.title) }}</a>
-                            <span class="wd-pill wd-pill--issue-{{ relatedIssue.status.value }}">{{ relatedIssue.status.label() }}</span>
+                            {{ shared.pill('wd-pill--issue-', relatedIssue.status) }}
                         {% else %}
                             <span class="light">{{ "None"|t('web-doctor') }}</span>
                         {% endif %}

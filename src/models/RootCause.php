@@ -4,15 +4,14 @@ namespace Tahadudhiya\WebDoctor\models;
 
 use Craft;
 use DateTimeImmutable;
-use DateTimeZone;
 use JsonSerializable;
 use Tahadudhiya\WebDoctor\enums\ConditionRole;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
 use Tahadudhiya\WebDoctor\records\RootCauseRecord;
 use Tahadudhiya\WebDoctor\rules\RootCauseRule;
 use Tahadudhiya\WebDoctor\rules\RootCauseRules;
-use Throwable;
 
 /**
  * A cause that could explain a problem, how firmly it is held, and every reason for that.
@@ -63,7 +62,7 @@ final class RootCause implements JsonSerializable
         string $title,
         string $statement,
         string $problem,
-        public readonly Confidence $confidence,
+        public readonly ?Confidence $confidence,
         public readonly array $conditions,
         array $reasoning,
         public readonly array $relatedIssues,
@@ -74,6 +73,7 @@ final class RootCause implements JsonSerializable
         public readonly ?int $id = null,
         public readonly ?int $investigationId = null,
         public readonly ?DateTimeImmutable $recordedAt = null,
+        public readonly array $unreadable = [],
     ) {
         $this->title = Redaction::redactString($title);
         $this->statement = Redaction::redactString($statement);
@@ -163,8 +163,8 @@ final class RootCause implements JsonSerializable
      */
     public static function compare(self $a, self $b): int
     {
-        return [$b->confidence->rank(), $a->against(), $b->found(), $a->ruleId]
-            <=> [$a->confidence->rank(), $b->against(), $a->found(), $b->ruleId];
+        return [$b->confidence?->rank() ?? -1, $a->against(), $b->found(), $a->ruleId]
+            <=> [$a->confidence?->rank() ?? -1, $b->against(), $a->found(), $b->ruleId];
     }
 
     /**
@@ -241,12 +241,41 @@ final class RootCause implements JsonSerializable
     public static function fromRecord(RootCauseRecord $record): self
     {
         $conditions = [];
+        $unreadable = [];
 
-        foreach (['supporting' => ConditionRole::SUPPORTING, 'conflicting' => ConditionRole::CONTRADICTING, 'unmet' => ConditionRole::SUPPORTING] as $column => $fallback) {
+        foreach (['supporting', 'conflicting', 'unmet'] as $column) {
+            if (!self::readable($record->$column)) {
+                $unreadable[] = $column;
+
+                continue;
+            }
+
             foreach (self::decode($record->$column) as $stored) {
-                if (is_array($stored)) {
-                    $conditions[] = ConditionOutcome::fromArray($stored, $fallback);
+                $outcome = is_array($stored) ? ConditionOutcome::fromArray($stored) : null;
+
+                if ($outcome === null) {
+                    $unreadable[] = $column;
+
+                    continue;
                 }
+
+                $conditions[] = $outcome;
+            }
+        }
+
+        // Each in the shape it was written: related issues by numeric ID, reasoning and next steps as
+        // lines of text. Anything else is named rather than filtered down to what fits.
+        $shapes = [
+            'relatedIssues' => static fn(mixed $i): bool => is_array($i) && is_int($i['id'] ?? null),
+            'reasoning' => 'is_string',
+            'nextSteps' => 'is_string',
+        ];
+
+        foreach ($shapes as $column => $fits) {
+            $items = self::readable($record->$column) ? self::decode($record->$column) : null;
+
+            if ($items === null || !array_is_list($items) || count(array_filter($items, $fits)) !== count($items)) {
+                $unreadable[] = $column;
             }
         }
 
@@ -262,12 +291,14 @@ final class RootCause implements JsonSerializable
             }
         }
 
-        $confidence = Confidence::tryFrom((string)$record->confidence);
-        $confidence = $confidence !== null && in_array($confidence, self::LADDER, true) ? $confidence : Confidence::POSSIBLE;
+        $stored = Confidence::tryFrom((string)$record->confidence);
+        // A confidence this version does not have, or one off the ladder, is not read as possible:
+        // it is unreadable, and the cause is not acted on.
+        $confidence = $stored !== null && in_array($stored, self::LADDER, true) ? $stored : null;
         // A row is data, and data can say anything: a cause read back is held to its rule's
         // ceiling as firmly as one just weighed. A rule removed since has no ceiling to apply.
         $rule = self::ruleOf((string)$record->ruleId);
-        $confidence = $rule === null ? $confidence : self::capped($confidence, $rule->ceiling);
+        $confidence = $rule === null || $confidence === null ? $confidence : self::capped($confidence, $rule->ceiling);
 
         // And confirmed only as it could have been reached: a rule that can confirm, an outcome
         // stored as confirming it, and nothing stored against it. Otherwise it was never earned.
@@ -295,7 +326,11 @@ final class RootCause implements JsonSerializable
             position: (int)$record->position,
             id: (int)$record->id,
             investigationId: (int)$record->investigationId,
-            recordedAt: self::time($record->dateCreated),
+            recordedAt: StoredTime::read($record->dateCreated),
+            // A confidence held lower than stored — above its rule's ceiling, or confirmed without
+            // what confirms it — is a row that does not say what could have been concluded: it is
+            // shown at what it could be, and said not to be readable as written.
+            unreadable: array_values(array_unique([...$unreadable, ...($confidence === null || $confidence !== $stored ? ['confidence'] : [])])),
         );
     }
 
@@ -311,7 +346,7 @@ final class RootCause implements JsonSerializable
             'title' => $this->title,
             'statement' => $this->statement,
             'problem' => $this->problem,
-            'confidence' => $this->confidence->value,
+            'confidence' => $this->confidence?->value,
             'supporting' => $outcomes($this->supporting()),
             'conflicting' => $outcomes($this->conflicting()),
             'unmet' => $outcomes($this->unmet()),
@@ -374,6 +409,12 @@ final class RootCause implements JsonSerializable
     /**
      * @return array<array-key, mixed>
      */
+    /** Whether a stored JSON column holds what was written: nothing, or a structure. */
+    private static function readable(?string $json): bool
+    {
+        return $json === null || $json === '' || is_array(json_decode($json, true));
+    }
+
     private static function decode(?string $json): array
     {
         if ($json === null || $json === '') {
@@ -383,18 +424,5 @@ final class RootCause implements JsonSerializable
         $decoded = json_decode($json, true);
 
         return is_array($decoded) ? $decoded : [];
-    }
-
-    private static function time(?string $value): ?DateTimeImmutable
-    {
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        try {
-            return new DateTimeImmutable($value, new DateTimeZone('UTC'));
-        } catch (Throwable) {
-            return null;
-        }
     }
 }

@@ -492,7 +492,7 @@ class InstallationDiagnosticsTest extends TestCase
 
             public bool $pathsThrow = false;
 
-            protected function paths(): array
+            public function paths(): array
             {
                 if ($this->pathsThrow) {
                     throw new RuntimeException('No storage path configured');
@@ -506,7 +506,7 @@ class InstallationDiagnosticsTest extends TestCase
                 ];
             }
 
-            protected function stateOf(string $path): string
+            public function stateOf(string $path): string
             {
                 return $this->states[$path] ?? 'writable';
             }
@@ -647,6 +647,14 @@ class InstallationDiagnosticsTest extends TestCase
 
                 return $base . '/locked/runtime';
             }, 'unknown'],
+            // The same, further up: one directory that cannot be entered hides everything below it.
+            'a directory two levels inside one that cannot be entered' => [static function(string $base): string {
+                mkdir($base . '/locked/runtime/compiled', 0o755, true);
+                chmod($base . '/locked', 0o644);
+
+                return $base . '/locked/runtime/compiled';
+            }, 'unknown'],
+            'a directory below one that is not there either' => [static fn(string $base): string => $base . '/not-here/deeper', 'missing'],
         ];
     }
 
@@ -675,6 +683,7 @@ class InstallationDiagnosticsTest extends TestCase
             self::assertSame($expected, $diagnostic->state($path($base)));
         } finally {
             @chmod($base . '/locked', 0o755);
+            @rmdir($base . '/locked/runtime/compiled');
             @rmdir($base . '/locked/runtime');
             @rmdir($base . '/locked');
             @unlink($base . '/occupied');

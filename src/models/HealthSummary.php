@@ -103,19 +103,6 @@ final class HealthSummary implements JsonSerializable
         );
     }
 
-    public function countOf(DiagnosticStatus $status): int
-    {
-        return $this->counts[$status->value] ?? 0;
-    }
-
-    /**
-     * How many results needing attention carried this severity.
-     */
-    public function countOfSeverity(Severity $severity): int
-    {
-        return $this->severityCounts[$severity->value] ?? 0;
-    }
-
     /**
      * @return array<string, mixed>
      */

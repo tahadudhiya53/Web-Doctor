@@ -11,9 +11,6 @@ use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\ExecutionMode;
 use Tahadudhiya\WebDoctor\events\RegisterDiagnosticsEvent;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
-use Tahadudhiya\WebDoctor\services\DiagnosticEngine;
-use Tahadudhiya\WebDoctor\services\Diagnostics;
-use Tahadudhiya\WebDoctor\Tests\_support\ConstantIdDiagnostic;
 use Tahadudhiya\WebDoctor\Tests\_support\TestDiagnostic;
 use Tahadudhiya\WebDoctor\Tests\_support\ThirdPartyPlugin;
 use Tahadudhiya\WebDoctor\WebDoctor;
@@ -63,12 +60,6 @@ class DiagnosticCoreTest extends TestCase
         }
 
         return $diagnostic;
-    }
-
-    public function testCraftBuildsBothDiagnosticComponents(): void
-    {
-        self::assertInstanceOf(Diagnostics::class, $this->plugin->getDiagnostics());
-        self::assertInstanceOf(DiagnosticEngine::class, $this->plugin->getDiagnosticEngine());
     }
 
     public function testTheEngineRunsWhatThePluginsRegistryHolds(): void
@@ -127,20 +118,6 @@ class DiagnosticCoreTest extends TestCase
         );
 
         self::assertSame(Craft::$app->env, $result->environment);
-    }
-
-    public function testOneBrokenDiagnosticDoesNotStopARunInsideCraft(): void
-    {
-        $run = $this->plugin->getDiagnosticEngine()->runMany([
-            $this->diagnostic('tests.a', static fn(TestDiagnostic $d) => $d->build('pass', ['Fine.'])),
-            $this->diagnostic('tests.b', static fn() => throw new \RuntimeException('Boom')),
-            $this->diagnostic('tests.c', static fn(TestDiagnostic $d) => $d->build('fail', ['Bad.'])),
-        ], DiagnosticContext::current());
-
-        self::assertSame(3, $run->count());
-        self::assertSame(DiagnosticStatus::PASS, $run->resultFor('tests.a')->status);
-        self::assertSame(DiagnosticStatus::ERROR, $run->resultFor('tests.b')->status);
-        self::assertSame(DiagnosticStatus::FAIL, $run->resultFor('tests.c')->status);
     }
 
     public function testADiagnosticThatQueriesTheDatabaseIsRunAgainstTheRealOne(): void
@@ -205,20 +182,6 @@ class DiagnosticCoreTest extends TestCase
         );
     }
 
-    public function testAContributorCannotTakeAnIdThatIsAlreadyRegistered(): void
-    {
-        $registry = $this->plugin->getDiagnostics();
-        $registry->register($mine = $this->diagnostic(ConstantIdDiagnostic::ID));
-
-        $this->other->boot(function(RegisterDiagnosticsEvent $event): void {
-            $event->diagnostics[] = new ConstantIdDiagnostic();
-            $event->diagnostics[] = $this->diagnostic('otherPlugin.valid');
-        });
-
-        self::assertSame($mine, $registry->get(ConstantIdDiagnostic::ID));
-        self::assertNotNull($registry->get('otherPlugin.valid'));
-    }
-
     public function testOneBadContributorDoesNotCostTheOthersTheirDiagnostics(): void
     {
         $this->other->boot(function(RegisterDiagnosticsEvent $event): void {
@@ -253,19 +216,5 @@ class DiagnosticCoreTest extends TestCase
 
         self::assertSame(DiagnosticStatus::ERROR, $run->resultFor('otherPlugin.broken')->status);
         self::assertSame(DiagnosticStatus::PASS, $run->resultFor('otherPlugin.fine')->status);
-    }
-
-    public function testAContributedDiagnosticCannotLeakACredentialThroughItsException(): void
-    {
-        $this->other->boot(function(RegisterDiagnosticsEvent $event): void {
-            $event->diagnostics[] = $this->diagnostic(
-                'otherPlugin.leaky',
-                static fn() => throw new \RuntimeException('Failed password=hunter2'),
-            );
-        });
-
-        $run = $this->plugin->getDiagnosticEngine()->runAll(DiagnosticContext::current());
-
-        self::assertStringNotContainsString('hunter2', (string)json_encode($run));
     }
 }

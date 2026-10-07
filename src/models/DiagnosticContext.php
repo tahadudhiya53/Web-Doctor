@@ -4,6 +4,7 @@ namespace Tahadudhiya\WebDoctor\models;
 
 use Craft;
 use craft\console\Application as ConsoleApplication;
+use craft\errors\SiteNotFoundException;
 use craft\helpers\StringHelper;
 use DateTimeImmutable;
 use JsonSerializable;
@@ -86,13 +87,14 @@ final class DiagnosticContext implements JsonSerializable
      * A console command, a queue job and an application still booting can all reach this with
      * no current site, and Craft throws rather than guessing. A run with no site says so with a
      * null, which is a fact a diagnostic can act on; inventing a site ID would produce findings
-     * attributed to a site nobody was looking at.
+     * attributed to a site nobody was looking at. Only Craft saying there is no site is read that
+     * way: any other failure is not a fact about the site, and is not turned into "no site".
      */
     public static function currentSiteId(): ?int
     {
         try {
             return Craft::$app->getSites()->getCurrentSite()->id;
-        } catch (\Throwable) {
+        } catch (SiteNotFoundException) {
             return null;
         }
     }

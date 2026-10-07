@@ -664,7 +664,14 @@ final class RootCauseRules
                     continue;
                 }
 
-                $at = ($evidence->observedAt ?? $evidence->recordedAt)->getTimestamp();
+                $moment = $evidence->observedAt ?? $evidence->recordedAt;
+
+                // A deployment whose moment cannot be read cannot be placed before the issue.
+                if ($moment === null) {
+                    continue;
+                }
+
+                $at = $moment->getTimestamp();
 
                 if ($at <= $first && $first - $at <= self::DEPLOYED_WITHIN) {
                     $out[] = $case->observeEvidence($evidence, $result);

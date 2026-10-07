@@ -36,6 +36,32 @@ final class SafeException implements JsonSerializable
     public readonly string $origin;
 
     /**
+     * A class's name without its namespace, as a reader is told what kind of thing went wrong.
+     */
+    public static function shortName(string $class): string
+    {
+        $slash = strrpos($class, '\\');
+
+        return $slash === false ? $class : substr($class, $slash + 1);
+    }
+
+    /**
+     * What kind of exception this is, by its short class name — the whole of what a reader is told
+     * where its message could quote SQL that redaction leaves. An anonymous class is named by what it
+     * extends, since its own name holds the path of the file that declared it.
+     */
+    public static function kind(Throwable $exception): string
+    {
+        $class = $exception::class;
+
+        if (str_contains($class, '@anonymous')) {
+            $class = get_parent_class($exception) ?: 'Exception';
+        }
+
+        return self::shortName($class);
+    }
+
+    /**
      * @param list<array{class: string, message: string}> $previous The redacted chain behind it.
      * @param list<string> $frames Where it came from, bounded.
      */

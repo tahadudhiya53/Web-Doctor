@@ -4,11 +4,13 @@ namespace Tahadudhiya\WebDoctor\services;
 
 use Craft;
 use craft\console\Application as ConsoleApplication;
-use craft\helpers\Db;
 use DateTimeImmutable;
 use DateTimeInterface;
 use RuntimeException;
 use Tahadudhiya\WebDoctor\base\DiagnosticInterface;
+use Tahadudhiya\WebDoctor\enums\AuditAction;
+use Tahadudhiya\WebDoctor\enums\AuditObjectType;
+use Tahadudhiya\WebDoctor\enums\AuditResult;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\ExecutionMode;
@@ -17,6 +19,10 @@ use Tahadudhiya\WebDoctor\enums\InvestigationStepType;
 use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Fingerprint;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\Retention;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
+use Tahadudhiya\WebDoctor\helpers\StoredTime;
+use Tahadudhiya\WebDoctor\helpers\Text;
 use Tahadudhiya\WebDoctor\models\CorrelationCase;
 use Tahadudhiya\WebDoctor\models\DiagnosticContext;
 use Tahadudhiya\WebDoctor\models\DiagnosticResult;
@@ -100,6 +106,9 @@ class Investigations extends Component
     /** @var Recipes|null Where recipes are looked up; the plugin's unless set. */
     public ?Recipes $recipes = null;
 
+    /** @var Audit|null Where an investigation's start and end are recorded; the plugin's unless set. */
+    public ?Audit $audit = null;
+
     /**
      * @var string|null The environment this installation is running as. Craft's answer unless set,
      * which a test does so that an issue recorded under its own environment can be investigated.
@@ -115,7 +124,7 @@ class Investigations extends Component
 
         return InvestigationPlan::build(
             $issue->diagnosticId,
-            $issue->category,
+            $issue->category ?? throw new Refusal((string)$issue->integrityRefusal()),
             $issue->affectedPlugin,
             $this->registry()->all(),
             $depth,
@@ -142,6 +151,10 @@ class Investigations extends Component
      */
     public function refusal(Issue $issue): ?string
     {
+        if (!$issue->isIntact()) {
+            return $issue->integrityRefusal();
+        }
+
         $here = $this->environment();
 
         if ($issue->environment !== $here) {
@@ -153,7 +166,7 @@ class Investigations extends Component
 
         // Craft soft-deletes sites, so the foreign key that nulls the reference rarely fires: a
         // site in the trash still has its ID on the issue, and has to be asked about.
-        if (($issue->siteId === null && $issue->siteName !== null) || ($issue->siteId !== null && !$this->siteExists($issue->siteId))) {
+        if (SiteName::isGone($issue->siteId, $issue->siteName)) {
             return Craft::t('web-doctor', 'The site this issue was found on, “{site}”, has been deleted, so there is nothing left to investigate it against.', [
                 'site' => $issue->siteName ?? '#' . $issue->siteId,
             ]);
@@ -238,8 +251,20 @@ class Investigations extends Component
      */
     private function conduct(?Issue $issue, ?Recipe $recipe, InvestigationPlan $plan, DiagnosticContext $context, ?int $userId): Investigation
     {
+        // Every dependency is resolved before anything is written, so one that is missing stops the
+        // investigation before it exists rather than leaving it running.
+        $this->auditTrail();
+        $this->engine();
+        $this->issues();
+        $this->errors();
+        $this->rootCauses();
+
         $record = $this->begin($issue, $recipe, $plan, $context, $userId);
         $position = 0;
+        $this->auditInvestigation($record, $issue, $recipe, AuditAction::INVESTIGATION_STARTED, AuditResult::NONE, Craft::t('web-doctor', 'Started at {depth} depth: {count, plural, =0{no checks} =1{1 check} other{# checks}} planned.', [
+            'depth' => $plan->depth->value,
+            'count' => count($plan->checks),
+        ]), ['depth' => $plan->depth->value, 'checksPlanned' => count($plan->checks)]);
 
         // Everything after the record exists is inside this, its first two steps included: an
         // attempt that has been written down must end as something other than "running".
@@ -271,6 +296,21 @@ class Investigations extends Component
             $this->fail($record, $position, $context, $e);
         }
 
+        $status = InvestigationStatus::tryFrom((string)$record->status);
+        $this->auditInvestigation($record, $issue, $recipe, AuditAction::INVESTIGATION_COMPLETED, self::endingResult($status), Craft::t('web-doctor', '{status}: {run} of {planned} checks ran, {problems, plural, =0{none reporting a problem} =1{1 reporting a problem} other{# reporting a problem}}.', [
+            'status' => $status?->label() ?? Craft::t('web-doctor', 'Could not be read'),
+            'run' => (int)$record->checksRun,
+            'planned' => (int)$record->checksPlanned,
+            'problems' => (int)$record->checksWithProblems,
+        ]), array_filter([
+            'status' => $status?->value,
+            'checksRun' => (int)$record->checksRun,
+            'checksWithProblems' => (int)$record->checksWithProblems,
+            'checksIncomplete' => (int)$record->checksIncomplete,
+            'relatedIssues' => (int)$record->relatedIssues,
+            'durationMs' => $record->durationMs === null ? null : round((float)$record->durationMs, 1),
+        ], static fn(mixed $value): bool => $value !== null && $value !== 0));
+
         if ($issue !== null) {
             $this->prune(['issueId' => $issue->id], $this->maxPerIssue);
         } else {
@@ -278,6 +318,43 @@ class Investigations extends Component
         }
 
         return Investigation::fromRecord($record);
+    }
+
+    /**
+     * Records an investigation's start or end. Written on its own: the investigation is the record of
+     * itself, and a trail that cannot be written must not stop it.
+     *
+     * @param array<string, mixed> $details
+     */
+    /**
+     * How an investigation's ending is recorded in the audit trail. A status that cannot be read is
+     * not reported as an ending it may not have had.
+     */
+    public static function endingResult(?InvestigationStatus $status): AuditResult
+    {
+        return match ($status) {
+            InvestigationStatus::COMPLETED => AuditResult::SUCCEEDED,
+            InvestigationStatus::PARTIAL => AuditResult::PARTIAL,
+            InvestigationStatus::FAILED, InvestigationStatus::RUNNING => AuditResult::FAILED,
+            null => AuditResult::INCONCLUSIVE,
+        };
+    }
+
+    private function auditInvestigation(InvestigationRecord $record, ?Issue $issue, ?Recipe $recipe, AuditAction $action, AuditResult $result, string $summary, array $details): void
+    {
+        $this->auditTrail()->tryRecord(
+            $action,
+            $result,
+            $summary,
+            AuditObjectType::INVESTIGATION,
+            (string)$record->id,
+            $issue !== null ? $issue->title : $recipe?->title,
+            $issue?->id,
+            (string)$record->environment,
+            $record->siteId === null ? null : (int)$record->siteId,
+            $details + array_filter(['recipeId' => $record->recipeId]),
+            $issue?->siteName,
+        );
     }
 
     public function get(int $id): ?Investigation
@@ -399,7 +476,7 @@ class Investigations extends Component
         $record->siteId = $context->siteId;
         $record->startedBy = $userId;
         $record->checksPlanned = count($plan->checks);
-        $record->startedAt = $this->forDb($context->startedAt);
+        $record->startedAt = StoredTime::forDb($context->startedAt);
 
         $this->save($record);
 
@@ -422,13 +499,14 @@ class Investigations extends Component
         ErrorRecording|string $errors,
     ): void {
         $budget = $this->maxEvidence;
-        $raised = $this->issuesRaisedBy($run);
+        $raisedRead = $this->issuesRaisedBy($run);
+        $raised = $raisedRead ?? [];
 
         foreach ($run->results() as $result) {
             $evidence = array_slice($result->evidence(), 0, $budget);
             $raisedOn = $raised[$result->diagnosticId] ?? null;
 
-            $this->step($record, $position, InvestigationStepType::CHECKED, $result->finishedAt ?? new DateTimeImmutable(), [
+            $this->step($record, $position, InvestigationStepType::CHECKED, $result->finishedAt ?? $run->finishedAt, [
                 'diagnosticId' => $result->diagnosticId,
                 'diagnosticName' => $result->name !== '' ? $result->name : $result->diagnosticId,
                 'status' => $result->status->value,
@@ -496,8 +574,8 @@ class Investigations extends Component
             $this->step($record, $position, InvestigationStepType::RELATED_ISSUE, $now, [
                 'diagnosticId' => $nearby->diagnosticId,
                 'diagnosticName' => $nearby->diagnosticName,
-                'status' => $nearby->resultStatus->value,
-                'severity' => $nearby->severity->value,
+                'status' => $nearby->resultStatus?->value,
+                'severity' => $nearby->severity?->value,
                 'summary' => $nearby->title,
                 'note' => $this->relatedBecause($issue?->affectedPlugin, $nearby),
                 'relatedIssueId' => $nearby->id,
@@ -506,9 +584,17 @@ class Investigations extends Component
             $record->relatedIssues++;
         }
 
-        $weighed = $issue !== null
-            ? $this->weigh($issue, $run, $raised, $nearbyIssues)
-            : $this->weighLeading($run, $raised, $nearbyIssues);
+        $weighed = match (true) {
+            // Weighed without the issues the findings landed on, a cause's history would be missing
+            // and its absence read as "none fits": not weighed, and said.
+            $raisedRead === null => [
+                'causes' => [],
+                'summary' => null,
+                'note' => Craft::t('web-doctor', 'The issues the checks’ findings landed on could not be read, so the known causes were not weighed. The details are in Craft’s logs.'),
+            ],
+            $issue !== null => $this->weigh($issue, $run, $raised, $nearbyIssues),
+            default => $this->weighLeading($run, $raised, $nearbyIssues),
+        };
 
         $status = $record->checksIncomplete > 0 || $plan->missesOrigin() ? InvestigationStatus::PARTIAL : InvestigationStatus::COMPLETED;
         $finishedAt = new DateTimeImmutable();
@@ -528,7 +614,7 @@ class Investigations extends Component
             ]);
 
             $record->status = $status->value;
-            $record->finishedAt = $this->forDb($finishedAt);
+            $record->finishedAt = StoredTime::forDb($finishedAt);
             $record->durationMs = $this->elapsed($run->context, $finishedAt);
 
             $this->save($record);
@@ -568,10 +654,14 @@ class Investigations extends Component
 
         try {
             $known = $this->issues()->getMany(array_values(array_diff(array_unique(array_values($raised)), [$issue->id])));
+            $whole = array_filter([...array_values($known), ...$nearby], static fn(Issue $i): bool => $i->isIntact());
+            $leftOut = count($known) + count($nearby) - count($whole);
             $case = new CorrelationCase(
                 issue: IssueSnapshot::fromIssue($issue, $run->id()),
                 results: $run->results(),
-                issues: array_map(static fn(Issue $i): IssueSnapshot => IssueSnapshot::fromIssue($i, $run->id()), [...array_values($known), ...$nearby]),
+                // Only issues that can be read in full can be weighed; one that cannot says nothing
+                // reliable about when it appeared or how it stands.
+                issues: array_map(static fn(Issue $i): IssueSnapshot => IssueSnapshot::fromIssue($i, $run->id()), $whole),
                 issueIds: $raised,
                 environment: $run->context->environment,
                 siteId: $run->context->siteId,
@@ -591,6 +681,10 @@ class Investigations extends Component
                 $note .= ' ' . Craft::t('web-doctor', '{count, plural, =1{1 known cause could not be weighed} other{# known causes could not be weighed}}; the details are in Craft’s logs.', [
                     'count' => count($analysis->failed),
                 ]);
+            }
+
+            if ($leftOut > 0) {
+                $note .= ' ' . Craft::t('web-doctor', '{count, plural, =1{1 related issue could not be read in full and was} other{# related issues could not be read in full and were}} left out.', ['count' => $leftOut]);
             }
         } catch (Throwable $e) {
             SafeException::log('What an investigation found could not be weighed against the known causes', $e);
@@ -711,12 +805,12 @@ class Investigations extends Component
 
         $now = new DateTimeImmutable();
         $failure = Craft::t('web-doctor', 'The investigation stopped because of an unexpected {type}. The details are in Craft’s logs.', [
-            'type' => $this->kindOf($exception),
+            'type' => SafeException::kind($exception),
         ]);
 
         $record->status = ((int)$record->checksRun > 0 ? InvestigationStatus::PARTIAL : InvestigationStatus::FAILED)->value;
         $record->failure = $failure;
-        $record->finishedAt = $this->forDb($now);
+        $record->finishedAt = StoredTime::forDb($now);
         $record->durationMs = $this->elapsed($context, $now);
 
         // A save inside a transaction that was then rolled back left what it wrote marked as
@@ -741,9 +835,10 @@ class Investigations extends Component
      * by the fingerprint the Issue Center itself uses, so the two cannot disagree about which issue
      * a result belongs to.
      *
-     * @return array<string, int> Diagnostic ID to issue ID.
+     * @return array<string, int>|null Diagnostic ID to issue ID; null where they could not be read,
+     * which is not "none": what is weighed against them is then not weighed at all.
      */
-    private function issuesRaisedBy(DiagnosticRun $run): array
+    private function issuesRaisedBy(DiagnosticRun $run): ?array
     {
         $fingerprints = [];
 
@@ -760,7 +855,7 @@ class Investigations extends Component
             // failure if the reason is somewhere.
             SafeException::log('The issues an investigation\'s findings landed on could not be read', $e);
 
-            return [];
+            return null;
         }
 
         $out = [];
@@ -808,40 +903,9 @@ class Investigations extends Component
         ]);
     }
 
-    /**
-     * An exception's short class name. An anonymous class's name carries the path of the file it
-     * was declared in, so it is named by what it extends instead.
-     */
-    private function kindOf(Throwable $exception): string
-    {
-        $class = $exception::class;
-
-        if (str_contains($class, '@anonymous')) {
-            $class = get_parent_class($exception) ?: 'exception';
-        }
-
-        return substr($class, (int)strrpos('\\' . $class, '\\'));
-    }
-
     private function elapsed(DiagnosticContext $context, DateTimeInterface $until): float
     {
         return max(0.0, ((float)$until->format('U.u') - (float)$context->startedAt->format('U.u')) * 1000);
-    }
-
-    /**
-     * Whether a site is still there — enabled or not, but not in the trash.
-     */
-    private function siteExists(int $siteId): bool
-    {
-        try {
-            return Craft::$app->getSites()->getSiteById($siteId, true) !== null;
-        } catch (Throwable $e) {
-            // Refusing is the safe answer, but the reader is told the site has gone, so why it
-            // could not be looked up has to be recorded.
-            SafeException::log('Whether a site still exists could not be established', $e);
-
-            return false;
-        }
     }
 
     /**
@@ -867,16 +931,7 @@ class Investigations extends Component
     private function prune(array $of, int $limit): void
     {
         try {
-            $stale = InvestigationRecord::find()
-                ->select(['id'])
-                ->where($of)
-                ->orderBy(['startedAt' => SORT_DESC, 'id' => SORT_DESC])
-                ->offset($limit)
-                ->column();
-
-            if ($stale !== []) {
-                InvestigationRecord::deleteAll(['id' => $stale]);
-            }
+            Retention::keepNewest(InvestigationRecord::tableName(), $of, $limit);
         } catch (Throwable $e) {
             // Keeping one investigation too many is not worth losing the one just made.
             SafeException::log('Old investigations could not be removed', $e);
@@ -902,8 +957,8 @@ class Investigations extends Component
         $step->investigationId = (int)$investigation->id;
         $step->position = $position;
         $step->type = $type->value;
-        $step->diagnosticId = $this->fit($text($fields['diagnosticId'] ?? null), 100);
-        $step->diagnosticName = $this->fit($text($fields['diagnosticName'] ?? null), 255);
+        $step->diagnosticId = Text::fit($text($fields['diagnosticId'] ?? null), 100);
+        $step->diagnosticName = Text::fit($text($fields['diagnosticName'] ?? null), 255);
         $step->status = $fields['status'] ?? null;
         $step->severity = $fields['severity'] ?? null;
         $step->summary = $text($fields['summary'] ?? null);
@@ -915,7 +970,7 @@ class Investigations extends Component
         $step->evidenceCount = $fields['evidenceCount'] ?? count($evidence);
         $step->evidenceTruncated = count($evidence) < $step->evidenceCount;
         $step->durationMs = $fields['durationMs'] ?? null;
-        $step->occurredAt = $this->forDb($at);
+        $step->occurredAt = StoredTime::forDb($at);
 
         $this->save($step);
 
@@ -973,50 +1028,41 @@ class Investigations extends Component
         return $this->environment ?? DiagnosticContext::currentEnvironment();
     }
 
+    /**
+     * @throws InvalidConfigException
+     */
+    private function auditTrail(): Audit
+    {
+        return $this->audit ??= WebDoctor::getInstance()?->getAudit() ?? throw new InvalidConfigException('Investigations need the audit trail, and Web Doctor is not installed to provide it.');
+    }
+
     private function registry(): Diagnostics
     {
-        return $this->registry ??= WebDoctor::getInstance()?->getDiagnostics() ?? new Diagnostics();
+        return $this->registry ??= WebDoctor::getInstance()?->getDiagnostics() ?? throw new InvalidConfigException('Investigations need the diagnostics registry, and Web Doctor is not installed to provide it.');
     }
 
     private function engine(): DiagnosticEngine
     {
-        return $this->engine ??= WebDoctor::getInstance()?->getDiagnosticEngine() ?? new DiagnosticEngine(['registry' => $this->registry()]);
+        return $this->engine ??= WebDoctor::getInstance()?->getDiagnosticEngine() ?? throw new InvalidConfigException('Investigations need the diagnostic engine, and Web Doctor is not installed to provide it.');
     }
 
     private function issues(): Issues
     {
-        return $this->issues ??= WebDoctor::getInstance()?->getIssues() ?? new Issues();
+        return $this->issues ??= WebDoctor::getInstance()?->getIssues() ?? throw new InvalidConfigException('Investigations need the Issue Center, and Web Doctor is not installed to provide it.');
     }
 
     private function errors(): Errors
     {
-        return $this->errors ??= WebDoctor::getInstance()?->getErrors() ?? new Errors(['issues' => $this->issues()]);
+        return $this->errors ??= WebDoctor::getInstance()?->getErrors() ?? throw new InvalidConfigException('Investigations need error grouping, and Web Doctor is not installed to provide it.');
     }
 
     private function rootCauses(): RootCauses
     {
-        return $this->rootCauses ??= WebDoctor::getInstance()?->getRootCauses() ?? new RootCauses();
+        return $this->rootCauses ??= WebDoctor::getInstance()?->getRootCauses() ?? throw new InvalidConfigException('Investigations need the root causes, and Web Doctor is not installed to provide them.');
     }
 
     private function recipes(): Recipes
     {
-        return $this->recipes ??= WebDoctor::getInstance()?->getRecipes() ?? new Recipes(['includeCoreRecipes' => true]);
-    }
-
-    /**
-     * A moment as the database stores it: UTC, in Craft's own format.
-     */
-    private function forDb(DateTimeInterface $when): string
-    {
-        return Db::prepareDateForDb($when) ?? gmdate('Y-m-d H:i:s');
-    }
-
-    private function fit(?string $value, int $length): ?string
-    {
-        if ($value === null) {
-            return null;
-        }
-
-        return mb_strlen($value) > $length ? mb_substr($value, 0, $length - 1) . '…' : $value;
+        return $this->recipes ??= WebDoctor::getInstance()?->getRecipes() ?? throw new InvalidConfigException('Investigations need the recipes registry, and Web Doctor is not installed to provide it.');
     }
 }

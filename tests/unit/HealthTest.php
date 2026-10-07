@@ -45,7 +45,7 @@ class HealthTest extends TestCase
         ]);
 
         self::assertSame(100, $health->score);
-        self::assertSame(0, $health->countOf(DiagnosticStatus::FAIL));
+        self::assertSame(0, ($health->counts['fail'] ?? 0));
         self::assertNull($health->worstSeverity);
     }
 
@@ -104,9 +104,9 @@ class HealthTest extends TestCase
         $health = HealthSummary::fromResults([$this->aResult(DiagnosticStatus::ERROR)]);
 
         self::assertLessThan(100, $health->score);
-        self::assertSame(1, $health->countOf(DiagnosticStatus::ERROR));
-        self::assertSame(0, $health->countOf(DiagnosticStatus::WARNING));
-        self::assertSame(0, $health->countOf(DiagnosticStatus::FAIL));
+        self::assertSame(1, ($health->counts['error'] ?? 0));
+        self::assertSame(0, ($health->counts['warning'] ?? 0));
+        self::assertSame(0, ($health->counts['fail'] ?? 0));
     }
 
     public function testACheckThatDidNotApplyCostsNothing(): void
@@ -141,10 +141,10 @@ class HealthTest extends TestCase
         ]);
 
         self::assertSame(4, $health->total);
-        self::assertSame(2, $health->countOf(DiagnosticStatus::PASS));
-        self::assertSame(1, $health->countOf(DiagnosticStatus::WARNING));
-        self::assertSame(1, $health->countOf(DiagnosticStatus::ERROR));
-        self::assertSame(0, $health->countOf(DiagnosticStatus::FAIL));
+        self::assertSame(2, ($health->counts['pass'] ?? 0));
+        self::assertSame(1, ($health->counts['warning'] ?? 0));
+        self::assertSame(1, ($health->counts['error'] ?? 0));
+        self::assertSame(0, ($health->counts['fail'] ?? 0));
     }
 
     public function testEveryStatusIsCountedEvenWhenItDidNotOccur(): void
@@ -174,9 +174,9 @@ class HealthTest extends TestCase
             $this->aResult(DiagnosticStatus::WARNING, Severity::HIGH),
         ]);
 
-        self::assertSame(1, $health->countOfSeverity(Severity::CRITICAL));
-        self::assertSame(2, $health->countOfSeverity(Severity::HIGH));
-        self::assertSame(0, $health->countOfSeverity(Severity::LOW));
+        self::assertSame(1, ($health->severityCounts['critical'] ?? 0));
+        self::assertSame(2, ($health->severityCounts['high'] ?? 0));
+        self::assertSame(0, ($health->severityCounts['low'] ?? 0));
     }
 
     public function testAPassingCheckIsNotCountedAsAnIssueOfItsSeverity(): void
@@ -188,8 +188,8 @@ class HealthTest extends TestCase
             $this->aResult(DiagnosticStatus::SKIPPED, Severity::HIGH),
         ]);
 
-        self::assertSame(0, $health->countOfSeverity(Severity::CRITICAL));
-        self::assertSame(0, $health->countOfSeverity(Severity::HIGH));
+        self::assertSame(0, ($health->severityCounts['critical'] ?? 0));
+        self::assertSame(0, ($health->severityCounts['high'] ?? 0));
         self::assertSame(100, $health->score);
     }
 
@@ -416,11 +416,11 @@ class HealthTest extends TestCase
 
         self::assertNotNull($health);
         self::assertSame(1, $health->total);
-        self::assertSame(0, $health->countOfSeverity(Severity::CRITICAL));
-        self::assertSame(0, $health->countOfSeverity(Severity::HIGH));
-        self::assertSame(0, $health->countOf(DiagnosticStatus::FAIL));
-        self::assertSame(0, $health->countOf(DiagnosticStatus::WARNING));
-        self::assertSame(1, $health->countOf(DiagnosticStatus::PASS));
+        self::assertSame(0, ($health->severityCounts['critical'] ?? 0));
+        self::assertSame(0, ($health->severityCounts['high'] ?? 0));
+        self::assertSame(0, ($health->counts['fail'] ?? 0));
+        self::assertSame(0, ($health->counts['warning'] ?? 0));
+        self::assertSame(1, ($health->counts['pass'] ?? 0));
         self::assertSame([], $health->contributions);
     }
 
@@ -571,6 +571,19 @@ class HealthTest extends TestCase
         self::assertSame($run->id(), $this->runs->latest()?->id());
     }
 
+    /**
+     * A run kept before the shape or the prose of a stored run last changed is never read back: one
+     * cached when a broken check's description still carried what it threw would go on showing it.
+     */
+    public function testARunKeptUnderAnEarlierFormatIsNotReadBack(): void
+    {
+        foreach ([1, 2] as $format) {
+            $this->cache->set(sprintf('%s:%d:test:all', Runs::CACHE_KEY_PREFIX, $format), $this->aStoredRun(), 0);
+        }
+
+        self::assertNull($this->runs->latest());
+    }
+
     public function testWithNothingRememberedThereIsNoRun(): void
     {
         self::assertNull($this->runs->latest());
@@ -631,11 +644,14 @@ class HealthTest extends TestCase
         self::assertFalse($runs->remember($this->aStoredRun()));
     }
 
-    public function testACacheThatCannotBeReadIsTreatedAsNoRun(): void
+    public function testACacheThatCannotBeReadIsAFailureNeverNoRun(): void
     {
+        // "Never run" is a statement about the site; a cache that is down says nothing about it.
         $runs = new Runs(['cache' => new FailingCache(), 'environment' => 'test']);
 
-        self::assertNull($runs->latest());
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('The cache could not be read.');
+        $runs->latest();
     }
 
     public function testAWriteThatSucceedsIsReportedAsSuccess(): void

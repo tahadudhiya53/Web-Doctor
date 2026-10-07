@@ -472,6 +472,36 @@ class DiagnosticBehaviourTest extends TestCase
      * Recorded as missing, not as an empty value, whether the host is blank or absent altogether:
      * that is the word the "a setting the environment lacks" cause reads.
      */
+    /**
+     * A setting Craft could not resolve is not a setting that is missing: no finding is made of it,
+     * it is recorded as unknown, and the check does not call settings complete that it could not read.
+     * A definite finding beside it still stands.
+     */
+    public function testASettingThatCannotBeResolvedIsUnknownNeverMissing(): void
+    {
+        $check = static fn(array $overrides, string $unresolvable): MailerConfigurationDiagnostic => new class(['settings' => new MailSettings($overrides + [ 'fromEmail' => 'site@example.com', 'fromName' => 'Example', 'transportType' => Smtp::class, 'transportSettings' => ['host' => '$SMTP_HOST', 'port' => '587', 'useAuthentication' => false], ]), 'unresolvable' => $unresolvable]) extends MailerConfigurationDiagnostic {
+            public string $unresolvable = '';
+
+            protected function resolve(string $value): bool|string|null
+            {
+                return $value === $this->unresolvable ? throw new \RuntimeException('The variable could not be resolved.') : parent::resolve($value);
+            }
+        };
+
+        $result = $check([], '$SMTP_HOST')->run($this->context());
+
+        self::assertSame(DiagnosticStatus::UNKNOWN, $result->status);
+        self::assertStringContainsString('could not be resolved: host', $result->summary);
+        self::assertSame(\Tahadudhiya\WebDoctor\helpers\Redaction::UNKNOWN, $result->evidence()[1]->get('host'));
+
+        // A sender nobody set is still a failure, whatever else could not be read.
+        $result = $check(['fromEmail' => ''], '$SMTP_HOST')->run($this->context());
+
+        self::assertSame(DiagnosticStatus::FAIL, $result->status);
+        self::assertStringContainsString('no sender address is set', $result->summary);
+        self::assertStringNotContainsString('host', $result->summary);
+    }
+
     public function testAMissingSmtpHostIsAFailure(): void
     {
         foreach ([['host' => '', 'useAuthentication' => false], ['useAuthentication' => false]] as $settings) {
@@ -681,6 +711,13 @@ class DiagnosticBehaviourTest extends TestCase
         self::assertSame(Severity::HIGH, $result->severity());
         self::assertCount(3, $result->evidence(), 'A summary, plus one piece of evidence per distinct job.');
         self::assertSame(2, $result->evidence()[1]->get('occurrences'));
+
+        // What a job is called is its own text — who or what it was for — so it is held in what the
+        // evidence contains, behind permission to read evidence, never in the label every reader sees.
+        foreach (array_slice($result->evidence(), 1) as $i => $job) {
+            self::assertSame('Failed job', $job->label);
+            self::assertSame(['Updating search indexes', 'Generating transform'][$i], $job->get('description'));
+        }
     }
 
     public function testFailuresAreNotExaminedAtAllAtShallowDepth(): void
@@ -756,10 +793,12 @@ class DiagnosticBehaviourTest extends TestCase
 
     public function testAJobStillWithinItsTimeLimitIsNotAFinding(): void
     {
+        // However long it has been running: each job declares how long it expects to need, and
+        // only that is an honest comparison, not a number Web Doctor picked.
         $working = new StubbedQueueBacklogDiagnostic([
             'queue' => new StubQueue(),
             'reserved' => 1,
-            'running' => ['seconds' => 30, 'ttr' => 300, 'overrunning' => false],
+            'running' => ['seconds' => 3600, 'ttr' => 7200, 'overrunning' => false],
         ]);
 
         self::assertSame(DiagnosticStatus::PASS, $this->engine()->run($working, DiagnosticContext::current())->status);
@@ -813,26 +852,6 @@ class DiagnosticBehaviourTest extends TestCase
         ]);
 
         self::assertSame($expected, $this->engine()->run($diagnostic, DiagnosticContext::current())->status->value);
-    }
-
-    public function testAnOverrunningJobIsJudgedAgainstItsOwnLimitNotAFixedOne(): void
-    {
-        // Each job declares how long it expects to need, so the only honest comparison is
-        // against that rather than against a number Web Doctor picked.
-        $within = new StubbedQueueBacklogDiagnostic([
-            'queue' => new StubQueue(),
-            'reserved' => 1,
-            'running' => ['seconds' => 3600, 'ttr' => 7200, 'overrunning' => false],
-        ]);
-
-        $over = new StubbedQueueBacklogDiagnostic([
-            'queue' => new StubQueue(),
-            'reserved' => 1,
-            'running' => ['seconds' => 61, 'ttr' => 60, 'overrunning' => true],
-        ]);
-
-        self::assertSame(DiagnosticStatus::PASS, $this->engine()->run($within, DiagnosticContext::current())->status);
-        self::assertSame(DiagnosticStatus::WARNING, $this->engine()->run($over, DiagnosticContext::current())->status);
     }
 
     public function testASampledSetOfFailuresSaysThatItWasSampled(): void

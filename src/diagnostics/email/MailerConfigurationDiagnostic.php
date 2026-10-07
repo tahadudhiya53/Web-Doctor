@@ -38,6 +38,9 @@ use Throwable;
  */
 class MailerConfigurationDiagnostic extends Diagnostic
 {
+    /** @var string What a setting that could not be resolved is read as: not a value any setting can hold. */
+    private const UNREADABLE = "\0unreadable";
+
     public const ID = 'email.configuration';
 
     /**
@@ -79,9 +82,9 @@ class MailerConfigurationDiagnostic extends Diagnostic
         $evidence = [
             $this->evidence(EvidenceType::CONFIGURATION, Craft::t('web-doctor', 'Mail settings'), [
                 'transportType' => $settings->transportType,
-                'fromEmail' => Redaction::presence($fromEmail),
-                'fromName' => Redaction::presence($this->parse($settings->fromName)),
-                'replyToEmail' => Redaction::presence($this->parse($settings->replyToEmail)),
+                'fromEmail' => $this->presence($fromEmail),
+                'fromName' => $this->presence($this->parse($settings->fromName)),
+                'replyToEmail' => $this->presence($this->parse($settings->replyToEmail)),
                 'template' => Redaction::presence($settings->template),
                 'siteOverrides' => count($settings->siteOverrides),
                 // Craft sends mail as part of the request that triggers it rather than through
@@ -108,7 +111,8 @@ class MailerConfigurationDiagnostic extends Diagnostic
             );
         }
 
-        $problems = $this->problems($settings->fromEmail, $fromEmail, $settings->transportType, $transportSettings);
+        $unknown = [];
+        $problems = $this->problems($settings->fromEmail, $fromEmail, $settings->transportType, $transportSettings, $unknown);
 
         if ($problems !== []) {
             return $this->result(
@@ -122,6 +126,14 @@ class MailerConfigurationDiagnostic extends Diagnostic
             );
         }
 
+        // A setting that could not be resolved is not one found complete.
+        if ($unknown !== []) {
+            return $this->unknown(
+                Craft::t('web-doctor', 'Some of Craft’s mail settings could not be resolved: {settings}.', ['settings' => implode(', ', $unknown)]),
+                $evidence,
+            );
+        }
+
         return $this->pass(
             Craft::t('web-doctor', 'Craft’s mail settings are complete. Delivery itself was not tested.'),
             $evidence,
@@ -132,13 +144,23 @@ class MailerConfigurationDiagnostic extends Diagnostic
      * What is missing from the settings, in the words someone fixing it would use.
      *
      * @param array<string, mixed> $transportSettings
+     * @param list<string> $unknown The settings that could not be resolved, added to.
      * @return string[]
      */
-    private function problems(?string $rawFromEmail, bool|string|null $fromEmail, ?string $transportType, array $transportSettings): array
+    private function problems(?string $rawFromEmail, bool|string|null $fromEmail, ?string $transportType, array $transportSettings, array &$unknown): array
     {
         $problems = [];
+        $judge = function(string $name, bool|string|null $parsed) use (&$unknown): bool {
+            $presence = $this->presence($parsed);
 
-        if (Redaction::presence($fromEmail) === Redaction::MISSING) {
+            if ($presence === Redaction::UNKNOWN) {
+                $unknown[] = $name;
+            }
+
+            return $presence === Redaction::MISSING;
+        };
+
+        if ($judge('fromEmail', $fromEmail)) {
             $problems[] = $rawFromEmail !== null && $rawFromEmail !== ''
                 // A setting that is a reference to an environment variable, resolving to
                 // nothing, is a different fault from a setting nobody filled in — and it is
@@ -148,18 +170,18 @@ class MailerConfigurationDiagnostic extends Diagnostic
         }
 
         if ($transportType === Smtp::class) {
-            if (Redaction::presence($this->parse($transportSettings['host'] ?? null)) === Redaction::MISSING) {
+            if ($judge('host', $this->parse($transportSettings['host'] ?? null))) {
                 $problems[] = Craft::t('web-doctor', 'the SMTP host is not set');
             }
 
             $authentication = App::parseBooleanEnv($transportSettings['useAuthentication'] ?? null);
 
             if ($authentication === true) {
-                if (Redaction::presence($this->parse($transportSettings['username'] ?? null)) === Redaction::MISSING) {
+                if ($judge('username', $this->parse($transportSettings['username'] ?? null))) {
                     $problems[] = Craft::t('web-doctor', 'SMTP authentication is on with no user name');
                 }
 
-                if (Redaction::presence($this->parse($transportSettings['password'] ?? null)) === Redaction::MISSING) {
+                if ($judge('password', $this->parse($transportSettings['password'] ?? null))) {
                     $problems[] = Craft::t('web-doctor', 'SMTP authentication is on with no password');
                 }
             }
@@ -189,7 +211,7 @@ class MailerConfigurationDiagnostic extends Diagnostic
 
         foreach ($transportSettings as $key => $value) {
             if (!in_array($key, ['host', 'port', 'encryptionMethod', 'timeout'], true)) {
-                $data[(string)$key] = Redaction::presence($this->parse(is_scalar($value) ? (string)$value : $value));
+                $data[(string)$key] = $this->presence($this->parse(is_scalar($value) ? (string)$value : $value));
 
                 continue;
             }
@@ -197,7 +219,8 @@ class MailerConfigurationDiagnostic extends Diagnostic
             // Named outright when set; when not, it is missing, in the word every other setting
             // uses for that, rather than an empty value a reader has to interpret.
             $parsed = $this->parse(is_scalar($value) ? (string)$value : null);
-            $data[(string)$key] = Redaction::presence($parsed) === Redaction::MISSING ? Redaction::MISSING : Redaction::redactValue($parsed);
+            $presence = $this->presence($parsed);
+            $data[(string)$key] = $presence !== Redaction::PRESENT ? $presence : Redaction::redactValue($parsed);
         }
 
         return $this->evidence(EvidenceType::ENVIRONMENT_VARIABLE, Craft::t('web-doctor', 'Mail transport'), $data);
@@ -234,6 +257,10 @@ class MailerConfigurationDiagnostic extends Diagnostic
         return $this->settings ?? App::mailSettings();
     }
 
+    /**
+     * A setting as Craft resolves it: its value, an environment variable's or an alias's. One that
+     * could not be resolved is {@see self::UNREADABLE}, never null, which would read as missing.
+     */
     private function parse(mixed $value): bool|string|null
     {
         if (!is_string($value)) {
@@ -241,9 +268,27 @@ class MailerConfigurationDiagnostic extends Diagnostic
         }
 
         try {
-            return App::parseEnv($value);
+            return $this->resolve($value);
         } catch (Throwable) {
-            return null;
+            return self::UNREADABLE;
         }
+    }
+
+    /**
+     * Resolves one setting's environment variable or alias. A seam, so a setting that cannot be
+     * resolved is testable by stating it.
+     */
+    protected function resolve(string $value): bool|string|null
+    {
+        return App::parseEnv($value);
+    }
+
+    /**
+     * Whether a resolved setting is there: present, missing, or — where it could not be resolved —
+     * unknown, which is not missing.
+     */
+    private function presence(bool|string|null $parsed): string
+    {
+        return $parsed === self::UNREADABLE ? Redaction::UNKNOWN : Redaction::presence($parsed);
     }
 }

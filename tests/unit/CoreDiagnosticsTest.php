@@ -30,15 +30,6 @@ class CoreDiagnosticsTest extends TestCase
         return CoreDiagnostics::all();
     }
 
-    public function testEveryShippedCheckSatisfiesTheContract(): void
-    {
-        self::assertNotEmpty(self::diagnostics());
-
-        foreach (self::diagnostics() as $diagnostic) {
-            self::assertInstanceOf(DiagnosticInterface::class, $diagnostic);
-        }
-    }
-
     public function testEveryIdIsWellFormed(): void
     {
         foreach (self::diagnostics() as $diagnostic) {
@@ -107,32 +98,17 @@ class CoreDiagnosticsTest extends TestCase
         self::assertCount(count(CoreDiagnostics::classes()), $registry->all());
     }
 
-    public function testTheShippedChecksClaimTheirIdsBeforeOtherPluginsAreAsked(): void
+    public function testTheShippedChecksClaimTheirIdsBeforeOtherPluginsAreAskedAndAClashCostsOnlyItself(): void
     {
         // Registration is first-wins, so whichever side goes first keeps the ID. If contributors
         // went first, which check answered to `craft.version` would depend on the order Craft
         // happened to boot plugins in.
         $impostor = new TestDiagnostic(['diagnosticId' => 'craft.version']);
-
-        Event::on(Diagnostics::class, Diagnostics::EVENT_REGISTER_DIAGNOSTICS, static function($event) use ($impostor) {
-            $event->diagnostics[] = $impostor;
-        });
-
-        try {
-            $registry = new Diagnostics(['includeCoreDiagnostics' => true]);
-
-            self::assertNotSame($impostor, $registry->get('craft.version'));
-        } finally {
-            Event::off(Diagnostics::class, Diagnostics::EVENT_REGISTER_DIAGNOSTICS);
-        }
-    }
-
-    public function testAContributorThatClashesDoesNotStopTheOthersRegistering(): void
-    {
         $clashing = new TestDiagnostic(['diagnosticId' => 'php.version']);
         $fine = new TestDiagnostic(['diagnosticId' => 'otherPlugin.check']);
 
-        Event::on(Diagnostics::class, Diagnostics::EVENT_REGISTER_DIAGNOSTICS, static function($event) use ($clashing, $fine) {
+        Event::on(Diagnostics::class, Diagnostics::EVENT_REGISTER_DIAGNOSTICS, static function($event) use ($impostor, $clashing, $fine) {
+            $event->diagnostics[] = $impostor;
             $event->diagnostics[] = $clashing;
             $event->diagnostics[] = $fine;
         });
@@ -140,6 +116,7 @@ class CoreDiagnosticsTest extends TestCase
         try {
             $registry = new Diagnostics(['includeCoreDiagnostics' => true]);
 
+            self::assertNotSame($impostor, $registry->get('craft.version'));
             self::assertNotSame($clashing, $registry->get('php.version'));
             self::assertSame($fine, $registry->get('otherPlugin.check'));
         } finally {

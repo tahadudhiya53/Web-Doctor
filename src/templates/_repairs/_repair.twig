@@ -1,0 +1,282 @@
+{#
+    One repair, kept apart from the control panel shell for the same reason the issue page is: what
+    it would change, what has to be true first, the confirmation, what it did, and whether anything
+    has verified that it worked, with every verification of it. What it read and changed is the installation's internals, shown to
+    somebody who may carry out repairs or see evidence; everybody who may read the issue sees what
+    kind of repair it was and how it went.
+#}
+
+{% import "web-doctor/_macros" as shared %}
+{% import "web-doctor/_repairs/_parts" as parts %}
+{% import "web-doctor/_investigations/_investigation" as inv %}
+{% import "web-doctor/_repairs/_verification" as ver %}
+
+{#
+    Reached through its issue or on its own from the repair history. A repair outlives its issue, so
+    `issue` is null once the issue has been deleted: the page then reads as history, and nothing on
+    it can be carried out or verified.
+#}
+{% if issue %}
+    <p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '#repairs') }}">&larr; {{ shared.text(issue.title) }}</a></p>
+{% else %}
+    <p class="wd-breadcrumb"><a href="{{ cpUrl('web-doctor/repairs') }}">&larr; {{ "Repairs"|t('web-doctor') }}</a></p>
+{% endif %}
+
+<div class="pane wd-repair">
+    <h2 class="wd-issue__title">{{ shared.text(repair.actionName) }}</h2>
+
+    <div class="wd-issue__pills">
+        {{ parts.risk(repair) }}
+        {{ parts.status(repair) }}
+        {{ parts.verification(repair) }}
+    </div>
+
+    <p>{{ shared.text(repair.preview.summary) }}</p>
+
+    <dl class="wd-meta">
+        <div><dt>{{ "Issue"|t('web-doctor') }}</dt><dd>
+            {%- if issue %}<a href="{{ cpUrl('web-doctor/issues/' ~ issue.id) }}">{{ shared.text(repair.issueTitle) }}</a>
+            {%- else %}{{ shared.text(repair.issueTitle) }} <span class="light">{{ "(issue deleted)"|t('web-doctor') }}</span>{% endif -%}
+        </dd></div>
+        <div><dt>{{ "Check"|t('web-doctor') }}</dt><dd><code>{{ repair.diagnosticId }}</code></dd></div>
+        <div><dt>{{ "Repair ID"|t('web-doctor') }}</dt><dd><code>{{ repair.action }}</code></dd></div>
+        <div><dt>{{ "Environment"|t('web-doctor') }}</dt><dd>{{ shared.text(repair.environment) }}</dd></div>
+        <div><dt>{{ "Site"|t('web-doctor') }}</dt><dd>{{ shared.text(repair.siteLabel()) }}</dd></div>
+        <div><dt>{{ "Previewed"|t('web-doctor') }}</dt><dd>{{ shared.when(repair.previewedAt) }}</dd></div>
+        <div><dt>{{ "Previewed by"|t('web-doctor') }}</dt><dd>{{ shared.text(repair.previewedByLabel() ?? "an unknown user"|t('web-doctor')) }}</dd></div>
+        {% if repair.executedByLabel() %}
+            <div><dt>{{ "Carried out by"|t('web-doctor') }}</dt><dd>{{ shared.text(repair.executedByLabel()) }}</dd></div>
+        {% endif %}
+        {% if repair.startedAt or repair.isUnreadable('startedAt') %}
+            <div><dt>{{ "Started"|t('web-doctor') }}</dt><dd>{{ shared.when(repair.startedAt) }}</dd></div>
+        {% endif %}
+        {% if repair.finishedAt or repair.isUnreadable('finishedAt') %}
+            <div><dt>{{ "Finished"|t('web-doctor') }}</dt><dd>{{ shared.when(repair.finishedAt) }}</dd></div>
+        {% endif %}
+        {% if repair.durationMs is not null %}
+            <div><dt>{{ "Duration"|t('web-doctor') }}</dt><dd>{{ "{ms} ms"|t('web-doctor', { ms: repair.durationMs|round(1) }) }}</dd></div>
+        {% endif %}
+    </dl>
+
+    {% if repair.unreadable|length %}
+        <p class="warning">{{ "Part of this repair’s record could not be read, so it is shown as unreadable rather than as anything else, and it can no longer be carried out or verified:"|t('web-doctor') }} {{ repair.unreadable|join(', ') }}</p>
+    {% endif %}
+
+    {% if repair.hasStopped() %}
+        <p class="warning">{{ "This repair has been under way for over an hour, so the request carrying it out has almost certainly gone away. It may have made some of its changes. Another repair of the same kind may now take its place."|t('web-doctor') }}</p>
+    {% endif %}
+</div>
+
+{% if repair.failure %}
+    <div class="pane">
+        <h2>{{ "What went wrong"|t('web-doctor') }}</h2>
+        <p class="error">{{ shared.text(repair.failure) }}</p>
+    </div>
+{% endif %}
+
+<div class="pane" id="preview">
+    <h2>{{ (repair.status.value ?? null) == 'previewed' ? "What it would change"|t('web-doctor') : "What it was to change"|t('web-doctor') }}</h2>
+
+    <h3 class="wd-recommendation__heading">{{ "Risk"|t('web-doctor') }}</h3>
+    <p>{{ parts.risk(repair) }} {{ shared.text(repair.riskReason) }}</p>
+    {% if repair.risk %}<p class="light">{{ repair.risk.explanation() }}</p>{% endif %}
+
+    {% if canViewDetails %}
+        {% if repair.preview.items|length %}
+            <h3 class="wd-recommendation__heading">{{ "Changes"|t('web-doctor') }}</h3>
+            <ul class="wd-plan__list wd-repair__items">
+                {% for item in repair.preview.items %}
+                    <li>{{ shared.text(item) }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+        {% if repair.preview.omitted %}
+            <p class="light">{{ "{count, plural, =1{One more change is} other{# more changes are}} not listed."|t('web-doctor', { count: repair.preview.omitted }) }}</p>
+        {% endif %}
+        {% if repair.preview.state|length %}
+            <h3 class="wd-recommendation__heading">{{ "State before"|t('web-doctor') }}</h3>
+            {% for item in repair.preview.evidenceItems() %}
+                {{ inv.fact(item, true) }}
+            {% endfor %}
+        {% endif %}
+    {% else %}
+        <p class="light">{{ "What exactly it would change, and the state it read, need the “Run repairs” or “View evidence” permission."|t('web-doctor') }}</p>
+    {% endif %}
+</div>
+
+<div class="pane" id="prerequisites">
+    <h2>{{ "Before it runs"|t('web-doctor') }}</h2>
+    <p class="light">{{ "Read when it was previewed. Everything Web Doctor can check is read again when the repair is confirmed."|t('web-doctor') }}</p>
+
+    {% set checked = repair.prerequisites|filter(p => not p.needsAcknowledging()) %}
+    {% if checked|length %}
+        <ul class="wd-plan__list wd-prerequisites">
+            {% for p in checked %}
+                <li>
+                    <span class="wd-pill wd-pill--{{ p.met ? 'pass' : 'fail' }}">{{ p.met ? "Holds"|t('web-doctor') : "Does not hold"|t('web-doctor') }}</span>
+                    {{ shared.text(p.description) }}
+                    {% if p.detail and canViewDetails %}<div class="light">{{ shared.text(p.detail) }}</div>{% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+
+    {% if repair.toAcknowledge()|length and not repair.awaitsConfirmation() %}
+        <h3 class="wd-recommendation__heading">{{ "Confirmed by the person who carried it out"|t('web-doctor') }}</h3>
+        <ul class="wd-plan__list">
+            {% for p in repair.toAcknowledge() %}
+                <li>{{ p.id in repair.acknowledged ? '✓' : '—' }} {{ shared.text(p.description) }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+</div>
+
+{% if repair.awaitsConfirmation() %}
+    <div class="pane" id="confirm">
+        <h2>{{ "Confirm"|t('web-doctor') }}</h2>
+
+        {% if not issue %}
+            <p class="warning">{{ shared.text(refusal) }}</p>
+        {% elseif not actionAvailable %}
+            <p class="warning">{{ "This repair is no longer available here, so it cannot be carried out."|t('web-doctor') }}</p>
+        {% elseif not canRunRepairs %}
+            <p class="light">{{ "Carrying out a repair needs the “Run repairs” permission."|t('web-doctor') }}</p>
+        {% elseif not authorized %}
+            <p class="warning">{{ shared.text(authorization) }}</p>
+        {% elseif refusal %}
+            <p class="warning">{{ shared.text(refusal) }}</p>
+        {% elseif not repair.checkedPrerequisitesMet() %}
+            <p class="warning">{{ "Something Web Doctor checks before this repair does not hold, so it cannot be carried out. Put it right, then preview the repair again from the issue’s page."|t('web-doctor') }}</p>
+        {% else %}
+            <form method="post" accept-charset="UTF-8" class="wd-repair__confirm" data-wd-run-form>
+                {{ csrfInput() }}
+                {{ actionInput('web-doctor/repairs/execute') }}
+                <input type="hidden" name="issueId" value="{{ issue.id }}">
+                <input type="hidden" name="repairId" value="{{ repair.id }}">
+
+                {% if repair.toAcknowledge()|length %}
+                    <fieldset class="wd-repair__acknowledge">
+                        <legend>{{ "Only you can confirm these:"|t('web-doctor') }}</legend>
+                        {% for p in repair.toAcknowledge() %}
+                            <div class="field">
+                                <input type="checkbox" class="checkbox" id="wd-ack-{{ p.id }}" name="acknowledged[]" value="{{ p.id }}" required>
+                                <label for="wd-ack-{{ p.id }}">{{ shared.text(p.description) }}</label>
+                            </div>
+                        {% endfor %}
+                    </fieldset>
+                {% endif %}
+
+                {% if repair.risk.requiresTypedConfirmation() %}
+                    <div class="field">
+                        <label for="wd-typed-confirmation">{{ "This is a high-risk repair. Type the name of the environment it will change, “{environment}”, to confirm it."|t('web-doctor', { environment: repair.environment }) }}</label>
+                        <input type="text" class="text fullwidth" id="wd-typed-confirmation" name="typedConfirmation" autocomplete="off" required>
+                    </div>
+                {% endif %}
+
+                <button type="submit" class="btn submit" name="confirm" value="1">{{ "Carry out this repair"|t('web-doctor') }}</button>
+
+                <p class="wd-run-status" role="status" aria-live="polite" data-wd-run-status hidden>
+                    {{ "Carrying out the repair… this page will move on when it finishes."|t('web-doctor') }}
+                </p>
+                <p class="light">{{ "What it would change is read again when you confirm. If anything has changed since this preview, nothing is carried out and you are asked to preview it again. This preview can be confirmed until {time}."|t('web-doctor', { time: repair.expiresAt()|time('short') }) }}</p>
+            </form>
+        {% endif %}
+    </div>
+{% elseif not repair.isIntact() %}
+    <div class="pane" id="confirm">
+        <h2>{{ "Confirm"|t('web-doctor') }}</h2>
+        <p class="warning">{{ "This repair’s record cannot be read in full, so it can be read as history but never carried out. Preview the repair again from the issue’s page."|t('web-doctor') }}</p>
+    </div>
+{% elseif repair.isExpired() %}
+    <div class="pane" id="confirm">
+        <h2>{{ "Confirm"|t('web-doctor') }}</h2>
+        <p class="light">{{ "This preview has expired, so it can no longer be confirmed. Preview the repair again from the issue’s page to see what it would change now."|t('web-doctor') }}</p>
+    </div>
+{% elseif (repair.status.value ?? null) == 'superseded' %}
+    <div class="pane" id="confirm">
+        <h2>{{ "Confirm"|t('web-doctor') }}</h2>
+        <p class="light">{{ "This preview was replaced by a newer one of the same repair, so it can no longer be confirmed. It is kept as a record of what was shown."|t('web-doctor') }}</p>
+    </div>
+{% endif %}
+
+{% if repair.outcome %}
+    <div class="pane" id="outcome">
+        <h2>{{ "What it did"|t('web-doctor') }}</h2>
+        <p>{{ shared.text(repair.outcome.summary) }}</p>
+        {% if canViewDetails %}
+            {% if repair.outcome.items|length %}
+                <ul class="wd-plan__list wd-repair__items">
+                    {% for item in repair.outcome.items %}
+                        <li>{{ shared.text(item) }}</li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+            {% if repair.outcome.omitted %}
+                <p class="light">{{ "{count, plural, =1{One more change is} other{# more changes are}} not listed."|t('web-doctor', { count: repair.outcome.omitted }) }}</p>
+            {% endif %}
+            {% if repair.outcome.state|length %}
+                <h3 class="wd-recommendation__heading">{{ "State after"|t('web-doctor') }}</h3>
+                {% for item in repair.outcome.evidenceItems() %}
+                    {{ inv.fact(item, true) }}
+                {% endfor %}
+            {% endif %}
+        {% endif %}
+    </div>
+{% endif %}
+
+<div class="pane" id="verification">
+    <h2>{{ "Verification"|t('web-doctor') }}</h2>
+    {% if not repair.status or not repair.verificationStatus %}
+        <p>{{ shared.unreadable() }}</p>
+    {% elseif repair.status.wasExecuted() %}
+        {% if repair.verificationStatus.value == 'verification_failed' %}
+            <p class="error"><strong>{{ "Repair completed, but verification failed."|t('web-doctor') }}</strong></p>
+        {% endif %}
+        <p>{{ shared.pill('wd-pill--verification-', repair.verificationStatus) }} {{ repair.verificationStatus.explanation() }}</p>
+    {% else %}
+        <p class="light">{{ "Nothing has been carried out yet. Once it has, this is how to tell whether it worked."|t('web-doctor') }}</p>
+    {% endif %}
+    <p>{{ shared.text(repair.verificationNote) }}</p>
+    <p class="light">
+        {{ "Verifying runs these checks again, first the one that found the problem:"|t('web-doctor') }}
+        {% for id in repair.verifyWith %}<code>{{ id }}</code>{{ not loop.last ? ', ' }}{% endfor %}{{ "; then the rest of the problem’s area. It also reads what this repair should have left true, compares the evidence before and after, and looks for errors and problems that appeared since the repair."|t('web-doctor') }}
+    </p>
+
+    {% if verificationsFailure %}
+        <p class="error">{{ verificationsFailure }}</p>
+    {% elseif (repair.status.value ?? null) == 'succeeded' and canRunRepairs %}
+        {% if verifyRefusal %}
+            <p class="warning">{{ shared.text(verifyRefusal) }}</p>
+        {% else %}
+            <form method="post" accept-charset="UTF-8" class="wd-toolbar" data-wd-run-form>
+                {{ csrfInput() }}
+                {{ actionInput('web-doctor/repairs/verify') }}
+                <input type="hidden" name="issueId" value="{{ issue.id }}">
+                <input type="hidden" name="repairId" value="{{ repair.id }}">
+
+                <button type="submit" class="btn">{{ verifications|length ? "Verify again"|t('web-doctor') : "Verify now"|t('web-doctor') }}</button>
+
+                <p class="wd-run-status" role="status" aria-live="polite" data-wd-run-status hidden>
+                    {{ "Running the checks… this page will reload when they finish."|t('web-doctor') }}
+                </p>
+                <p class="light wd-toolbar__note">{{ "Changes nothing in the installation. Only a verified repair resolves the issue; a failed verification opens it again, and one that cannot tell leaves it where it stands."|t('web-doctor') }}</p>
+            </form>
+        {% endif %}
+    {% elseif (repair.status.value ?? null) == 'succeeded' %}
+        <p class="light">{{ "Verifying a repair needs the “Run repairs” permission."|t('web-doctor') }}</p>
+    {% endif %}
+
+    {% if issue and repair.status and not repair.status.wasExecuted() %}
+        <p class="light"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '#investigate') }}">{{ "Investigate this issue"|t('web-doctor') }}</a></p>
+    {% endif %}
+
+    {% if verifications|length %}
+        <h3 class="wd-plan__heading">{{ "Verifications of this repair"|t('web-doctor') }}</h3>
+        {% for v in verifications %}
+            {{ ver.verification(v, issue, canViewDetails) }}
+        {% endfor %}
+        {% if verifications|length >= verificationLimit %}
+            <p class="light">{{ "Showing the most recent {count}."|t('web-doctor', { count: verificationLimit }) }}</p>
+        {% endif %}
+    {% endif %}
+</div>

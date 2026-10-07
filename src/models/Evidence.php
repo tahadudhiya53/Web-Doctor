@@ -7,6 +7,7 @@ use JsonSerializable;
 use Tahadudhiya\WebDoctor\enums\Confidence;
 use Tahadudhiya\WebDoctor\enums\EvidenceType;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
+use Tahadudhiya\WebDoctor\helpers\Text;
 use Throwable;
 
 /**
@@ -69,11 +70,27 @@ final class Evidence implements JsonSerializable
      */
     public readonly ?string $reference;
 
-    /** @var DateTimeImmutable When Web Doctor observed the fact. */
-    public readonly DateTimeImmutable $recordedAt;
+    /**
+     * @var DateTimeImmutable|null When Web Doctor observed the fact. Null only for evidence read back
+     * whose stored moment was missing or could not be read — never replaced by the time it was read.
+     */
+    public readonly ?DateTimeImmutable $recordedAt;
 
     /** @var bool Whether any of the fact was cut short to fit, so a reader knows it is partial. */
     public readonly bool $truncated;
+
+    /**
+     * @var bool Whether the type is the one recorded. False only for evidence read back whose type
+     * this version does not know: it is carried as one withheld from clients, never shown as that.
+     */
+    public readonly bool $typeKnown;
+
+    /**
+     * @var bool Whether the type, data and metadata are what was recorded. False only for evidence
+     * read back of which any of those could not be read: what it holds then cannot decide anything,
+     * because a rule finding nothing in it would be reading a gap as an answer.
+     */
+    public readonly bool $readable;
 
     /**
      * @param EvidenceType $type What kind of fact this is.
@@ -82,7 +99,8 @@ final class Evidence implements JsonSerializable
      * @param array<array-key, mixed> $data The structured fact.
      * @param DateTimeImmutable|null $observedAt When the fact was true, where that differs from
      * when it was recorded. A log line's own timestamp belongs here, not the time it was read.
-     * @param DateTimeImmutable|null $recordedAt When Web Doctor observed it; now, unless stated.
+     * @param DateTimeImmutable|false|null $recordedAt When Web Doctor observed it; now, unless stated.
+     * False for evidence read back whose stored moment cannot be read: it stays unknown.
      * @param array<array-key, mixed> $metadata How the fact was gathered, rather than the fact.
      * @param string|null $reference Where the fact can be found again.
      * @param Confidence|null $confidence How firmly the fact is established, where it was
@@ -99,7 +117,7 @@ final class Evidence implements JsonSerializable
         string $source,
         array $data = [],
         public readonly ?DateTimeImmutable $observedAt = null,
-        ?DateTimeImmutable $recordedAt = null,
+        DateTimeImmutable|false|null $recordedAt = null,
         array $metadata = [],
         ?string $reference = null,
         public readonly ?Confidence $confidence = null,
@@ -108,19 +126,23 @@ final class Evidence implements JsonSerializable
         public readonly ?string $runId = null,
         public readonly ?string $environment = null,
         public readonly ?int $siteId = null,
+        bool $typeKnown = true,
+        bool $readable = true,
     ) {
+        $this->typeKnown = $typeKnown;
+        $this->readable = $readable && $typeKnown;
         [$data, $dataCut] = self::fit(Redaction::redact($data), self::MAX_DATA_BYTES);
         [$metadata, $metadataCut] = self::fit(Redaction::redact($metadata), self::MAX_METADATA_BYTES);
 
         $this->data = $data;
         $this->metadata = $metadata;
-        $this->label = self::shorten(Redaction::redactString($label), self::MAX_LABEL_LENGTH);
+        $this->label = Text::fit(Redaction::redactString($label), self::MAX_LABEL_LENGTH);
         // Usually a diagnostic ID, but another plugin's diagnostic can put anything here.
-        $this->source = self::shorten(Redaction::redactString($source), self::MAX_SOURCE_LENGTH);
+        $this->source = Text::fit(Redaction::redactString($source), self::MAX_SOURCE_LENGTH);
         $this->reference = $reference === null || $reference === ''
             ? null
-            : self::shorten(Redaction::redactString($reference), self::MAX_REFERENCE_LENGTH);
-        $this->recordedAt = $recordedAt ?? new DateTimeImmutable();
+            : Text::fit(Redaction::redactString($reference), self::MAX_REFERENCE_LENGTH);
+        $this->recordedAt = $recordedAt === false ? null : ($recordedAt ?? new DateTimeImmutable());
 
         // Redaction marks what it had to bound, and fitting marks what it had to leave out, so
         // either one showing up is enough to say the fact is not the whole of it.
@@ -185,35 +207,49 @@ final class Evidence implements JsonSerializable
      */
     public static function fromArray(array $stored): self
     {
-        $moment = static function(mixed $value): ?DateTimeImmutable {
-            if (!is_string($value) || $value === '') {
+        // Exactly the form this model writes, round-tripped, so a broken moment is unreadable rather
+        // than whatever PHP would roll it over into.
+        $moment = static function(mixed $value): DateTimeImmutable|false|null {
+            if ($value === null) {
                 return null;
             }
 
-            try {
-                return new DateTimeImmutable($value);
-            } catch (Throwable) {
-                return null;
-            }
+            $parsed = is_string($value) ? DateTimeImmutable::createFromFormat(DATE_ATOM, $value) : false;
+
+            return $parsed !== false && $parsed->format(DATE_ATOM) === $value ? $parsed : false;
         };
+        $observedAt = $moment($stored['observedAt'] ?? null);
+        $recordedAt = $moment($stored['recordedAt'] ?? null);
 
         $text = static fn(mixed $value): ?string => is_string($value) && $value !== '' ? $value : null;
 
+        $type = is_string($stored['type'] ?? null) ? EvidenceType::tryFrom($stored['type']) : null;
+        // Both are always written, so one missing is as unreadable as one that is not a structure.
+        $dataRead = is_array($stored['data'] ?? null);
+        $metadataRead = is_array($stored['metadata'] ?? null);
+        $storedConfidence = $stored['confidence'] ?? null;
+        $confidence = is_string($storedConfidence) ? Confidence::tryFrom($storedConfidence) : null;
+        $confidenceRead = $storedConfidence === null || $confidence !== null;
+
         return new self(
-            type: EvidenceType::tryFrom((string)($stored['type'] ?? '')) ?? EvidenceType::CONFIGURATION,
+            type: $type ?? EvidenceType::CONFIGURATION,
             label: (string)($text($stored['label'] ?? null) ?? ''),
             source: (string)($text($stored['source'] ?? null) ?? ''),
             data: is_array($stored['data'] ?? null) ? $stored['data'] : [],
-            observedAt: $moment($stored['observedAt'] ?? null),
-            recordedAt: $moment($stored['recordedAt'] ?? null),
+            observedAt: $observedAt === false ? null : $observedAt,
+            // Missing is as unknown as unreadable: evidence is always written with its moment.
+            recordedAt: $recordedAt ?? false,
             metadata: is_array($stored['metadata'] ?? null) ? $stored['metadata'] : [],
             reference: $text($stored['reference'] ?? null),
-            confidence: Confidence::tryFrom((string)($stored['confidence'] ?? '')),
-            truncated: (bool)($stored['truncated'] ?? false),
+            confidence: $confidence,
+            // A moment that could not be read leaves the fact partial, and it says so.
+            truncated: (bool)($stored['truncated'] ?? false) || $observedAt === false || !$recordedAt instanceof DateTimeImmutable || $type === null || !$dataRead || !$metadataRead || !$confidenceRead,
             diagnosticId: $text($stored['diagnosticId'] ?? null),
             runId: $text($stored['runId'] ?? null),
             environment: $text($stored['environment'] ?? null),
             siteId: is_numeric($stored['siteId'] ?? null) ? (int)$stored['siteId'] : null,
+            typeKnown: $type !== null,
+            readable: $dataRead && $metadataRead && $confidenceRead,
         );
     }
 
@@ -253,6 +289,8 @@ final class Evidence implements JsonSerializable
             runId: $context->runId,
             environment: $context->environment,
             siteId: $context->siteId,
+            typeKnown: $this->typeKnown,
+            readable: $this->readable,
         );
     }
 
@@ -317,7 +355,7 @@ final class Evidence implements JsonSerializable
             'environment' => $this->environment,
             'siteId' => $this->siteId,
             'observedAt' => $this->observedAt?->format(DATE_ATOM),
-            'recordedAt' => $this->recordedAt->format(DATE_ATOM),
+            'recordedAt' => $this->recordedAt?->format(DATE_ATOM),
         ];
     }
 
@@ -413,10 +451,5 @@ final class Evidence implements JsonSerializable
         }
 
         return $value;
-    }
-
-    private static function shorten(string $value, int $length): string
-    {
-        return mb_strlen($value) > $length ? mb_substr($value, 0, $length - 1) . '…' : $value;
     }
 }

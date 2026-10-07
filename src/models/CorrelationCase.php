@@ -287,11 +287,10 @@ final class CorrelationCase
 
         return new Observation(
             kind: Observation::EVIDENCE,
-            label: Craft::t('web-doctor', 'Failed job “{job}”, failed {count, plural, =1{once} other{# times}}', [
-                'job' => $evidence->label,
+            label: Craft::t('web-doctor', 'A failed job, failed {count, plural, =1{once} other{# times}}', [
                 'count' => (int)$evidence->get('occurrences', 1),
             ]),
-            detail: $error,
+            detail: trim((string)$evidence->get('description', '') . ': ' . (string)$error, ': '),
             diagnosticId: $result->diagnosticId,
             issueId: $this->issueIdFor($result->diagnosticId),
             evidenceDigest: $evidence->digest(),

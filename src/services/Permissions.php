@@ -53,6 +53,23 @@ class Permissions extends Component
      */
     public const INVESTIGATE_ISSUES = 'webDoctor:investigateIssues';
 
+    /**
+     * @var string Carrying out a repair: previewing what it would change, confirming it, and verifying
+     * it afterwards. Separate from every other permission because it is the one that changes the
+     * installation, and separate from {@see self::MANAGE_ISSUES} because deciding where an issue
+     * stands is not changing the site.
+     * A repair also needs whatever Craft itself requires for the same action.
+     */
+    public const RUN_REPAIRS = 'webDoctor:runRepairs';
+
+    /**
+     * @var string Reading the audit trail: who ran checks, investigated, repaired, verified, and
+     * moved or resolved issues, and when. Separate from {@see self::VIEW_ISSUES} because it says
+     * what people did, which is a different thing to show somebody from what was found; nested
+     * under it because every entry is about something in the Issue Center.
+     */
+    public const VIEW_AUDIT_TRAIL = 'webDoctor:viewAuditTrail';
+
     public function register(): void
     {
         Event::on(UserPermissions::class, UserPermissions::EVENT_REGISTER_PERMISSIONS, function(RegisterUserPermissionsEvent $event) {
@@ -87,6 +104,14 @@ class Permissions extends Component
                             self::INVESTIGATE_ISSUES => [
                                 'label' => Craft::t('web-doctor', 'Investigate issues'),
                                 'info' => Craft::t('web-doctor', 'Runs the checks related to an issue, or a recipe for a symptom, and records what they find.'),
+                            ],
+                            self::RUN_REPAIRS => [
+                                'label' => Craft::t('web-doctor', 'Run repairs'),
+                                'info' => Craft::t('web-doctor', 'Previews, carries out and verifies the repairs Web Doctor offers for an issue. Each repair changes this installation, is confirmed first, and also needs whatever Craft requires for the same action; verifying one runs its checks again and changes nothing.'),
+                            ],
+                            self::VIEW_AUDIT_TRAIL => [
+                                'label' => Craft::t('web-doctor', 'View audit trail'),
+                                'info' => Craft::t('web-doctor', 'Reads who ran checks, investigated, previewed, carried out and verified repairs, and moved or resolved issues, and when.'),
                             ],
                         ],
                     ],
@@ -123,6 +148,16 @@ class Permissions extends Component
     public function canInvestigate(): bool
     {
         return $this->can(self::INVESTIGATE_ISSUES);
+    }
+
+    public function canRunRepairs(): bool
+    {
+        return $this->can(self::RUN_REPAIRS);
+    }
+
+    public function canViewAuditTrail(): bool
+    {
+        return $this->can(self::VIEW_AUDIT_TRAIL);
     }
 
     /**

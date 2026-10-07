@@ -4,20 +4,25 @@ namespace Tahadudhiya\WebDoctor\controllers;
 
 use Craft;
 use craft\web\Controller;
+use Tahadudhiya\WebDoctor\base\RepairActionInterface;
 use Tahadudhiya\WebDoctor\enums\DiagnosticDepth;
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
 use Tahadudhiya\WebDoctor\errors\Refusal;
+use Tahadudhiya\WebDoctor\helpers\Actor;
 use Tahadudhiya\WebDoctor\helpers\RequestInput;
+use Tahadudhiya\WebDoctor\helpers\SiteName;
 use Tahadudhiya\WebDoctor\models\ErrorGroup;
 use Tahadudhiya\WebDoctor\models\Evidence;
 use Tahadudhiya\WebDoctor\models\Investigation;
 use Tahadudhiya\WebDoctor\models\IssueFilter;
+use Tahadudhiya\WebDoctor\models\RepairOffer;
 use Tahadudhiya\WebDoctor\models\SafeException;
 use Tahadudhiya\WebDoctor\models\StoredEvidence;
 use Tahadudhiya\WebDoctor\services\Investigations;
 use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
+use Tahadudhiya\WebDoctor\services\Repairs;
 use Tahadudhiya\WebDoctor\web\assets\cp\ControlPanelAsset;
 use Tahadudhiya\WebDoctor\WebDoctor;
 use Throwable;
@@ -45,6 +50,9 @@ class IssuesController extends Controller
 
         // Reading the Issue Center is its own permission, nested under reaching Web Doctor at
         // all. Changing an issue needs another, checked where the change happens.
+        // The section's own permission as well as this one's: Craft nests them only in its own
+        // screens, and a permission set written another way can hold a child without its parent.
+        $this->requirePermission(Permissions::VIEW);
         $this->requirePermission(Permissions::VIEW_ISSUES);
 
         return true;
@@ -104,7 +112,7 @@ class IssuesController extends Controller
             'severities' => Severity::cases(),
             'diagnostics' => $diagnostics,
             'environments' => $environments,
-            'sites' => $this->siteOptions(),
+            'sites' => SiteName::options(),
             'canManage' => $plugin->getPermissions()->canManageIssues(),
         ]);
     }
@@ -217,13 +225,36 @@ class IssuesController extends Controller
             }
         }
 
+        // Read on its own for the same reason. What a repair could do is worked out from the latest
+        // finding without reading or changing anything else; the preview is a separate request.
+        $repairsFailure = null;
+        $repairActions = [];
+        $repairRefusal = null;
+        $repairs = [];
+
+        if ($evidenceFailure !== null) {
+            $repairsFailure = Craft::t('web-doctor', 'Nothing can be offered for repair while the evidence behind this issue cannot be read.');
+        } else {
+            try {
+                $repairRefusal = $plugin->getRepairs()->refusal($issue);
+                $repairActions = $this->repairOffers(
+                    $plugin->getRepairs()->available($issue, array_map(static fn(StoredEvidence $stored): Evidence => $stored->evidence, $latestEvidence)),
+                    $repairRefusal === null && $plugin->getPermissions()->canRunRepairs(),
+                );
+                $repairs = $plugin->getRepairs()->forIssue($issue->id);
+            } catch (Throwable $e) {
+                SafeException::log('An issue\'s repairs could not be read', $e);
+                $repairsFailure = Craft::t('web-doctor', 'Web Doctor could not read the repairs of this issue. The details are in Craft’s logs.');
+            }
+        }
+
         $this->getView()->registerAssetBundle(ControlPanelAsset::class);
 
         return $this->renderTemplate('web-doctor/_issues/_detail', [
             'title' => Craft::t('web-doctor', 'Issues'),
             'issue' => $issue,
             'events' => $events,
-            'siteLabel' => $this->siteLabel($issue->siteId, $issue->siteName),
+            'siteLabel' => SiteName::label($issue->siteId, $issue->siteName),
             // Only the statuses a person may set, which is what makes resolution unavailable
             // here rather than merely discouraged.
             'settableStatuses' => IssueStatus::settableByHand(),
@@ -247,6 +278,15 @@ class IssuesController extends Controller
             'errorsFailure' => $errorsFailure,
             'recommendations' => $recommendations,
             'recommendationsFailure' => $recommendationsFailure,
+            'repairActions' => $repairActions,
+            // Which recommendations a repair offered here carries out, so the advice can point to it.
+            'repairsByRule' => $repairsFailure === null ? $this->repairsByRule($repairActions) : null,
+            'repairRefusal' => $repairRefusal,
+            'repairs' => $repairs,
+            'repairsFailure' => $repairsFailure,
+            'repairLimit' => Repairs::HISTORY_LIMIT,
+            'canRunRepairs' => $plugin->getPermissions()->canRunRepairs(),
+            'canViewAuditTrail' => $plugin->getPermissions()->canViewAuditTrail(),
         ]);
     }
 
@@ -305,6 +345,47 @@ class IssuesController extends Controller
     }
 
     /**
+     * The repairs that answer this finding, as this reader is shown them.
+     *
+     * @param list<RepairActionInterface> $actions Those that apply to the latest finding.
+     * @param bool $mayRun Whether the issue can be repaired here and this reader may run repairs.
+     * @return list<RepairOffer>
+     */
+    private function repairOffers(array $actions, bool $mayRun): array
+    {
+        return array_map(static function(RepairActionInterface $action) use ($mayRun): RepairOffer {
+            try {
+                $authorized = $action->isAuthorized();
+            } catch (Throwable $e) {
+                SafeException::log('Whether Craft allows a repair could not be established', $e);
+                $authorized = false;
+            }
+
+            return RepairOffer::of($action, $mayRun, $authorized);
+        }, $actions);
+    }
+
+    /**
+     * The repairs offered, keyed by the recommendation each carries out. The advice says "preview it
+     * below" only for one this reader could preview now.
+     *
+     * @param list<RepairOffer> $offers
+     * @return array<string, RepairOffer>
+     */
+    private function repairsByRule(array $offers): array
+    {
+        $out = [];
+
+        foreach ($offers as $offer) {
+            if ($offer->recommendation !== null) {
+                $out[$offer->recommendation] ??= $offer;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * How many issues are still outstanding, across every open status.
      *
      * @param array<string, int> $counts
@@ -360,59 +441,12 @@ class IssuesController extends Controller
     }
 
     /**
-     * The sites a reader can filter by, where Craft can say.
-     *
-     * @return array<int, string>
-     */
-    private function siteOptions(): array
-    {
-        try {
-            $sites = [];
-
-            foreach (Craft::$app->getSites()->getAllSites() as $site) {
-                $sites[$site->id] = $site->getName();
-            }
-
-            return $sites;
-        } catch (Throwable) {
-            return [];
-        }
-    }
-
-    /**
-     * What to call the site an issue belongs to.
-     *
-     * A finding made with no particular site in view and one made about a site that has since
-     * been deleted are different facts. Deleting a site nulls the reference but leaves the name
-     * behind, so the second still reads as the site it was rather than as the installation.
-     */
-    private function siteLabel(?int $siteId, ?string $siteName = null): string
-    {
-        if ($siteId === null) {
-            return $siteName === null
-                ? Craft::t('web-doctor', 'All sites')
-                : Craft::t('web-doctor', '{name} (deleted)', ['name' => $siteName]);
-        }
-
-        try {
-            $name = Craft::$app->getSites()->getSiteById($siteId)?->getName();
-        } catch (Throwable) {
-            $name = null;
-        }
-
-        return $name ?? $siteName ?? Craft::t('web-doctor', 'Site #{id} (no longer available)', ['id' => $siteId]);
-    }
-
-    /**
      * Who is asking, where Craft knows. Recorded against a change, never used to authorise one.
      */
     private function userId(): ?int
     {
-        try {
-            return Craft::$app->getUser()->getIdentity()?->id;
-        } catch (Throwable) {
-            return null;
-        }
+        // Craft's answer, or an error: a failed lookup is never recorded as nobody having asked.
+        return Actor::current()[0];
     }
 
     private function plugin(): WebDoctor

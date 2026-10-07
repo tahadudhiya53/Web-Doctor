@@ -145,7 +145,9 @@ final class RecommendationRule
     private function actionableCause(RecommendationCase $case): ?RootCause
     {
         foreach ($case->causes as $cause) {
-            if ($cause->ruleId === $this->cause && $cause->confidence->rank() >= self::ACTIONABLE->rank()) {
+            // Only a cause read back whole is acted on: one with a part that cannot be read is not
+            // one anybody can check the advice against.
+            if ($cause->ruleId === $this->cause && $cause->unreadable === [] && $cause->confidence !== null && $cause->confidence->rank() >= self::ACTIONABLE->rank()) {
                 return $cause;
             }
         }

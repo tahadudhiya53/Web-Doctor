@@ -20,3 +20,59 @@
 {% macro plainText(value) -%}
     {{- (value ?? '')|replace({ (constant('Tahadudhiya\\WebDoctor\\helpers\\Redaction::REDACTED')): '(' ~ 'Redacted'|t('web-doctor') ~ ')' }) -}}
 {%- endmacro %}
+
+{# A stored value that could not be read: said, never shown as some other value. #}
+{% macro unreadable() -%}
+    <span class="wd-mark wd-mark--unreadable" title="{{ 'What is stored here is not a value Web Doctor writes, so it is not shown as one.'|t('web-doctor') }}">{{ "Could not be read"|t('web-doctor') }}</span>
+{%- endmacro %}
+
+{# A stored moment, or the unreadable mark where it could not be read. #}
+{% macro when(moment, format = 'short') -%}
+    {%- import _self as m -%}
+    {%- if moment -%}{{ moment|datetime(format) }}{%- else -%}{{ m.unreadable() }}{%- endif -%}
+{%- endmacro %}
+
+{# A value of the vocabulary — a status, a severity, a category — or the unreadable mark. #}
+{% macro label(value) -%}
+    {%- import _self as m -%}
+    {%- if value -%}{{ value.label() }}{%- else -%}{{ m.unreadable() }}{%- endif -%}
+{%- endmacro %}
+
+{# The same as a pill: `classes` ends where the value's own name completes the class. #}
+{% macro pill(classes, value, text = null) -%}
+    {%- import _self as m -%}
+    {%- if value -%}<span class="wd-pill {{ classes }}{{ value.value }}">{{ text ?? value.label() }}</span>{%- else -%}{{ m.unreadable() }}{%- endif -%}
+{%- endmacro %}
+
+{# Where a filtered list is and how to move through it, keeping the filter. #}
+{% macro pager(page, route, filter) -%}
+    <div class="wd-pager">
+        <p class="light">{{ "Showing {first}–{last} of {total}."|t('web-doctor', { first: page.firstPosition(), last: page.lastPosition(), total: page.total }) }}</p>
+        {% if page.pageCount() > 1 %}
+            <nav class="wd-pager__links" aria-label="{{ "Pagination"|t('web-doctor') }}">
+                {% if page.hasPreviousPage() %}
+                    <a class="btn" href="{{ cpUrl(route, filter.onPage(page.currentPage() - 1).toParams()) }}">{{ "Previous"|t('web-doctor') }}</a>
+                {% endif %}
+                <span class="light">{{ "Page {page} of {pages}"|t('web-doctor', { page: page.currentPage(), pages: page.pageCount() }) }}</span>
+                {% if page.hasNextPage() %}
+                    <a class="btn" href="{{ cpUrl(route, filter.onPage(page.currentPage() + 1).toParams()) }}">{{ "Next"|t('web-doctor') }}</a>
+                {% endif %}
+            </nav>
+        {% endif %}
+    </div>
+{%- endmacro %}
+
+{# Which site a list is narrowed to. "No particular site" is records made with no site in view — not a
+   deleted site's, which keep its name. #}
+{% macro siteFilter(id, filter, sites) -%}
+    <label for="{{ id }}">{{ "Site"|t('web-doctor') }}</label>
+    <div class="select fullwidth">
+        <select id="{{ id }}" name="siteId">
+            <option value="">{{ "Any site"|t('web-doctor') }}</option>
+            <option value="none"{{ filter.withoutSite ? ' selected' : '' }}>{{ "No particular site"|t('web-doctor') }}</option>
+            {% for siteId, name in sites %}
+                <option value="{{ siteId }}"{{ filter.siteId == siteId ? ' selected' : '' }}>{{ name }}</option>
+            {% endfor %}
+        </select>
+    </div>
+{%- endmacro %}

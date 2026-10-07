@@ -81,6 +81,11 @@ class ExceptionLeakageTest extends TestCase
                 new \RuntimeException('Diagnostic failed', 0, new \PDOException(self::MESSAGE)),
             ],
             'an exception that is not an Exception' => [new \TypeError(self::MESSAGE)],
+            // An HTTP client quoting an API's JSON error body is the commonest way a credential
+            // reaches an exception message.
+            'an exception wrapping one that quotes JSON' => [
+                new \RuntimeException('outer failed password=hunter2', 0, new \RuntimeException('inner {"client_secret":"secret-token"}')),
+            ],
         ];
     }
 
@@ -102,6 +107,7 @@ class ExceptionLeakageTest extends TestCase
             'the result description' => $result->description,
             'the serialized result' => (string)json_encode($result),
             'the evidence' => (string)json_encode($result->evidence()),
+            'the evidence as it is cached' => serialize($result->evidence()),
             'the log' => $this->loggedMessages(),
             // What error grouping keeps: the grouped message, the occurrence's own wording, the
             // origin, the chain behind it and the trace.
@@ -134,9 +140,11 @@ class ExceptionLeakageTest extends TestCase
             $this->context,
         );
 
-        self::assertStringContainsString('RuntimeException', $result->description);
-        self::assertStringContainsString('Database failed', $result->description);
-        self::assertStringContainsString('[redacted]', $result->description);
+        $exception = $result->evidence()[0];
+
+        self::assertSame('RuntimeException', $exception->get('class'));
+        self::assertStringContainsString('Database failed', (string)$exception->get('message'));
+        self::assertStringContainsString('[redacted]', (string)$exception->get('message'));
         self::assertStringContainsString('tests.leaky', $this->loggedMessages());
     }
 
@@ -217,6 +225,10 @@ class ExceptionLeakageTest extends TestCase
         } catch (\RuntimeException $e) {
             $safe = SafeException::from($e);
         }
+
+        // Each frame still names its call site.
+        self::assertNotSame([], $safe->frames);
+        self::assertStringContainsString('ExceptionLeakageTest', $safe->frames[0]);
 
         foreach (self::SECRETS as $secret) {
             self::assertStringNotContainsString($secret, implode("\n", $safe->frames));

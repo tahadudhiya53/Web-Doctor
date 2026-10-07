@@ -4,6 +4,7 @@ namespace Tahadudhiya\WebDoctor\helpers;
 
 use Tahadudhiya\WebDoctor\base\DiagnosticInterface;
 use Tahadudhiya\WebDoctor\enums\DiagnosticCategory;
+use Tahadudhiya\WebDoctor\models\SafeException;
 use Throwable;
 
 /**
@@ -21,7 +22,9 @@ final class DiagnosticMeta
     {
         try {
             $id = $diagnostic->id();
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            self::failed($diagnostic, 'ID', $e);
+
             return $diagnostic::class;
         }
 
@@ -39,7 +42,9 @@ final class DiagnosticMeta
 
         try {
             $name = $diagnostic->name();
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            self::failed($diagnostic, 'name', $e);
+
             return $fallback;
         }
 
@@ -50,8 +55,22 @@ final class DiagnosticMeta
     {
         try {
             return $diagnostic->category();
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            self::failed($diagnostic, 'category', $e);
+
             return DiagnosticCategory::CONFIGURATION;
+        }
+    }
+
+    /**
+     * Records that a check could not say what it is. Logging never throws from here, since this can
+     * be reached while a failure is already being contained.
+     */
+    private static function failed(DiagnosticInterface $diagnostic, string $what, Throwable $e): void
+    {
+        try {
+            SafeException::log(sprintf('The diagnostic %s could not say its %s', $diagnostic::class, $what), $e);
+        } catch (Throwable) {
         }
     }
 }

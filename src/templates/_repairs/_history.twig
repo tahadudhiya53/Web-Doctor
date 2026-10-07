@@ -1,0 +1,167 @@
+{# The repair history, kept apart from the control panel shell for the reason the issue list is. #}
+
+{% import "web-doctor/_macros" as shared %}
+{% import "web-doctor/_repairs/_parts" as parts %}
+
+{% if failure %}
+    <div class="pane wd-failure" role="alert">
+        <p><strong>{{ failure }}</strong></p>
+    </div>
+{% endif %}
+
+{% if repairs is not null %}
+    <div class="pane">
+        <p class="wd-issues__headline">
+            {{ "{count, plural, =0{No repairs have been recorded.} =1{1 repair has been recorded.} other{# repairs have been recorded.}}"|t('web-doctor', { count: repairs.total }) }}
+        </p>
+        <p class="light">
+            {{ "Every repair previewed here, whether or not it was carried out: who previewed it and who carried it out, where, what it changed, how it ended and what verifying it established. A repair is kept after its issue is deleted, so this is the record of what Web Doctor has changed."|t('web-doctor') }}
+        </p>
+    </div>
+
+    <form method="get" action="" accept-charset="UTF-8" class="pane wd-filters">
+        <h2>{{ "Filter"|t('web-doctor') }}</h2>
+
+        <div class="wd-filters__grid">
+            <fieldset class="wd-filters__group">
+                <legend>{{ "Result"|t('web-doctor') }}</legend>
+                {% for status in statuses %}
+                    <label class="wd-filters__check">
+                        <input type="checkbox" name="status[]" value="{{ status.value }}"{{ filter.hasStatus(status) ? ' checked' : '' }}>
+                        {{ status.label() }}
+                    </label>
+                {% endfor %}
+            </fieldset>
+
+            <fieldset class="wd-filters__group">
+                <legend>{{ "Verification"|t('web-doctor') }}</legend>
+                {% for verification in verificationStatuses %}
+                    <label class="wd-filters__check">
+                        <input type="checkbox" name="verification[]" value="{{ verification.value }}"{{ filter.hasVerification(verification) ? ' checked' : '' }}>
+                        {{ verification.label() }}
+                    </label>
+                {% endfor %}
+            </fieldset>
+
+            <div class="wd-filters__group">
+                <label for="wd-repairs-action">{{ "Repair"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-repairs-action" name="repairAction">
+                        <option value="">{{ "Any repair"|t('web-doctor') }}</option>
+                        {% for id, name in actions %}
+                            <option value="{{ id }}"{{ filter.action == id ? ' selected' : '' }}>{{ shared.plainText(name) }} ({{ id }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <label for="wd-repairs-user">{{ "User"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-repairs-user" name="user">
+                        <option value="">{{ "Anybody"|t('web-doctor') }}</option>
+                        {% for id, name in users %}
+                            <option value="{{ id }}"{{ filter.userId == id ? ' selected' : '' }}>{{ shared.plainText(name) }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <label for="wd-repairs-environment">{{ "Environment"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-repairs-environment" name="environment">
+                        <option value="">{{ "Any environment"|t('web-doctor') }}</option>
+                        {% for environment in environments %}
+                            <option value="{{ environment }}"{{ filter.environment == environment ? ' selected' : '' }}>{{ shared.plainText(environment) }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                {{ shared.siteFilter('wd-repairs-site', filter, sites ?? []) }}
+            </div>
+
+            <div class="wd-filters__group">
+                <label for="wd-repairs-from">{{ "Previewed from"|t('web-doctor') }}</label>
+                <input type="date" id="wd-repairs-from" name="from" class="text fullwidth" value="{{ filter.from }}">
+
+                <label for="wd-repairs-to">{{ "Previewed to"|t('web-doctor') }}</label>
+                <input type="date" id="wd-repairs-to" name="to" class="text fullwidth" value="{{ filter.to }}">
+
+                <label for="wd-repairs-order">{{ "Order"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-repairs-order" name="order">
+                        <option value="newest">{{ "Newest first"|t('web-doctor') }}</option>
+                        <option value="oldest"{{ filter.oldestFirst ? ' selected' : '' }}>{{ "Oldest first"|t('web-doctor') }}</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="wd-filters__actions">
+            <button type="submit" class="btn submit">{{ "Apply"|t('web-doctor') }}</button>
+            <a class="btn" href="{{ cpUrl('web-doctor/repairs') }}">{{ "Clear"|t('web-doctor') }}</a>
+        </div>
+    </form>
+
+    {% if repairs.isEmpty() %}
+        <div class="pane wd-empty">
+            <p>
+                {{- filter.isFiltering()
+                    ? "No repairs match this filter."|t('web-doctor')
+                    : "No repairs have been recorded."|t('web-doctor') -}}
+            </p>
+            <p class="light">{{ "A repair is recorded when somebody previews one from an issue’s page."|t('web-doctor') }}</p>
+        </div>
+    {% else %}
+        <div class="pane">
+            <div class="wd-table-scroll">
+            <table class="data fullwidth wd-ledger">
+                <thead>
+                    <tr>
+                        <th scope="col">{{ "Repair"|t('web-doctor') }}</th>
+                        <th scope="col" class="wd-col-narrow">{{ "Result"|t('web-doctor') }}</th>
+                        <th scope="col" class="wd-col-narrow">{{ "Verification"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Who"|t('web-doctor') }}</th>
+                        <th scope="col" class="wd-col-narrow">{{ "Previewed"|t('web-doctor') }}</th>
+                        <th scope="col" class="wd-col-narrow">{{ "Finished"|t('web-doctor') }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for repair in repairs.items %}
+                        <tr>
+                            <td class="wd-col-detail">
+                                <div class="wd-result__name">
+                                    <a href="{{ cpUrl('web-doctor/repairs/' ~ repair.id) }}">{{ shared.text(repair.actionName) }}</a>
+                                    {{ parts.risk(repair) }}
+                                </div>
+                                <div class="wd-result__id">
+                                    {% if repair.issueId %}
+                                        <a href="{{ cpUrl('web-doctor/issues/' ~ repair.issueId) }}">{{ shared.text(repair.issueTitle) }}</a>
+                                    {% else %}
+                                        {{ shared.text(repair.issueTitle) }} <span class="light">{{ "(issue deleted)"|t('web-doctor') }}</span>
+                                    {% endif %}
+                                    &middot; {{ shared.text(repair.environment) }}
+                                </div>
+                                {% if repair.failure %}
+                                    <div class="error">{{ shared.text(repair.failure) }}</div>
+                                {% endif %}
+                            </td>
+                            <td class="wd-col-narrow">{{ parts.status(repair) }}</td>
+                            <td class="wd-col-narrow">
+                                {{ parts.verification(repair) }}
+                            </td>
+                            <td>
+                                <div>{{ "Previewed by {name}"|t('web-doctor', { name: repair.previewedByLabel() ?? "an unknown user"|t('web-doctor') }) }}</div>
+                                {% if repair.executedByLabel() %}
+                                    <div>{{ "Carried out by {name}"|t('web-doctor', { name: repair.executedByLabel() }) }}</div>
+                                {% endif %}
+                            </td>
+                            <td class="wd-col-narrow">{{ shared.when(repair.previewedAt) }}</td>
+                            <td class="wd-col-narrow">{{ repair.finishedAt or repair.isUnreadable('finishedAt') ? shared.when(repair.finishedAt) : '—' }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+
+            {{ shared.pager(repairs, 'web-doctor/repairs', filter) }}
+        </div>
+    {% endif %}
+{% endif %}

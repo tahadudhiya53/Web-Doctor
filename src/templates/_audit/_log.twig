@@ -1,0 +1,180 @@
+{# The audit log, kept apart from the control panel shell for the reason the issue list is. #}
+
+{% import "web-doctor/_macros" as shared %}
+
+{# How each result looks, in the pills the rest of Web Doctor already uses. #}
+{% set resultPill = { succeeded: 'pass', partial: 'warning', failed: 'fail', inconclusive: 'unknown', none: 'none' } %}
+
+{% if failure %}
+    <div class="pane wd-failure" role="alert">
+        <p><strong>{{ failure }}</strong></p>
+    </div>
+{% endif %}
+
+{% if entries is not null %}
+    <div class="pane">
+        <p class="wd-issues__headline">
+            {{ "{count, plural, =0{Nothing has been recorded.} =1{1 action has been recorded.} other{# actions have been recorded.}}"|t('web-doctor', { count: entries.total }) }}
+        </p>
+        <p class="light">
+            {{ "Who ran checks, investigated, previewed, carried out and verified repairs, and moved or resolved issues — where, when and how it ended. A change Web Doctor made is recorded in the same transaction as the change, so neither stands without the other. Requests that were refused changed nothing and are in Craft’s logs instead. Entries are kept for {days} days."|t('web-doctor', { days: retainDays }) }}
+        </p>
+    </div>
+
+    <form method="get" action="" accept-charset="UTF-8" class="pane wd-filters">
+        <h2>{{ "Filter"|t('web-doctor') }}</h2>
+
+        <div class="wd-filters__grid">
+            <fieldset class="wd-filters__group">
+                <legend>{{ "Action"|t('web-doctor') }}</legend>
+                {% for option in actions %}
+                    <label class="wd-filters__check">
+                        <input type="checkbox" name="auditAction[]" value="{{ option.value }}"{{ filter.hasAction(option) ? ' checked' : '' }}>
+                        {{ option.label() }}
+                    </label>
+                {% endfor %}
+            </fieldset>
+
+            <fieldset class="wd-filters__group">
+                <legend>{{ "Result"|t('web-doctor') }}</legend>
+                {% for option in results %}
+                    <label class="wd-filters__check">
+                        <input type="checkbox" name="result[]" value="{{ option.value }}"{{ filter.hasResult(option) ? ' checked' : '' }}>
+                        {{ option.label() }}
+                    </label>
+                {% endfor %}
+            </fieldset>
+
+            <div class="wd-filters__group">
+                <label for="wd-audit-user">{{ "User"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-audit-user" name="user">
+                        <option value="">{{ "Anybody"|t('web-doctor') }}</option>
+                        <option value="none"{{ filter.withoutUser ? ' selected' : '' }}>{{ "Nobody signed in (console or queue)"|t('web-doctor') }}</option>
+                        {% for id, name in users %}
+                            <option value="{{ id }}"{{ filter.userId == id ? ' selected' : '' }}>{{ shared.plainText(name) }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <label for="wd-audit-environment">{{ "Environment"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-audit-environment" name="environment">
+                        <option value="">{{ "Any environment"|t('web-doctor') }}</option>
+                        {% for environment in environments %}
+                            <option value="{{ environment }}"{{ filter.environment == environment ? ' selected' : '' }}>{{ shared.plainText(environment) }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                {{ shared.siteFilter('wd-audit-site', filter, sites ?? []) }}
+
+                {% if filter.issueId %}
+                    <input type="hidden" name="issue" value="{{ filter.issueId }}">
+                    <p class="light">{{ 'Only what concerns issue #{id}.'|t('web-doctor', { id: filter.issueId }) }}</p>
+                {% endif %}
+            </div>
+
+            <div class="wd-filters__group">
+                <label for="wd-audit-from">{{ "From"|t('web-doctor') }}</label>
+                <input type="date" id="wd-audit-from" name="from" class="text fullwidth" value="{{ filter.from }}">
+
+                <label for="wd-audit-to">{{ "To"|t('web-doctor') }}</label>
+                <input type="date" id="wd-audit-to" name="to" class="text fullwidth" value="{{ filter.to }}">
+
+                <label for="wd-audit-order">{{ "Order"|t('web-doctor') }}</label>
+                <div class="select fullwidth">
+                    <select id="wd-audit-order" name="order">
+                        <option value="newest">{{ "Newest first"|t('web-doctor') }}</option>
+                        <option value="oldest"{{ filter.oldestFirst ? ' selected' : '' }}>{{ "Oldest first"|t('web-doctor') }}</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="wd-filters__actions">
+            <button type="submit" class="btn submit">{{ "Apply"|t('web-doctor') }}</button>
+            <a class="btn" href="{{ cpUrl('web-doctor/audit') }}">{{ "Clear"|t('web-doctor') }}</a>
+        </div>
+    </form>
+
+    {% if entries.isEmpty() %}
+        <div class="pane wd-empty">
+            <p>
+                {{- filter.isFiltering()
+                    ? "Nothing recorded matches this filter."|t('web-doctor')
+                    : "Nothing has been recorded."|t('web-doctor') -}}
+            </p>
+            <p class="light">{{ "An entry is recorded when somebody runs checks, investigates, repairs or verifies, or when an issue is moved or resolved."|t('web-doctor') }}</p>
+        </div>
+    {% else %}
+        <div class="pane">
+            <div class="wd-table-scroll">
+            <table class="data fullwidth wd-ledger">
+                <thead>
+                    <tr>
+                        <th scope="col" class="wd-col-narrow">{{ "When"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "What"|t('web-doctor') }}</th>
+                        <th scope="col" class="wd-col-narrow">{{ "Result"|t('web-doctor') }}</th>
+                        <th scope="col">{{ "Who"|t('web-doctor') }}</th>
+                        <th scope="col" class="wd-col-narrow">{{ "Where"|t('web-doctor') }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for entry in entries.items %}
+                        {% set path = entry.cpPath() %}
+                        <tr>
+                            <td class="wd-col-narrow">{{ shared.when(entry.occurredAt) }}</td>
+                            <td class="wd-col-detail">
+                                <div class="wd-result__name">{{ shared.label(entry.action) }}</div>
+                                <div>
+                                    {{ shared.label(entry.objectType) }}
+                                    {%- if entry.objectLabel %}:
+                                        {% if path %}<a href="{{ cpUrl(path) }}">{{ shared.text(entry.objectLabel) }}</a>{% else %}{{ shared.text(entry.objectLabel) }}{% endif %}
+                                    {%- elseif path %}: <a href="{{ cpUrl(path) }}">#{{ entry.objectId }}</a>
+                                    {%- elseif entry.objectId %} <code>{{ entry.objectId }}</code>{% endif %}
+                                </div>
+                                <div class="light">{{ shared.text(entry.summary) }}</div>
+                                {% if entry.unreadable|length %}
+                                    <div class="warning">{{ "Part of this entry could not be read, so it is shown as unreadable rather than as anything else:"|t('web-doctor') }} {{ entry.unreadable|join(', ') }}</div>
+                                {% endif %}
+                                {% if entry.truncated %}
+                                    <div class="light">{{ "Some details were left out when this was recorded, because an entry keeps only short named values."|t('web-doctor') }}</div>
+                                {% endif %}
+                                {% if entry.details|length %}
+                                    <details class="wd-audit__details">
+                                        <summary>{{ "Details"|t('web-doctor') }}</summary>
+                                        <dl class="wd-meta">
+                                            {% for key, value in entry.details %}
+                                                <div>
+                                                    <dt><code>{{ key }}</code></dt>
+                                                    <dd>
+                                                        {%- if value is iterable %}
+                                                            {%- for item in value %}{{ shared.text((item ?? '—') ~ '') }}{{ not loop.last ? ', ' }}{% else %}—{% endfor -%}
+                                                        {%- elseif value is same as(true) %}{{ "Yes"|t('web-doctor') }}
+                                                        {%- elseif value is same as(false) %}{{ "No"|t('web-doctor') }}
+                                                        {%- elseif value is null %}—
+                                                        {%- else %}{{ shared.text(value ~ '') }}{% endif -%}
+                                                    </dd>
+                                                </div>
+                                            {% endfor %}
+                                        </dl>
+                                    </details>
+                                {% endif %}
+                            </td>
+                            <td class="wd-col-narrow">{% if entry.result %}<span class="wd-pill wd-pill--{{ resultPill[entry.result.value] }}">{{ entry.result.label() }}</span>{% else %}{{ shared.unreadable() }}{% endif %}</td>
+                            <td>{{ shared.text(entry.userLabel()) }}</td>
+                            <td class="wd-col-narrow">
+                                <div>{{ shared.text(entry.environment) }}</div>
+                                <div class="light">{{ shared.text(entry.siteLabel()) }}</div>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+
+            {{ shared.pager(entries, 'web-doctor/audit', filter) }}
+        </div>
+    {% endif %}
+{% endif %}

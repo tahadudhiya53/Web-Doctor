@@ -25,7 +25,7 @@
 
         {% if canInvestigate %}
             {% if investigationRefusal %}
-                <p class="warning">{{ investigationRefusal }}</p>
+                <p class="warning">{{ shared.text(investigationRefusal) }}</p>
             {% else %}
                 <form method="post" accept-charset="UTF-8" class="wd-toolbar" data-wd-run-form>
                     {{ csrfInput() }}
@@ -72,9 +72,9 @@
                 <tbody>
                     {% for investigation in investigations %}
                         <tr>
-                            <td class="wd-col-narrow"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '/investigations/' ~ investigation.id) }}">{{ investigation.startedAt|datetime('short') }}</a></td>
-                            <td class="wd-col-narrow"><span class="wd-pill wd-pill--investigation-{{ investigation.status.value }}">{{ investigation.statusLabel() }}</span></td>
-                            <td class="wd-col-narrow">{{ investigation.depth.label() }}</td>
+                            <td class="wd-col-narrow"><a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '/investigations/' ~ investigation.id) }}">{{ shared.when(investigation.startedAt) }}</a></td>
+                            <td class="wd-col-narrow">{{ shared.pill('wd-pill--investigation-', investigation.status, investigation.statusLabel()) }}</td>
+                            <td class="wd-col-narrow">{{ shared.label(investigation.depth) }}</td>
                             <td>{{ investigation.checksRun }}</td>
                             <td>{{ investigation.checksWithProblems }}</td>
                             <td>{{ investigation.checksIncomplete }}</td>
@@ -83,7 +83,7 @@
                                 {% if causesFailure ?? false %}
                                     <span class="light">{{ "Could not be read"|t('web-doctor') }}</span>
                                 {% elseif cause %}
-                                    <span class="wd-pill wd-pill--confidence-{{ cause.confidence.value }}">{{ cause.confidence.label() }}</span>
+                                    {{ shared.pill('wd-pill--confidence-', cause.confidence) }}
                                     <a href="{{ cpUrl('web-doctor/issues/' ~ issue.id ~ '/investigations/' ~ investigation.id) }}#causes">{{ shared.text(cause.title) }}</a>
                                 {% else %}
                                     <span class="light">{{ "None"|t('web-doctor') }}</span>

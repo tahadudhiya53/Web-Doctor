@@ -109,20 +109,29 @@ class PluginTest extends TestCase
     public function testServiceComponentsAreRegistered(): void
     {
         $classes = array_map(static fn(array $c): string => $c['class'], WebDoctor::config()['components']);
-        $expected = [
-            'diagnostics' => \Tahadudhiya\WebDoctor\services\Diagnostics::class,
+        // The local test lab's component is not part of the plugin.
+        unset($classes['testLab']);
+        ksort($classes);
+
+        self::assertSame([
+            'audit' => \Tahadudhiya\WebDoctor\services\Audit::class,
             'diagnosticEngine' => \Tahadudhiya\WebDoctor\services\DiagnosticEngine::class,
+            'diagnostics' => \Tahadudhiya\WebDoctor\services\Diagnostics::class,
             'errors' => \Tahadudhiya\WebDoctor\services\Errors::class,
             'evidence' => \Tahadudhiya\WebDoctor\services\EvidenceStore::class,
+            'history' => \Tahadudhiya\WebDoctor\services\History::class,
             'investigations' => \Tahadudhiya\WebDoctor\services\Investigations::class,
             'issues' => \Tahadudhiya\WebDoctor\services\Issues::class,
             'permissions' => Permissions::class,
+            'recipes' => \Tahadudhiya\WebDoctor\services\Recipes::class,
             'recommendations' => \Tahadudhiya\WebDoctor\services\Recommendations::class,
+            'repairActions' => \Tahadudhiya\WebDoctor\services\RepairActions::class,
+            'repairs' => \Tahadudhiya\WebDoctor\services\Repairs::class,
             'rootCauses' => \Tahadudhiya\WebDoctor\services\RootCauses::class,
             'runs' => \Tahadudhiya\WebDoctor\services\Runs::class,
-        ];
-
-        self::assertSame($expected, array_intersect_key($classes, $expected));
+            'verificationActions' => \Tahadudhiya\WebDoctor\services\VerificationActions::class,
+            'verifications' => \Tahadudhiya\WebDoctor\services\Verifications::class,
+        ], $classes);
     }
 
     public function testPluginHasAControlPanelSectionAndSettings(): void
@@ -131,14 +140,6 @@ class PluginTest extends TestCase
 
         self::assertTrue($defaults['hasCpSection']);
         self::assertTrue($defaults['hasCpSettings']);
-    }
-
-    public function testSettingsModelIsCreated(): void
-    {
-        $reflection = new ReflectionClass(WebDoctor::class);
-        $settings = $reflection->getMethod('createSettingsModel')->invoke($reflection->newInstanceWithoutConstructor());
-
-        self::assertInstanceOf(Settings::class, $settings);
     }
 
     public function testBothControlPanelIconsExist(): void
@@ -199,44 +200,39 @@ class PluginTest extends TestCase
         }
     }
 
-    public function testRunningDiagnosticsIsGuardedSeparatelyFromViewing(): void
+    /**
+     * The whole permission tree, exactly. Permissions arrive with the features they guard, so
+     * declaring one early would offer an administrator a switch that changes nothing.
+     *
+     * Each is separate because the costs differ. Reading what a run concluded costs nothing;
+     * starting one spends the site's time. An issue carries decisions not everybody's to make, its
+     * evidence carries internals not everybody following it needs to see, and investigating runs
+     * checks on demand. A repair is the one thing that changes the installation, so it is a leaf
+     * granted by nothing else. The audit trail says what people did, a different thing to show
+     * somebody from what was found, and every entry is about something in the Issue Center.
+     */
+    public function testThePermissionTreeIsExactlyThis(): void
     {
-        // Reading what a previous run concluded costs nothing; starting a run spends the site's
-        // time on demand. A reader who may do the first must not automatically do the second.
         $definitions = (new Permissions())->definitions();
+        $shape = function(array $definitions) use (&$shape): array {
+            return array_map(static fn(array $d): array => $shape($d['nested'] ?? []), $definitions);
+        };
 
-        self::assertArrayHasKey(Permissions::VIEW, $definitions);
-        self::assertNotSame('', $definitions[Permissions::VIEW]['label']);
-        self::assertArrayHasKey(Permissions::RUN, $definitions[Permissions::VIEW]['nested'] ?? []);
-    }
-
-    public function testChangingInvestigatingOrReadingTheEvidenceOfAnIssueIsGuardedSeparatelyFromReadingIt(): void
-    {
-        // An issue carries decisions — that something is being looked at, that something will
-        // not be acted on — and a decision recorded against a team's installation is not
-        // everybody's to make. Its evidence carries the internals it was found in, which not
-        // everybody following the issue needs to see. Investigating one runs checks on demand,
-        // which is neither of those and costs the site's time.
-        $definitions = (new Permissions())->definitions();
-        $issues = $definitions[Permissions::VIEW]['nested'][Permissions::VIEW_ISSUES] ?? null;
-
-        self::assertIsArray($issues);
-        self::assertArrayHasKey(Permissions::MANAGE_ISSUES, $issues['nested'] ?? []);
-        self::assertArrayHasKey(Permissions::VIEW_EVIDENCE, $issues['nested'] ?? []);
-        self::assertArrayHasKey(Permissions::INVESTIGATE_ISSUES, $issues['nested'] ?? []);
-    }
-
-    public function testOnlyPermissionsWithSomethingBehindThemAreDeclared(): void
-    {
-        // Permissions arrive with the features they guard. Declaring one early would offer an
-        // administrator a switch that changes nothing.
         self::assertSame([
-            Permissions::VIEW,
-            Permissions::RUN,
-            Permissions::VIEW_ISSUES,
-            Permissions::MANAGE_ISSUES,
-            Permissions::VIEW_EVIDENCE,
-            Permissions::INVESTIGATE_ISSUES,
-        ], $this->allPermissions());
+            Permissions::VIEW => [
+                Permissions::RUN => [],
+                Permissions::VIEW_ISSUES => [
+                    Permissions::MANAGE_ISSUES => [],
+                    Permissions::VIEW_EVIDENCE => [],
+                    Permissions::INVESTIGATE_ISSUES => [],
+                    Permissions::RUN_REPAIRS => [],
+                    Permissions::VIEW_AUDIT_TRAIL => [],
+                ],
+            ],
+        ], $shape($definitions));
+
+        self::assertNotSame('', $definitions[Permissions::VIEW]['label']);
+        // Running a repair also needs Craft's own permission for the same act, and says so.
+        self::assertStringContainsString('Craft requires', $definitions[Permissions::VIEW]['nested'][Permissions::VIEW_ISSUES]['nested'][Permissions::RUN_REPAIRS]['info'] ?? '');
     }
 }

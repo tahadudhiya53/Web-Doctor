@@ -3,6 +3,8 @@
 namespace Tahadudhiya\WebDoctor\Tests\_support;
 
 use Craft;
+use Tahadudhiya\WebDoctor\records\AuditRecord;
+use Tahadudhiya\WebDoctor\records\DiagnosticRunRecord;
 use Tahadudhiya\WebDoctor\records\ErrorGroupRecord;
 use Tahadudhiya\WebDoctor\records\ErrorSourceRecord;
 use Tahadudhiya\WebDoctor\records\EvidenceRecord;
@@ -10,7 +12,9 @@ use Tahadudhiya\WebDoctor\records\InvestigationRecord;
 use Tahadudhiya\WebDoctor\records\InvestigationStepRecord;
 use Tahadudhiya\WebDoctor\records\IssueEventRecord;
 use Tahadudhiya\WebDoctor\records\IssueRecord;
+use Tahadudhiya\WebDoctor\records\RepairRecord;
 use Tahadudhiya\WebDoctor\records\RootCauseRecord;
+use Tahadudhiya\WebDoctor\records\VerificationRecord;
 
 /**
  * Everything Web Doctor keeps, reduced to one comparable value per table: how many rows, and a
@@ -26,7 +30,7 @@ final class WebDoctorTables
     {
         $out = [];
 
-        foreach ([IssueRecord::TABLE, IssueEventRecord::TABLE, EvidenceRecord::TABLE, InvestigationRecord::TABLE, InvestigationStepRecord::TABLE, RootCauseRecord::TABLE, ErrorGroupRecord::TABLE, ErrorSourceRecord::TABLE] as $table) {
+        foreach ([IssueRecord::TABLE, IssueEventRecord::TABLE, EvidenceRecord::TABLE, InvestigationRecord::TABLE, InvestigationStepRecord::TABLE, RootCauseRecord::TABLE, ErrorGroupRecord::TABLE, ErrorSourceRecord::TABLE, RepairRecord::TABLE, VerificationRecord::TABLE, AuditRecord::TABLE, DiagnosticRunRecord::TABLE] as $table) {
             $rows = (new \craft\db\Query())->from($table)->orderBy(['id' => SORT_ASC])->all(Craft::$app->getDb());
             $out[$table] = ['rows' => count($rows), 'digest' => md5((string)json_encode($rows))];
         }

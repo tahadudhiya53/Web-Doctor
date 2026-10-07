@@ -7,36 +7,50 @@ use craft\base\Model;
 use craft\base\Plugin;
 use craft\console\Application as ConsoleApplication;
 use craft\events\RegisterUrlRulesEvent;
+use craft\queue\Queue;
 use craft\web\UrlManager;
 use Tahadudhiya\WebDoctor\console\controllers\WebDoctorController;
 use Tahadudhiya\WebDoctor\models\Settings;
+use Tahadudhiya\WebDoctor\services\Audit;
 use Tahadudhiya\WebDoctor\services\DiagnosticEngine;
 use Tahadudhiya\WebDoctor\services\Diagnostics;
 use Tahadudhiya\WebDoctor\services\Errors;
 use Tahadudhiya\WebDoctor\services\EvidenceStore;
+use Tahadudhiya\WebDoctor\services\History;
 use Tahadudhiya\WebDoctor\services\Investigations;
 use Tahadudhiya\WebDoctor\services\Issues;
 use Tahadudhiya\WebDoctor\services\Permissions;
 use Tahadudhiya\WebDoctor\services\Recipes;
 use Tahadudhiya\WebDoctor\services\Recommendations;
+use Tahadudhiya\WebDoctor\services\RepairActions;
+use Tahadudhiya\WebDoctor\services\Repairs;
 use Tahadudhiya\WebDoctor\services\RootCauses;
 use Tahadudhiya\WebDoctor\services\Runs;
+use Tahadudhiya\WebDoctor\services\VerificationActions;
+use Tahadudhiya\WebDoctor\services\Verifications;
+use Tahadudhiya\WebDoctor\verifications\RetriedJobsSettled;
 use yii\base\Event;
 
 /**
  * Web Doctor — diagnostics and maintenance for Craft CMS.
  *
+ * @property-read Audit $audit
  * @property-read DiagnosticEngine $diagnosticEngine
  * @property-read Diagnostics $diagnostics
  * @property-read Errors $errors
  * @property-read EvidenceStore $evidence
+ * @property-read History $history
  * @property-read Investigations $investigations
  * @property-read Issues $issues
  * @property-read Permissions $permissions
  * @property-read Recipes $recipes
  * @property-read Recommendations $recommendations
+ * @property-read RepairActions $repairActions
+ * @property-read Repairs $repairs
  * @property-read RootCauses $rootCauses
  * @property-read Runs $runs
+ * @property-read VerificationActions $verificationActions
+ * @property-read Verifications $verifications
  * @property-read Settings $settings
  */
 class WebDoctor extends Plugin
@@ -58,6 +72,7 @@ class WebDoctor extends Plugin
     {
         return [
             'components' => [
+                'audit' => ['class' => Audit::class],
                 'diagnostics' => [
                     'class' => Diagnostics::class,
                     // The registry the plugin hands out is the one that holds Web Doctor's own
@@ -68,14 +83,21 @@ class WebDoctor extends Plugin
                 'diagnosticEngine' => ['class' => DiagnosticEngine::class],
                 'errors' => ['class' => Errors::class],
                 'evidence' => ['class' => EvidenceStore::class],
+                'history' => ['class' => History::class],
                 'investigations' => ['class' => Investigations::class],
                 'issues' => ['class' => Issues::class],
                 'permissions' => ['class' => Permissions::class],
                 // As with the diagnostics: the registry the plugin hands out holds Web Doctor's own.
                 'recipes' => ['class' => Recipes::class, 'includeCoreRecipes' => true],
                 'recommendations' => ['class' => Recommendations::class],
+                // As with the diagnostics: the registry the plugin hands out holds Web Doctor's own.
+                'repairActions' => ['class' => RepairActions::class, 'includeCoreActions' => true],
+                'repairs' => ['class' => Repairs::class],
                 'rootCauses' => ['class' => RootCauses::class],
                 'runs' => ['class' => Runs::class],
+                // As with the diagnostics: the registry the plugin hands out holds Web Doctor's own.
+                'verificationActions' => ['class' => VerificationActions::class, 'includeCoreActions' => true],
+                'verifications' => ['class' => Verifications::class],
             ],
         ];
     }
@@ -84,10 +106,11 @@ class WebDoctor extends Plugin
     {
         parent::init();
 
-        // All three only attach event handlers, so they are registered immediately rather than
+        // Each only attaches event handlers, so they are registered immediately rather than
         // deferred: nothing here touches the database, the filesystem or the network, and a
         // handler that is attached before Craft finishes booting cannot be missed by whatever
         // fires first.
+        $this->registerQueueSignals();
         $this->registerConsoleCommands();
         $this->registerCpRoutes();
         $this->getPermissions()->register();
@@ -103,19 +126,27 @@ class WebDoctor extends Plugin
 
         $item['label'] = $this->getSettings()->pluginName;
 
-        $subnav = ['overview' => ['label' => Craft::t('web-doctor', 'Overview'), 'url' => 'web-doctor']];
+        $subnav = [
+            'overview' => ['label' => Craft::t('web-doctor', 'Overview'), 'url' => 'web-doctor'],
+            // What earlier runs found is what the dashboard showed then, so reading it needs what
+            // reading the dashboard needs.
+            'history' => ['label' => Craft::t('web-doctor', 'History'), 'url' => 'web-doctor/history'],
+        ];
 
         if ($this->getPermissions()->canViewIssues()) {
             $subnav['recipes'] = ['label' => Craft::t('web-doctor', 'Recipes'), 'url' => 'web-doctor/recipes'];
             $subnav['issues'] = ['label' => Craft::t('web-doctor', 'Issues'), 'url' => 'web-doctor/issues'];
             $subnav['errors'] = ['label' => Craft::t('web-doctor', 'Errors'), 'url' => 'web-doctor/errors'];
+            $subnav['repairs'] = ['label' => Craft::t('web-doctor', 'Repairs'), 'url' => 'web-doctor/repairs'];
         }
 
-        // A single-entry sub-navigation is noise: it repeats the section's own name underneath
-        // itself and gives a reader nothing to choose between.
-        if (count($subnav) > 1) {
-            $item['subnav'] = $subnav;
+        // Nested under reading issues, and checked as nested: every entry is about something there.
+        if ($this->getPermissions()->canViewIssues() && $this->getPermissions()->canViewAuditTrail()) {
+            $subnav['audit'] = ['label' => Craft::t('web-doctor', 'Audit log'), 'url' => 'web-doctor/audit'];
         }
+
+        // Everybody who may reach Web Doctor has at least the overview and its history to choose between.
+        $item['subnav'] = $subnav;
 
         return $item;
     }
@@ -152,8 +183,9 @@ class WebDoctor extends Plugin
         /** @var Issues $issues */
         $issues = $this->get('issues');
 
-        // Tied to this plugin instance's store, for the reason the engine is tied to its registry.
+        // Tied to this plugin instance's store and trail, for the reason the engine is tied to its registry.
         $issues->evidence ??= $this->getEvidence();
+        $issues->audit ??= $this->getAudit();
 
         return $issues;
     }
@@ -174,6 +206,7 @@ class WebDoctor extends Plugin
         $investigations->errors ??= $this->getErrors();
         $investigations->rootCauses ??= $this->getRootCauses();
         $investigations->recipes ??= $this->getRecipes();
+        $investigations->audit ??= $this->getAudit();
 
         return $investigations;
     }
@@ -203,6 +236,63 @@ class WebDoctor extends Plugin
     }
 
     /**
+     * Every repair action Web Doctor can carry out.
+     */
+    public function getRepairActions(): RepairActions
+    {
+        return $this->get('repairActions');
+    }
+
+    /**
+     * Carries out repairs somebody previewed and confirmed, and keeps the record of each.
+     */
+    public function getRepairs(): Repairs
+    {
+        /** @var Repairs $repairs */
+        $repairs = $this->get('repairs');
+
+        // Tied to this plugin instance's actions, Issue Center and evidence, for the reason the
+        // engine is tied to its registry.
+        $repairs->actions ??= $this->getRepairActions();
+        $repairs->issues ??= $this->getIssues();
+        $repairs->evidence ??= $this->getEvidence();
+        $repairs->permissions ??= $this->getPermissions();
+        $repairs->audit ??= $this->getAudit();
+
+        return $repairs;
+    }
+
+    /**
+     * What each repair Web Doctor can carry out should have left true.
+     */
+    public function getVerificationActions(): VerificationActions
+    {
+        return $this->get('verificationActions');
+    }
+
+    /**
+     * Establishes whether a carried-out repair worked, and keeps the record of each attempt.
+     */
+    public function getVerifications(): Verifications
+    {
+        /** @var Verifications $verifications */
+        $verifications = $this->get('verifications');
+
+        // Tied to this plugin instance's repairs, checks, Issue Center, errors and evidence, for the
+        // reason the engine is tied to its registry.
+        $verifications->repairs ??= $this->getRepairs();
+        $verifications->actions ??= $this->getVerificationActions();
+        $verifications->registry ??= $this->getDiagnostics();
+        $verifications->engine ??= $this->getDiagnosticEngine();
+        $verifications->issues ??= $this->getIssues();
+        $verifications->errors ??= $this->getErrors();
+        $verifications->evidence ??= $this->getEvidence();
+        $verifications->audit ??= $this->getAudit();
+
+        return $verifications;
+    }
+
+    /**
      * Weighs what an investigation found against the known causes, and keeps what it concluded.
      */
     public function getRootCauses(): RootCauses
@@ -223,6 +313,22 @@ class WebDoctor extends Plugin
         $errors->issues ??= $this->getIssues();
 
         return $errors;
+    }
+
+    /**
+     * Diagnostic history: every run from the dashboard as it finished, with its health snapshot.
+     */
+    public function getHistory(): History
+    {
+        return $this->get('history');
+    }
+
+    /**
+     * The audit trail: what was done with Web Doctor, by whom, and how it ended.
+     */
+    public function getAudit(): Audit
+    {
+        return $this->get('audit');
     }
 
     /**
@@ -277,6 +383,13 @@ class WebDoctor extends Plugin
             $event->rules['web-doctor'] = 'web-doctor/overview/index';
             $event->rules['web-doctor/issues'] = 'web-doctor/issues/index';
             $event->rules['web-doctor/issues/<issueId:\d+>/investigations/<investigationId:\d+>'] = 'web-doctor/investigations/detail';
+            $event->rules['web-doctor/issues/<issueId:\d+>/repairs/<repairId:\d+>'] = 'web-doctor/repairs/detail';
+            // A repair outlives its issue, so its history and its page are reachable on their own.
+            $event->rules['web-doctor/repairs'] = 'web-doctor/repairs/index';
+            $event->rules['web-doctor/repairs/<repairId:\d+>'] = 'web-doctor/repairs/detail';
+            $event->rules['web-doctor/audit'] = 'web-doctor/audit/index';
+            $event->rules['web-doctor/history'] = 'web-doctor/history/index';
+            $event->rules['web-doctor/history/<runId:\d+>'] = 'web-doctor/history/detail';
             // Numeric only, so the route cannot be reached with something that is not an ID and
             // the controller never has to decide what a non-numeric issue means.
             $event->rules['web-doctor/issues/<issueId:\d+>'] = 'web-doctor/issues/detail';
@@ -286,6 +399,16 @@ class WebDoctor extends Plugin
             // A recipe ID has a diagnostic ID's shape, so only that shape reaches the controller.
             $event->rules['web-doctor/recipes/<recipeId:[a-z][a-zA-Z0-9]*(?:\.[a-z][a-zA-Z0-9]*)+>/investigations/<investigationId:\d+>'] = 'web-doctor/investigations/recipe-detail';
         });
+    }
+
+    /**
+     * Craft's own signal that a queue job ran without an error, which is the only thing that tells
+     * a retried job that ran from one released by hand. It reads the cache only for a job a repair
+     * noted, and writes nothing otherwise.
+     */
+    private function registerQueueSignals(): void
+    {
+        Event::on(Queue::class, Queue::EVENT_AFTER_EXEC, [RetriedJobsSettled::class, 'recordRun']);
     }
 
     /**

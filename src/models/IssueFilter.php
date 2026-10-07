@@ -4,6 +4,7 @@ namespace Tahadudhiya\WebDoctor\models;
 
 use Tahadudhiya\WebDoctor\enums\IssueStatus;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\helpers\QueryParams;
 
 /**
  * What the Issue Center was asked to show.
@@ -73,38 +74,30 @@ final class IssueFilter
      */
     public static function fromParams(array $params): self
     {
-        $sort = self::choice($params, 'sort', array_keys(self::SORTABLE)) ?? 'lastDetected';
-        $site = self::present($params, 'siteId') ? $params['siteId'] : null;
-        $perPage = self::positive($params, 'perPage') ?? self::PER_PAGE;
+        $sort = QueryParams::choice($params, 'sort', array_keys(self::SORTABLE)) ?? 'lastDetected';
+        $site = QueryParams::present($params, 'siteId') ? $params['siteId'] : null;
+        $perPage = QueryParams::positive($params, 'perPage') ?? self::PER_PAGE;
 
         if ($perPage > self::MAX_PER_PAGE) {
             throw new \InvalidArgumentException('perPage');
         }
 
         return new self(
-            statuses: self::enums($params, 'status', IssueStatus::class),
-            severities: self::enums($params, 'severity', Severity::class),
-            diagnosticId: self::text($params, 'diagnostic', 100),
+            statuses: QueryParams::enums($params, 'status', IssueStatus::class),
+            severities: QueryParams::enums($params, 'severity', Severity::class),
+            diagnosticId: QueryParams::text($params, 'diagnostic', 100),
             // A run with no particular site produces issues with no site, and they have to be
             // reachable. An absent filter means "any site", so "no site" needs to be sayable.
-            siteId: $site === self::NO_SITE ? null : self::positive($params, 'siteId'),
+            siteId: $site === self::NO_SITE ? null : QueryParams::positive($params, 'siteId'),
             withoutSite: $site === self::NO_SITE,
-            environment: self::text($params, 'environment', 255),
-            detectedFrom: self::date($params, 'from'),
-            detectedTo: self::date($params, 'to'),
+            environment: QueryParams::text($params, 'environment', 255),
+            detectedFrom: QueryParams::date($params, 'from'),
+            detectedTo: QueryParams::date($params, 'to'),
             sort: $sort,
-            ascending: self::choice($params, 'dir', ['asc', 'desc']) === 'asc',
-            page: self::positive($params, 'page') ?? 1,
+            ascending: QueryParams::choice($params, 'dir', ['asc', 'desc']) === 'asc',
+            page: QueryParams::positive($params, 'page') ?? 1,
             perPage: $perPage,
         );
-    }
-
-    /**
-     * A whole number above zero, written as one: what a page or record ID can be.
-     */
-    public static function isPositiveNumber(mixed $value): bool
-    {
-        return (is_int($value) && $value > 0) || (is_string($value) && preg_match('/\A[1-9]\d{0,17}\z/', $value) === 1);
     }
 
     /**
@@ -267,127 +260,5 @@ final class IssueFilter
     public function hasSeverity(Severity $severity): bool
     {
         return in_array($severity, $this->severities, true);
-    }
-
-    /**
-     * Whether a parameter was sent with something in it. Empty is what a form sends for "any".
-     *
-     * @param array<string, mixed> $params
-     */
-    private static function present(array $params, string $name): bool
-    {
-        return isset($params[$name]) && $params[$name] !== '' && $params[$name] !== [];
-    }
-
-    /**
-     * The cases of a backed enum a parameter names, one or a list of them, each exactly.
-     *
-     * @template T of \BackedEnum
-     * @param array<string, mixed> $params
-     * @param class-string<T> $enum
-     * @return list<T>
-     */
-    private static function enums(array $params, string $name, string $enum): array
-    {
-        if (!self::present($params, $name)) {
-            return [];
-        }
-
-        $values = is_array($params[$name]) && array_is_list($params[$name]) ? $params[$name] : [$params[$name]];
-        $cases = [];
-
-        foreach ($values as $candidate) {
-            $case = is_string($candidate) ? $enum::tryFrom($candidate) : null;
-
-            if ($case === null) {
-                throw new \InvalidArgumentException($name);
-            }
-
-            if (!in_array($case, $cases, true)) {
-                $cases[] = $case;
-            }
-        }
-
-        return $cases;
-    }
-
-    /**
-     * One of a fixed set of words, exactly, or null when none was sent.
-     *
-     * @param array<string, mixed> $params
-     * @param list<string> $allowed
-     */
-    private static function choice(array $params, string $name, array $allowed): ?string
-    {
-        if (!self::present($params, $name)) {
-            return null;
-        }
-
-        if (!is_string($params[$name]) || !in_array($params[$name], $allowed, true)) {
-            throw new \InvalidArgumentException($name);
-        }
-
-        return $params[$name];
-    }
-
-    /**
-     * Text, trimmed, no longer than a column holds, or null when none was sent. Too long is
-     * refused rather than cut: cut, it would be asking for something else.
-     *
-     * @param array<string, mixed> $params
-     */
-    private static function text(array $params, string $name, int $maxLength): ?string
-    {
-        if (!self::present($params, $name)) {
-            return null;
-        }
-
-        $value = $params[$name];
-
-        if (!is_string($value) || mb_strlen(trim($value)) > $maxLength) {
-            throw new \InvalidArgumentException($name);
-        }
-
-        $value = trim($value);
-
-        return $value === '' ? null : $value;
-    }
-
-    /**
-     * @param array<string, mixed> $params
-     */
-    private static function positive(array $params, string $name): ?int
-    {
-        if (!self::present($params, $name)) {
-            return null;
-        }
-
-        if (!self::isPositiveNumber($params[$name])) {
-            throw new \InvalidArgumentException($name);
-        }
-
-        return (int)$params[$name];
-    }
-
-    /**
-     * A calendar date, exactly `Y-m-d`, or null when none was sent. Parsed rather than trusted:
-     * this ends up in a comparison against a datetime column.
-     *
-     * @param array<string, mixed> $params
-     */
-    private static function date(array $params, string $name): ?string
-    {
-        if (!self::present($params, $name)) {
-            return null;
-        }
-
-        $value = $params[$name];
-        $parsed = is_string($value) ? \DateTimeImmutable::createFromFormat('!Y-m-d', $value, new \DateTimeZone('UTC')) : false;
-
-        if ($parsed === false || $parsed->format('Y-m-d') !== $value) {
-            throw new \InvalidArgumentException($name);
-        }
-
-        return $value;
     }
 }

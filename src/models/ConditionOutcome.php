@@ -54,19 +54,33 @@ final class ConditionOutcome implements JsonSerializable
     }
 
     /**
+     * A stored outcome, or null where it cannot be read: a role this version does not have, or an
+     * observation that cannot be read. Never read with another role in its place — evidence kept
+     * against a cause must not come back as evidence for it, nor the other way round.
+     *
      * @param array<array-key, mixed> $stored
-     * @param ConditionRole $fallback The part it played, for a role this version does not have —
-     * taken from where it was stored, so something kept as evidence against a cause never reads
-     * back as evidence for it.
      */
-    public static function fromArray(array $stored, ConditionRole $fallback = ConditionRole::SUPPORTING): self
+    public static function fromArray(array $stored): ?self
     {
         $observations = [];
 
         foreach ((array)($stored['observations'] ?? []) as $item) {
-            if (is_array($item)) {
-                $observations[] = Observation::fromArray($item);
+            $observation = is_array($item) ? Observation::fromArray($item) : null;
+
+            // One observation that cannot be read leaves the condition unreadable, not smaller.
+            if ($observation === null) {
+                return null;
             }
+
+            $observations[] = $observation;
+        }
+
+        $role = ConditionRole::tryFrom(is_string($stored['role'] ?? null) ? $stored['role'] : '');
+
+        // A role this version does not have is not read as one it does: for and against are not
+        // interchangeable.
+        if ($role === null) {
+            return null;
         }
 
         // Anything that is not what it should be reads as empty rather than being cast: casting an
@@ -75,7 +89,7 @@ final class ConditionOutcome implements JsonSerializable
 
         return new self(
             id: $text($stored['id'] ?? null),
-            role: ConditionRole::tryFrom($text($stored['role'] ?? null)) ?? $fallback,
+            role: $role,
             description: $text($stored['description'] ?? null),
             observations: $observations,
             omitted: is_numeric($stored['omitted'] ?? null) ? max(0, (int)$stored['omitted']) : 0,

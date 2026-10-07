@@ -7,6 +7,7 @@ use Craft;
 use Tahadudhiya\WebDoctor\enums\DiagnosticStatus;
 use Tahadudhiya\WebDoctor\enums\EvidenceType;
 use Tahadudhiya\WebDoctor\enums\Severity;
+use Tahadudhiya\WebDoctor\errors\Refusal;
 use Tahadudhiya\WebDoctor\helpers\Redaction;
 
 /**
@@ -28,6 +29,9 @@ final class RecommendationCase
     /** @var list<RootCause> Most firmly held first. */
     public readonly array $causes;
 
+    /** @var bool Whether the evidence is all the check recorded, and all of it could be read. */
+    public readonly bool $evidenceComplete;
+
     /**
      * @param string $diagnosticId The check that reported it.
      * @param string $name The check's name, as a reader sees it.
@@ -37,7 +41,8 @@ final class RecommendationCase
      * @param iterable<RootCause> $causes The causes weighed for that issue.
      * @param bool $evidenceComplete Whether `$evidence` is all the check recorded. A finding rule
      * chooses by what the evidence holds, so choosing from part of it can give a lower-precedence
-     * rule's advice — or none — for a finding a rule does cover.
+     * rule's advice — or none — for a finding a rule does cover. Evidence read back that is not
+     * {@see Evidence::$readable} makes it incomplete too, whatever is passed.
      */
     public function __construct(
         public readonly string $diagnosticId,
@@ -48,11 +53,17 @@ final class RecommendationCase
         iterable $evidence = [],
         public readonly ?int $issueId = null,
         iterable $causes = [],
-        public readonly bool $evidenceComplete = true,
+        bool $evidenceComplete = true,
     ) {
         $this->name = Redaction::redactString($name !== '' ? $name : $diagnosticId);
         $this->problem = Redaction::redactString($problem);
         $this->evidence = array_values([...$evidence]);
+
+        foreach ($this->evidence as $piece) {
+            $evidenceComplete = $evidenceComplete && $piece->readable;
+        }
+
+        $this->evidenceComplete = $evidenceComplete;
 
         $causes = array_values([...$causes]);
         usort($causes, static fn(RootCause $a, RootCause $b): int => [$a->position, $a->ruleId] <=> [$b->position, $b->ruleId]);
@@ -82,6 +93,11 @@ final class RecommendationCase
      */
     public static function fromIssue(Issue $issue, iterable $evidence, iterable $causes = []): self
     {
+        // A finding whose status or severity cannot be read is not one to advise or act on.
+        if ($issue->resultStatus === null || $issue->severity === null) {
+            throw new Refusal((string)$issue->integrityRefusal());
+        }
+
         return new self(
             diagnosticId: $issue->diagnosticId,
             name: $issue->diagnosticName,
@@ -102,7 +118,9 @@ final class RecommendationCase
      */
     public static function fromStep(InvestigationStep $step, iterable $causes = []): ?self
     {
-        if ($step->diagnosticId === null || $step->status === null) {
+        // A finding whose status or severity cannot be read is not one to advise on: nothing stands
+        // in for what was recorded.
+        if ($step->diagnosticId === null || $step->status === null || $step->isUnreadable('severity')) {
             return null;
         }
 
@@ -117,7 +135,7 @@ final class RecommendationCase
             causes: $causes,
             // An investigation keeps a bounded amount of evidence across all its checks, so a
             // step can hold less than its check recorded.
-            evidenceComplete: !$step->evidenceTruncated,
+            evidenceComplete: !$step->evidenceTruncated && !$step->isUnreadable('evidence'),
         );
     }
 
